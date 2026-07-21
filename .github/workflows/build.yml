@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V4.1
+name: Build TrollMusicApp V5.0
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp
 
-      - name: Write Main App Code
+      - name: Write Main App Code (Reverted to V1 Audio Fix!)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
@@ -24,14 +24,22 @@ jobs:
           @main
           struct TrollMusicAppApp: App {
               init() {
-                  do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
-                      try AVAudioSession.sharedInstance().setActive(true)
-                  } catch { print("Audio Init Error") }
+                  // Exactly the code from V1 that worked perfectly!
+                  setupAudioSession()
               }
+              
               var body: some Scene {
                   WindowGroup {
                       MainTabView().environmentObject(MusicManager.shared)
+                  }
+              }
+              
+              func setupAudioSession() {
+                  do {
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                      try AVAudioSession.sharedInstance().setActive(true)
+                  } catch {
+                      print("Failed to set audio session category. Error: \(error)")
                   }
               }
           }
@@ -58,9 +66,10 @@ jobs:
               
               override init() {
                   super.init()
-                  loadSongs()
-                  loadPlaylists()
-                  setupRemoteCommandCenter()
+                  loadSongs(); loadPlaylists(); setupRemoteCommandCenter()
+                  
+                  // Listen for shared files from other apps
+                  NotificationCenter.default.addObserver(self, selector: #selector(handleIncomingSharedFile), name: UIApplication.willEnterForegroundNotification, object: nil)
               }
               
               func loadSongs() {
@@ -69,6 +78,14 @@ jobs:
                       let audioFiles = files.filter { ["mp3", "m4a", "wav"].contains($0.pathExtension.lowercased()) }
                       songs = audioFiles.map { url in Song(id: UUID(), title: url.deletingPathExtension().lastPathComponent, url: url) }.sorted { $0.title < $1.title }
                   } catch {}
+              }
+              
+              @objc func handleIncomingSharedFile() {
+                  // This forces the library to refresh when you return to the app,
+                  // catching any new audio extracted from videos via the Share Extension!
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                      self.loadSongs()
+                  }
               }
               
               func deleteSong(_ song: Song) {
@@ -97,10 +114,6 @@ jobs:
               
               func playSong(_ song: Song) {
                   do {
-                      // CRITICAL: Force audio session active before every play
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-                      try AVAudioSession.sharedInstance().setActive(true)
-                      
                       audioPlayer = try AVAudioPlayer(contentsOf: song.url)
                       audioPlayer?.delegate = self
                       audioPlayer?.play()
@@ -156,6 +169,78 @@ jobs:
 
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
+          EOF
+
+      - name: Write Video Audio Extractor Extension Code
+        run: |
+          mkdir -p TrollMusicApp/ShareExtension
+          cat << 'EOF' > TrollMusicApp/ShareExtension/ShareViewController.swift
+          import UIKit
+          import Social
+          import AVFoundation
+          import MobileCoreServices
+
+          class ShareViewController: SLComposeServiceViewController {
+              override func isContentValid() -> Bool { return true }
+              
+              override func didSelectPost() {
+                  guard let extensionItems = extensionContext?.inputItems as? [NSExtensionItem] else {
+                      self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+                      return
+                  }
+                  
+                  for item in extensionItems {
+                      guard let attachments = item.attachments else { continue }
+                      for provider in attachments {
+                          // Look for Video files (Movies) shared to the app
+                          if provider.hasItemConformingToTypeIdentifier(kUTTypeMovie as String) {
+                              provider.loadItem(forTypeIdentifier: kUTTypeMovie as String, options: nil) { (item, error) in
+                                  if let url = item as? URL {
+                                      self.extractAudio(from: url)
+                                  }
+                              }
+                          } 
+                          // Look for pure Audio files shared to the app
+                          else if provider.hasItemConformingToTypeIdentifier(kUTTypeAudio as String) {
+                              provider.loadItem(forTypeIdentifier: kUTTypeAudio as String, options: nil) { (item, error) in
+                                  if let url = item as? URL {
+                                      self.saveDirectAudio(from: url)
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  
+                  self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+              }
+              
+              func saveDirectAudio(from sourceURL: URL) {
+                  let fm = FileManager.default
+                  // Save to the main app's document directory via App Group
+                  if let sharedContainer = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic") {
+                      let destURL = sharedContainer.appendingPathComponent(sourceURL.lastPathComponent)
+                      try? fm.copyItem(at: sourceURL, to: destURL)
+                  }
+              }
+              
+              func extractAudio(from videoURL: URL) {
+                  let asset = AVAsset(url: videoURL)
+                  let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A)
+                  
+                  let fm = FileManager.default
+                  if let sharedContainer = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic") {
+                      let outputURL = sharedContainer.appendingPathComponent("ExtractedAudio_\(UUID().uuidString.prefix(4)).m4a")
+                      
+                      exportSession?.outputURL = outputURL
+                      exportSession?.outputFileType = .m4a
+                      exportSession?.exportAsynchronously {
+                          print("Export Complete")
+                      }
+                  }
+              }
+              
+              override func configurationItems() -> [Any]! { return [] }
+          }
           EOF
 
       - name: Write Web Browser Logic
@@ -234,12 +319,15 @@ jobs:
                   let finalName = name.isEmpty ? "CapturedAudio_\(UUID().uuidString.prefix(4))" : name
                   let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
                       guard let localUrl = localUrl else { return }
+                      
                       let fm = FileManager.default
-                      let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("\(finalName).mp3")
-                      try? fm.moveItem(at: localUrl, to: dest)
-                      DispatchQueue.main.async { 
-                          self.downloadFileName = dest.lastPathComponent
-                          self.showDownloadAlert = true 
+                      // Save to Shared Container so both extension and app can see it
+                      if let destPath = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic")?.appendingPathComponent("\(finalName).mp3") {
+                          try? fm.moveItem(at: localUrl, to: destPath)
+                          DispatchQueue.main.async { 
+                              self.downloadFileName = destPath.lastPathComponent
+                              self.showDownloadAlert = true 
+                          }
                       }
                   }
                   task.resume()
@@ -258,7 +346,6 @@ jobs:
               }
               
               func updateUIView(_ uiView: WKWebView, context: Context) {
-                  // Ensure current delegate is set when view updates
                   uiView.navigationDelegate = context.coordinator
                   uiView.uiDelegate = context.coordinator
               }
@@ -289,11 +376,12 @@ jobs:
                               let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
                                   guard let localUrl = localUrl else { return }
                                   let fm = FileManager.default
-                                  let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent)
-                                  try? fm.moveItem(at: localUrl, to: dest)
-                                  DispatchQueue.main.async { 
-                                      self.parent.viewModel.downloadFileName = dest.lastPathComponent
-                                      self.parent.viewModel.showDownloadAlert = true 
+                                  if let destPath = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic")?.appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent) {
+                                      try? fm.moveItem(at: localUrl, to: destPath)
+                                      DispatchQueue.main.async { 
+                                          self.parent.viewModel.downloadFileName = destPath.lastPathComponent
+                                          self.parent.viewModel.showDownloadAlert = true 
+                                      }
                                   }
                               }
                               task.resume()
@@ -557,8 +645,9 @@ jobs:
           }
           EOF
 
-      - name: Write Plist & Entitlements
+      - name: Write Plists & Xcode Project Generation
         run: |
+          # Main App Info.plist
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -567,11 +656,38 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key><string>4.1</string>
-              <key>CFBundleVersion</key><string>6</string>
+              <key>CFBundleShortVersionString</key><string>5.0</string>
+              <key>CFBundleVersion</key><string>10</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
+          </dict>
+          </plist>
+          EOF
+          
+          # Share Extension Info.plist
+          cat << 'EOF' > TrollMusicApp/ShareExtension/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>ShareExtension</string>
+              <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic.ShareExtension</string>
+              <key>CFBundleName</key><string>Extract Audio</string>
+              <key>CFBundleShortVersionString</key><string>1.0</string>
+              <key>CFBundleVersion</key><string>1</string>
+              <key>NSExtension</key>
+              <dict>
+                  <key>NSExtensionAttributes</key>
+                  <dict>
+                      <key>NSExtensionActivationRule</key>
+                      <string>SUBQUERY (extensionItems, $extensionItem, SUBQUERY ($extensionItem.attachments, $attachment, ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.movie" OR ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.audio").@count == 1).@count == 1</string>
+                  </dict>
+                  <key>NSExtensionPointIdentifier</key>
+                  <string>com.apple.share-services</string>
+                  <key>NSExtensionPrincipalClass</key>
+                  <string>ShareExtension.ShareViewController</string>
+              </dict>
           </dict>
           </plist>
           EOF
@@ -582,8 +698,11 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>com.apple.security.background.audio</key>
-              <true/>
+              <key>com.apple.security.background.audio</key><true/>
+              <key>com.apple.security.application-groups</key>
+              <array>
+                  <string>group.com.ahmedsoliman.trollmusic</string>
+              </array>
           </dict>
           </plist>
           EOF
@@ -607,6 +726,18 @@ jobs:
                 CODE_SIGNING_REQUIRED: "NO"
                 CODE_SIGN_IDENTITY: ""
                 CODE_SIGN_ENTITLEMENTS: TrollMusicApp.entitlements
+            ShareExtension:
+              type: app-extension
+              platform: iOS
+              deploymentTarget: "16.0"
+              sources: [ShareExtension]
+              info:
+                path: ShareExtension/Info.plist
+              settings:
+                CODE_SIGNING_ALLOWED: "NO"
+                CODE_SIGNING_REQUIRED: "NO"
+                CODE_SIGN_IDENTITY: ""
+                CODE_SIGN_ENTITLEMENTS: TrollMusicApp.entitlements
           EOF
           xcodegen generate
 
@@ -621,5 +752,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-Ultimate-V4
+          name: TrollMusicApp-Ahmed-Ultimate-V5
           path: TrollMusicApp/TrollMusicApp.ipa
