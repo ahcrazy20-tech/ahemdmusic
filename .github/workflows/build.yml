@@ -46,19 +46,23 @@ jobs:
           import MediaPlayer
           import Combine
 
-          class MusicManager: ObservableObject {
+          class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
               static let shared = MusicManager()
               @Published var songs: [Song] = []
               @Published var playlists: [Playlist] = []
               @Published var currentSong: Song?
               @Published var isPlaying: Bool = false
+              @Published var isShuffle: Bool = false
               var audioPlayer: AVAudioPlayer?
               
               let fileManager = FileManager.default
               var documentsDirectory: URL { fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0] }
               
-              init() {
-                  loadSongs(); loadPlaylists(); setupRemoteCommandCenter()
+              override init() {
+                  super.init()
+                  loadSongs()
+                  loadPlaylists()
+                  setupRemoteCommandCenter()
               }
               
               func loadSongs() {
@@ -96,6 +100,7 @@ jobs:
               func playSong(_ song: Song) {
                   do {
                       audioPlayer = try AVAudioPlayer(contentsOf: song.url)
+                      audioPlayer?.delegate = self
                       audioPlayer?.play()
                       currentSong = song
                       isPlaying = true
@@ -109,10 +114,38 @@ jobs:
                   updateNowPlayingInfo()
               }
               
+              func playNext() {
+                  guard !songs.isEmpty else { return }
+                  if isShuffle {
+                      playSong(songs.randomElement()!)
+                  } else {
+                      guard let current = currentSong, let index = songs.firstIndex(of: current) else { return }
+                      let nextIndex = (index + 1) % songs.count
+                      playSong(songs[nextIndex])
+                  }
+              }
+              
+              func playPrevious() {
+                  guard !songs.isEmpty else { return }
+                  if isShuffle {
+                      playSong(songs.randomElement()!)
+                  } else {
+                      guard let current = currentSong, let index = songs.firstIndex(of: current) else { return }
+                      let prevIndex = (index - 1 + songs.count) % songs.count
+                      playSong(songs[prevIndex])
+                  }
+              }
+              
+              func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+                  playNext()
+              }
+              
               func setupRemoteCommandCenter() {
                   let commandCenter = MPRemoteCommandCenter.shared()
                   commandCenter.playCommand.addTarget { [unowned self] _ in self.isPlaying ? .commandFailed : { self.togglePlayPause(); return .success }() }
                   commandCenter.pauseCommand.addTarget { [unowned self] _ in !self.isPlaying ? .commandFailed : { self.togglePlayPause(); return .success }() }
+                  commandCenter.nextTrackCommand.addTarget { [unowned self] _ in self.playNext(); return .success }
+                  commandCenter.previousTrackCommand.addTarget { [unowned self] _ in self.playPrevious(); return .success }
               }
               
               func updateNowPlayingInfo() {
@@ -134,6 +167,8 @@ jobs:
           class WebViewModel: ObservableObject {
               @Published var canGoBack: Bool = false
               @Published var canGoForward: Bool = false
+              @Published var showDownloadAlert: Bool = false
+              @Published var downloadFileName: String = ""
               var webView: WKWebView = WKWebView()
               
               func goBack() { webView.goBack() }
@@ -144,12 +179,29 @@ jobs:
                   if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr }
                   if let url = URL(string: finalStr) { webView.load(URLRequest(url: url)) }
               }
+              
+              func grabAudio() {
+                  webView.evaluateJavaScript("document.querySelector('audio')?.src || document.querySelector('video')?.src") { result, error in
+                      if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) {
+                          let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
+                              guard let localUrl = localUrl else { return }
+                              let fm = FileManager.default
+                              let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("CapturedAudio_\(UUID().uuidString.prefix(4)).mp3")
+                              try? fm.moveItem(at: localUrl, to: dest)
+                              DispatchQueue.main.async { 
+                                  self.downloadFileName = dest.lastPathComponent
+                                  self.showDownloadAlert = true 
+                              }
+                          }
+                          task.resume()
+                      }
+                  }
+              }
           }
 
           struct WebViewUI: UIViewRepresentable {
               @ObservedObject var viewModel: WebViewModel
               @Binding var urlString: String
-              var didDetectDownload: (URL) -> Void
               
               func makeUIView(context: Context) -> WKWebView {
                   let prefs = WKWebpagePreferences()
@@ -188,7 +240,17 @@ jobs:
                   func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
                       if let url = navigationAction.request.url {
                           if ["mp3", "m4a"].contains(url.pathExtension.lowercased()) {
-                              parent.downloadFile(url: url)
+                              let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
+                                  guard let localUrl = localUrl else { return }
+                                  let fm = FileManager.default
+                                  let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent)
+                                  try? fm.moveItem(at: localUrl, to: dest)
+                                  DispatchQueue.main.async { 
+                                      self.parent.viewModel.downloadFileName = dest.lastPathComponent
+                                      self.parent.viewModel.showDownloadAlert = true 
+                                  }
+                              }
+                              task.resume()
                               decisionHandler(.cancel)
                               return
                           }
@@ -196,21 +258,10 @@ jobs:
                       decisionHandler(.allow)
                   }
               }
-              
-              func downloadFile(url: URL) {
-                  let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
-                      guard let localUrl = localUrl else { return }
-                      let fm = FileManager.default
-                      let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent)
-                      try? fm.moveItem(at: localUrl, to: dest)
-                      DispatchQueue.main.async { self.didDetectDownload(dest) }
-                  }
-                  task.resume()
-              }
           }
           EOF
 
-      - name: Write UI Views Code (Modernized)
+      - name: Write UI Views Code
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
@@ -298,12 +349,24 @@ jobs:
                               Text("Downloaded from Web").font(.subheadline).foregroundColor(.white.opacity(0.6))
                           }
                           
-                          HStack(spacing: 50) {
+                          HStack(spacing: 30) {
+                              Button(action: { musicManager.isShuffle.toggle() }) {
+                                  Image(systemName: "shuffle").font(.title2).foregroundColor(musicManager.isShuffle ? .purple : .white.opacity(0.5))
+                              }
+                              Button(action: { musicManager.playPrevious() }) {
+                                  Image(systemName: "backward.fill").font(.title).foregroundColor(.white)
+                              }
                               Button(action: { musicManager.togglePlayPause() }) {
                                   ZStack {
                                       Circle().fill(Color.white).frame(width: 80, height: 80)
                                       Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").resizable().aspectRatio(contentMode: .fit).frame(width: 30, height: 30).foregroundColor(.black)
                                   }
+                              }
+                              Button(action: { musicManager.playNext() }) {
+                                  Image(systemName: "forward.fill").font(.title).foregroundColor(.white)
+                              }
+                              Button(action: { }) {
+                                  Image(systemName: "repeat").font(.title2).foregroundColor(.white.opacity(0.5))
                               }
                           }.padding(.top, 20)
                           Spacer()
@@ -348,6 +411,17 @@ jobs:
               }
           }
 
+          struct PlaylistDetailView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              var playlist: Playlist
+              var songsInPlaylist: [Song] { musicManager.songs.filter { playlist.songIDs.contains($0.id) } }
+              var body: some View {
+                  List {
+                      ForEach(songsInPlaylist) { song in Text(song.title).onTapGesture { musicManager.playSong(song) } }
+                  }.navigationTitle(playlist.name)
+              }
+          }
+
           struct PlaylistsView: View {
               @EnvironmentObject var musicManager: MusicManager
               @State private var showingNewPlaylist = false
@@ -355,7 +429,9 @@ jobs:
               var body: some View {
                   NavigationView {
                       List {
-                          ForEach(musicManager.playlists) { playlist in Text(playlist.name).font(.headline) }
+                          ForEach(musicManager.playlists) { playlist in 
+                              NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline) }
+                          }
                       }
                       .navigationTitle("Playlists")
                       .toolbar { Button(action: { showingNewPlaylist = true }) { Image(systemName: "plus") } }
@@ -372,8 +448,6 @@ jobs:
               @EnvironmentObject var musicManager: MusicManager
               @StateObject var webViewModel = WebViewModel()
               @State private var urlString = "https://google.com"
-              @State private var showDownloadAlert = false
-              @State private var downloadFileName = ""
               
               var body: some View {
                   VStack(spacing: 0) {
@@ -390,32 +464,14 @@ jobs:
                           }.padding(.horizontal).padding(.bottom, 8)
                       }.background(Color(UIColor.secondarySystemBackground))
                       
-                      WebViewUI(viewModel: webViewModel, urlString: $urlString, didDetectDownload: { fileUrl in
-                          self.downloadFileName = fileUrl.lastPathComponent
-                          self.showDownloadAlert = true
-                      })
+                      WebViewUI(viewModel: webViewModel, urlString: $urlString)
                       
                       HStack {
                           Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack)
                           Spacer()
                           Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward)
                           Spacer()
-                          Button(action: { 
-                              webViewModel.webView.evaluateJavaScript("document.querySelector('audio')?.src || document.querySelector('video')?.src") { result, error in
-                                  if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) {
-                                      let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
-                                          guard let localUrl = localUrl else { return }
-                                          let dest = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("CapturedAudio_\(UUID().uuidString.prefix(4)).mp3")
-                                          try? FileManager.default.moveItem(at: localUrl, to: dest)
-                                          DispatchQueue.main.async { 
-                                              self.downloadFileName = dest.lastPathComponent
-                                              self.showDownloadAlert = true 
-                                          }
-                                      }
-                                      task.resume()
-                                  }
-                              }
-                          }) { 
+                          Button(action: { webViewModel.grabAudio() }) { 
                               HStack {
                                   Image(systemName: "arrow.down.circle.fill")
                                   Text("Grab Audio")
@@ -425,10 +481,10 @@ jobs:
                           Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
                       }.padding().background(Color(UIColor.secondarySystemBackground))
                   }
-                  .alert("Download Complete", isPresented: $showDownloadAlert) {
+                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) {
                       Button("OK", role: .cancel) { musicManager.loadSongs() }
                   } message: {
-                      Text("Saved \(downloadFileName)")
+                      Text("Saved \(webViewModel.downloadFileName)")
                   }
               }
           }
@@ -485,5 +541,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-V2.1
+          name: TrollMusicApp-Ahmed-Ultimate
           path: TrollMusicApp/TrollMusicApp.ipa
