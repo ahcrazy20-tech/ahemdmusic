@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V15.0
+name: Build TrollMusicApp V15.1
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp
 
-      - name: Write Main App Code 
+      - name: Write Main App Code (Deep Background Fix)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
@@ -43,7 +43,7 @@ jobs:
           }
           EOF
 
-      - name: Write Music Manager Code
+      - name: Write Music Manager Code (Dual-Engine Background Fix!)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/MusicManager.swift
           import Foundation
@@ -54,7 +54,7 @@ jobs:
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
 
-          class MusicManager: NSObject, ObservableObject {
+          class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
               static let shared = MusicManager()
               @Published var songs: [Song] = []
               @Published var playlists: [Playlist] = []
@@ -63,8 +63,9 @@ jobs:
               @Published var isShuffle: Bool = false
               @Published var sleepTimerMinutes: Int = 0
               
-              var player: AVPlayer?
-              var timeObserverToken: Any?
+              var audioPlayer: AVAudioPlayer?
+              var avPlayer: AVPlayer?
+              var useAVPlayer = false
               var sleepTimer: Timer?
               
               let fileManager = FileManager.default
@@ -72,15 +73,17 @@ jobs:
               
               override init() {
                   super.init()
-                  loadSongs(); loadPlaylists(); setupRemoteCommandCenter()
+                  loadSongs()
+                  loadPlaylists()
+                  setupRemoteCommandCenter()
               }
               
               func loadSongs() {
                   do {
                       let files = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
-                      let audioFiles = files.filter { ["mp3", "m4a", "wav", "webm", "mp4"].contains($0.pathExtension.lowercased()) }
+                      let audioFiles = files.filter { ["mp3", "m4a", "wav"].contains($0.pathExtension.lowercased()) }
                       
-                      // FIX FOR LOCK SCREEN CRASH: Strip file protection from all songs so they can be read while locked!
+                      // CRITICAL LOCK SCREEN FIX
                       for file in audioFiles {
                           try? fileManager.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: file.path)
                       }
@@ -116,34 +119,53 @@ jobs:
                   if playlists.isEmpty || playlists[0].name != "Liked Songs" { playlists.insert(Playlist(id: UUID(), name: "Liked Songs", songIDs: []), at: 0); savePlaylists() }
               }
               
+              func setSleepTimer(minutes: Int) {
+                  sleepTimerMinutes = minutes; sleepTimer?.invalidate()
+                  if minutes > 0 {
+                      sleepTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { _ in
+                          DispatchQueue.main.async {
+                              if self.useAVPlayer { self.avPlayer?.pause() } else { self.audioPlayer?.pause() }
+                              self.isPlaying = false; self.sleepTimerMinutes = 0
+                          }
+                      }
+                  }
+              }
+              
               func playSong(_ song: Song) {
                   do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
                       try AVAudioSession.sharedInstance().setActive(true)
+                      UIApplication.shared.beginReceivingRemoteControlEvents()
                       
-                      player?.pause()
+                      audioPlayer?.stop()
+                      avPlayer?.pause()
                       NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
                       
-                      let playerItem = AVPlayerItem(url: song.url)
-                      player = AVPlayer(playerItem: playerItem)
-                      
-                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                          self.player?.play()
-                          self.currentSong = song
-                          self.isPlaying = true
-                          self.updateNowPlayingInfo()
+                      do {
+                          audioPlayer = try AVAudioPlayer(contentsOf: song.url)
+                          audioPlayer?.delegate = self
+                          audioPlayer?.prepareToPlay()
+                          audioPlayer?.play()
+                          useAVPlayer = false
+                      } catch {
+                          let playerItem = AVPlayerItem(url: song.url)
+                          avPlayer = AVPlayer(playerItem: playerItem)
+                          avPlayer?.play()
+                          useAVPlayer = true
+                          NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: .AVPlayerItemDidPlayToEndTime, object: playerItem)
                       }
                       
-                      NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: .AVPlayerItemDidPlayToEndTime, object: playerItem)
+                      currentSong = song; isPlaying = true; updateNowPlayingInfo()
                   } catch {}
               }
               
               @objc func songFinished() { DispatchQueue.main.async { self.playNext() } }
+              func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { DispatchQueue.main.async { self.playNext() } }
               
               func togglePlayPause() {
-                  if isPlaying { player?.pause() } else { player?.play() }
-                  isPlaying.toggle()
-                  updateNowPlayingInfo()
+                  if useAVPlayer { if isPlaying { avPlayer?.pause() } else { avPlayer?.play() } } 
+                  else { if isPlaying { audioPlayer?.pause() } else { audioPlayer?.play() } }
+                  isPlaying.toggle(); updateNowPlayingInfo()
               }
               
               func playNext() {
@@ -168,7 +190,23 @@ jobs:
               
               func updateNowPlayingInfo() {
                   guard let currentSong = currentSong else { return }
-                  MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: currentSong.title, MPMediaItemPropertyArtist: "Ahmed's Music"]
+                  var info = [String: Any]()
+                  info[MPMediaItemPropertyTitle] = currentSong.title
+                  info[MPMediaItemPropertyArtist] = "Ahmed's Music"
+                  info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+                  
+                  if useAVPlayer {
+                      if let duration = avPlayer?.currentItem?.asset.duration.seconds, !duration.isNaN {
+                          info[MPMediaItemPropertyPlaybackDuration] = duration
+                          info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = avPlayer?.currentTime().seconds
+                      }
+                  } else {
+                      if let duration = audioPlayer?.duration {
+                          info[MPMediaItemPropertyPlaybackDuration] = duration
+                          info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = audioPlayer?.currentTime
+                      }
+                  }
+                  MPNowPlayingInfoCenter.default().nowPlayingInfo = info
               }
           }
           EOF
@@ -249,7 +287,7 @@ jobs:
                       guard let localUrl = localUrl else { return }
                       try? FileManager.default.moveItem(at: localUrl, to: destPath)
                       
-                      // LOCK SCREEN FIX
+                      // LOCK SCREEN FIX!
                       try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
                       
                       DispatchQueue.main.async { 
@@ -388,7 +426,7 @@ jobs:
                       completionHandler(destPath)
                   }
                   func downloadDidFinish(_ download: WKDownload) { 
-                      // LOCK SCREEN FIX
+                      // LOCK SCREEN FIX!
                       let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                       let destPath = destDir.appendingPathComponent(parent.downloadFileName)
                       try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
@@ -414,7 +452,6 @@ jobs:
                           HStack {
                               Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack); Spacer()
                               Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward); Spacer()
-                              Button(action: { webViewModel.grabAudio() }) { Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple) }; Spacer()
                               Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text("\(webViewModel.tabs.count)").font(.caption).bold() } }; Spacer()
                               Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
                           }.padding().background(Color(uiColor: .secondarySystemBackground))
@@ -429,7 +466,7 @@ jobs:
                   }
                   .alert("Name Your Song", isPresented: $webViewModel.showNamePrompt) { TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { } }
                   .alert("Cannot Download", isPresented: $webViewModel.showBlobError) { Button("OK", role: .cancel) { } } message: { Text("Try using the Smart DL tab instead!") }
-                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { MusicManager.shared.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
+                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
               }
           }
 
@@ -452,11 +489,12 @@ jobs:
           struct FullPlayerView: View {
               @EnvironmentObject var musicManager: MusicManager
               @Environment(\.dismiss) var dismiss
+              @State private var showTimerOptions = false
               var body: some View {
                   ZStack {
                       LinearGradient(gradient: Gradient(colors: [generateColor(for: musicManager.currentSong?.title ?? "Unknown"), Color.black]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
                       VStack(spacing: 40) {
-                          HStack { Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }; Spacer(); VStack(spacing: 2) { if let song = musicManager.currentSong, musicManager.isFavorite(song: song) { Text("FROM LIKED SONGS").font(.caption).bold().foregroundColor(.white.opacity(0.6)) } else { Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6)) }; Text("Ahmed's Music").font(.subheadline).bold().foregroundColor(.white) }; Spacer(); Button(action: {}) { Image(systemName: "ellipsis").foregroundColor(.clear) } }.padding()
+                          HStack { Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }; Spacer(); VStack(spacing: 2) { if let song = musicManager.currentSong, musicManager.isFavorite(song: song) { Text("FROM LIKED SONGS").font(.caption).bold().foregroundColor(.white.opacity(0.6)) } else { Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6)) }; Text("Ahmed's Music").font(.subheadline).bold().foregroundColor(.white) }; Spacer(); Button(action: { showTimerOptions = true }) { Image(systemName: "moon.fill").foregroundColor(musicManager.sleepTimerMinutes > 0 ? .purple : .white) } }.padding()
                           ZStack { RoundedRectangle(cornerRadius: 15).fill(generateColor(for: musicManager.currentSong?.title ?? "")).frame(width: 320, height: 320).shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 15); Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit).frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8)) }.padding(.top, 10)
                           HStack { VStack(alignment: .leading, spacing: 8) { Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 26, weight: .bold)).foregroundColor(.white).lineLimit(2); Text("Downloaded Track").font(.subheadline).foregroundColor(.white.opacity(0.6)) }; Spacer(); if let song = musicManager.currentSong { Button(action: { musicManager.toggleFavorite(song: song) }) { Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart").font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white) } } }.padding(.horizontal, 30)
                           HStack(spacing: 40) {
@@ -468,6 +506,7 @@ jobs:
                           }.padding(.top, 20); Spacer()
                       }
                   }
+                  .actionSheet(isPresented: $showTimerOptions) { ActionSheet(title: Text("Sleep Timer"), buttons: [ .default(Text("15 Minutes")) { musicManager.setSleepTimer(minutes: 15) }, .default(Text("30 Minutes")) { musicManager.setSleepTimer(minutes: 30) }, .default(Text("60 Minutes")) { musicManager.setSleepTimer(minutes: 60) }, .destructive(Text("Turn Off Timer")) { musicManager.setSleepTimer(minutes: 0) }, .cancel() ]) }
               }
           }
 
@@ -521,7 +560,7 @@ jobs:
           }
           EOF
 
-      - name: Write Plist & Force Background Modes
+      - name: Write Plists & Xcode Configuration (Syntax Fixed!)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
@@ -531,8 +570,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key><string>15.0</string>
-              <key>CFBundleVersion</key><string>22</string>
+              <key>CFBundleShortVersionString</key><string>15.1</string>
+              <key>CFBundleVersion</key><string>23</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
@@ -540,7 +579,6 @@ jobs:
           </plist>
           EOF
           
-          # HARDCODING THE BACKGROUND MODE INTO THE XCODEGEN CONFIGURATION
           cd TrollMusicApp
           brew install xcodegen
           cat << 'EOF' > project.yml
@@ -554,6 +592,7 @@ jobs:
               deploymentTarget: "16.0"
               sources: [TrollMusicApp]
               info:
+                path: TrollMusicApp/Info.plist
                 properties:
                   UIBackgroundModes: [audio]
                   NSAppTransportSecurity:
@@ -576,5 +615,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-Ultimate-V15
+          name: TrollMusicApp-Ahmed-Ultimate-V15.1
           path: TrollMusicApp/TrollMusicApp.ipa
