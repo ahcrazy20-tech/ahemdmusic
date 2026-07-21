@@ -44,7 +44,6 @@ jobs:
           import Foundation
           import AVFoundation
           import MediaPlayer
-          import Combine
 
           class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
               static let shared = MusicManager()
@@ -109,7 +108,11 @@ jobs:
               }
               
               func togglePlayPause() {
-                  isPlaying ? audioPlayer?.pause() : audioPlayer?.play()
+                  if isPlaying {
+                      audioPlayer?.pause()
+                  } else {
+                      audioPlayer?.play()
+                  }
                   isPlaying.toggle()
                   updateNowPlayingInfo()
               }
@@ -185,7 +188,15 @@ jobs:
               @Published var canGoForward: Bool = false
               @Published var showDownloadAlert: Bool = false
               @Published var downloadFileName: String = ""
-              var webView: WKWebView = WKWebView()
+              
+              var webView: WKWebView = {
+                  let prefs = WKWebpagePreferences()
+                  prefs.allowsContentJavaScript = true
+                  let config = WKWebViewConfiguration()
+                  config.defaultWebpagePreferences = prefs
+                  config.allowsInlineMediaPlayback = true
+                  return WKWebView(frame: .zero, configuration: config)
+              }()
               
               func goBack() { webView.goBack() }
               func goForward() { webView.goForward() }
@@ -220,17 +231,9 @@ jobs:
               @Binding var urlString: String
               
               func makeUIView(context: Context) -> WKWebView {
-                  let prefs = WKWebpagePreferences()
-                  prefs.allowsContentJavaScript = true
-                  let config = WKWebViewConfiguration()
-                  config.defaultWebpagePreferences = prefs
-                  config.allowsInlineMediaPlayback = true
-                  
                   let webView = viewModel.webView
-                  webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
                   webView.navigationDelegate = context.coordinator
                   webView.uiDelegate = context.coordinator
-                  
                   if let url = URL(string: "https://google.com") { webView.load(URLRequest(url: url)) }
                   return webView
               }
@@ -410,18 +413,12 @@ jobs:
                       }
                       .navigationTitle("Ahmed's Library")
                       .onAppear { musicManager.loadSongs() }
-                      .confirmationDialog("Options", isPresented: Binding(
-                          get: { showingOptionsFor != nil },
-                          set: { if !$0 { showingOptionsFor = nil } }
-                      ), titleVisibility: .visible) {
-                          if let song = showingOptionsFor {
-                              ForEach(musicManager.playlists) { playlist in
-                                  Button("Add to \(playlist.name)") {
-                                      musicManager.addSongToPlaylist(song: song, playlist: playlist)
-                                  }
-                              }
+                      .actionSheet(item: $showingOptionsFor) { song in
+                          var buttons: [ActionSheet.Button] = musicManager.playlists.map { playlist in
+                              .default(Text("Add to \(playlist.name)")) { musicManager.addSongToPlaylist(song: song, playlist: playlist) }
                           }
-                          Button("Cancel", role: .cancel) {}
+                          buttons.append(.cancel())
+                          return ActionSheet(title: Text("Options"), buttons: buttons)
                       }
                   }
               }
