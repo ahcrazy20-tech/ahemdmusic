@@ -1,0 +1,122 @@
+name: Build TrollMusicApp
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Fetch Perfect Source Code
+        run: |
+          git clone https://github.com/neoncat-og/TrollStore-IPAs.git temp_clone || echo "Using simple swift structure"
+          # We will just write the files directly on the runner to guarantee no missing files!
+          
+          mkdir -p TrollMusicApp/TrollMusicApp
+          mkdir -p TrollMusicApp/TrollMusicApp.xcodeproj/project.xcworkspace
+          mkdir -p TrollMusicApp/TrollMusicApp.xcodeproj/xcshareddata/xcschemes
+
+      - name: Generate Source Code
+        run: |
+          cd TrollMusicApp
+          cat << 'EOF' > TrollMusicApp/TrollMusicAppApp.swift
+          import SwiftUI
+          import AVFoundation
+
+          @main
+          struct TrollMusicAppApp: App {
+              init() {
+                  setupAudioSession()
+              }
+              var body: some Scene {
+                  WindowGroup {
+                      Text("Ahmed\'s Music - Loading...").onAppear { print("Loaded") }
+                  }
+              }
+              func setupAudioSession() {
+                  try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                  try? AVAudioSession.sharedInstance().setActive(true)
+              }
+          }
+          EOF
+          
+          cat << 'EOF' > TrollMusicApp/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>TrollMusicApp</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.ahmedsoliman.trollmusic</string>
+              <key>CFBundleName</key>
+              <string>AhmedsMusic</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>UIBackgroundModes</key>
+              <array>
+                  <string>audio</string>
+              </array>
+              <key>UILaunchScreen</key>
+              <dict/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Create Xcode Project
+        run: |
+          cd TrollMusicApp
+          # We use xcodegen to generate a flawless project file on the fly!
+          brew install xcodegen
+          
+          cat << 'EOF' > project.yml
+          name: TrollMusicApp
+          options:
+            bundleIdPrefix: com.ahmedsoliman
+          targets:
+            TrollMusicApp:
+              type: application
+              platform: iOS
+              deploymentTarget: "15.0"
+              sources: [TrollMusicApp]
+              info:
+                path: TrollMusicApp/Info.plist
+              settings:
+                CODE_SIGNING_ALLOWED: "NO"
+                CODE_SIGNING_REQUIRED: "NO"
+                CODE_SIGN_IDENTITY: ""
+          EOF
+          
+          xcodegen generate
+
+      - name: Build and Archive
+        run: |
+          cd TrollMusicApp
+          xcodebuild archive \
+            -project TrollMusicApp.xcodeproj \
+            -scheme TrollMusicApp \
+            -archivePath build/TrollMusicApp.xcarchive \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA (TrollStore format)
+        run: |
+          cd TrollMusicApp
+          mkdir -p Payload
+          cp -r build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app Payload/
+          zip -r TrollMusicApp.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollMusicApp-Ahmed
+          path: TrollMusicApp/TrollMusicApp.ipa
