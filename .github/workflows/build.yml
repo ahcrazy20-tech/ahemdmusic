@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V24.0
+name: Build TrollMusicApp V24.1
 
 on:
   push:
@@ -212,7 +212,7 @@ jobs:
           }
           EOF
 
-      - name: Write Native Smart Downloader (FIXED PREVIEWS & NATIVE PLAYLISTS!)
+      - name: Write Native Smart Downloader (FIXED PLAYLIST CLOSURE BUG!)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
           import SwiftUI
@@ -231,7 +231,6 @@ jobs:
               var previewPlayer: AVAudioPlayer?
               var finalDownloadName = ""; var downloadSession: URLSession!
               
-              // Playlist Tracking
               var playlistQueue: [String] = []
               var playlistTotal = 0
               var playlistName = ""
@@ -242,7 +241,6 @@ jobs:
                   downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
               }
               
-              // NEW FLAWLESS PREVIEW LOGIC
               func togglePreview(track: ITunesTrack) {
                   if previewTrackId == track.trackId && isPreviewPlaying { previewPlayer?.pause(); isPreviewPlaying = false } else {
                       previewPlayer?.stop()
@@ -272,19 +270,18 @@ jobs:
                   }.resume()
               }
               
-              // NATIVE PLAYLIST DOWNLOADER ENGINE
               func downloadLinkOrPlaylist(urlStr: String, name: String) {
                   guard !urlStr.isEmpty else { return }
                   stopPreview()
                   
                   if urlStr.contains("youtube.com/playlist") || urlStr.contains("list=") {
-                      fetchYouTubePlaylist(urlStr: urlStr, playlistName: name.isEmpty ? "YT_Playlist" : name)
+                      fetchYouTubePlaylist(urlStr: urlStr, pName: name.isEmpty ? "YT_Playlist" : name)
                   } else {
                       downloadSingleCobalt(urlStr: urlStr, name: name)
                   }
               }
               
-              func fetchYouTubePlaylist(urlStr: String, playlistName: String) {
+              func fetchYouTubePlaylist(urlStr: String, pName: String) {
                   isDownloading = true; statusMessage = "Extracting Playlist Links..."
                   guard let url = URL(string: urlStr) else { return }
                   
@@ -310,7 +307,7 @@ jobs:
                           } else {
                               self.playlistQueue = videoIds
                               self.playlistTotal = videoIds.count
-                              self.playlistName = playlistName
+                              self.playlistName = pName
                               self.processNextPlaylistSong()
                           }
                       }
@@ -418,7 +415,7 @@ jobs:
                                                   HStack {
                                                       VStack(alignment: .leading) { Text(result.trackName).font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text(result.artistName).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
                                                       Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.trackId && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
-                                                      Button(action: { downloader.showSearchResults = false; downloader.downloadDirectLink(url: "https://www.youtube.com/watch?v=\(result.trackId)", name: result.trackName) }) { Image(systemName: "arrow.down.circle.fill").font(.title).foregroundColor(.purple) }
+                                                      Button(action: { downloader.showSearchResults = false; downloader.downloadDirectLink(url: result.previewUrl, name: result.trackName) }) { Image(systemName: "arrow.down.circle.fill").font(.title).foregroundColor(.purple) }
                                                   }.padding().background(Color.white.opacity(0.1)).cornerRadius(10)
                                               }
                                           }.padding(.horizontal)
@@ -439,7 +436,6 @@ jobs:
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
-          import WebKit
 
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
 
@@ -495,7 +491,7 @@ jobs:
                       VStack(spacing: 40) {
                           HStack { Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }; Spacer(); VStack(spacing: 2) { if let song = musicManager.currentSong, musicManager.isFavorite(song: song) { Text("FROM LIKED SONGS").font(.caption).bold().foregroundColor(.white.opacity(0.6)) } else { Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6)) }; Text("AS Music").font(.subheadline).bold().foregroundColor(.white) }; Spacer(); Button(action: { showTimerOptions = true }) { Image(systemName: "moon.fill").foregroundColor(musicManager.sleepTimerMinutes > 0 ? .purple : .white) } }.padding()
                           ZStack { RoundedRectangle(cornerRadius: 15).fill(generateColor(for: musicManager.currentSong?.title ?? "")).frame(width: 320, height: 320).shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 15); Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit).frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8)) }.padding(.top, 10)
-                          HStack { VStack(alignment: .leading, spacing: 8) { Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 26, weight: .bold)).foregroundColor(.white).lineLimit(2); HStack { Text("Downloaded Track").font(.subheadline).foregroundColor(.white.opacity(0.6)); if musicManager.isPlaying { VisualizerView().padding(.leading, 5) } } }; Spacer(); if let song = musicManager.currentSong { Button(action: { musicManager.toggleFavorite(song: song) }) { Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart").font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white) } } }.padding(.horizontal, 30)
+                          HStack { VStack(alignment: .leading, spacing: 8) { Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 26, weight: .bold)).foregroundColor(.white).lineLimit(2); HStack { Text("AS Music Player").font(.subheadline).foregroundColor(.white.opacity(0.6)); if musicManager.isPlaying { VisualizerView().padding(.leading, 5) } } }; Spacer(); if let song = musicManager.currentSong { Button(action: { musicManager.toggleFavorite(song: song) }) { Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart").font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white) } } }.padding(.horizontal, 30)
                           HStack(spacing: 40) {
                               Button(action: { musicManager.isShuffle.toggle() }) { Image(systemName: "shuffle").font(.title2).foregroundColor(musicManager.isShuffle ? .green : .white.opacity(0.5)) }
                               Button(action: { musicManager.playPrevious() }) { Image(systemName: "backward.fill").font(.system(size: 35)).foregroundColor(.white) }
@@ -612,8 +608,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AS Music</string>
-              <key>CFBundleShortVersionString</key><string>24.0</string>
-              <key>CFBundleVersion</key><string>38</string>
+              <key>CFBundleShortVersionString</key><string>24.1</string>
+              <key>CFBundleVersion</key><string>39</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
@@ -658,5 +654,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AS-Music-Ultimate-V24
+          name: AS-Music-Ultimate-V24.1
           path: TrollMusicApp/TrollMusicApp.ipa
