@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V23.1
+name: Build TrollMusicApp V23.2
 
 on:
   push:
@@ -212,7 +212,7 @@ jobs:
           }
           EOF
 
-      - name: Write Web Browser Logic (MISSING VARIABLES RESTORED)
+      - name: Write Web Browser Logic
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
@@ -229,9 +229,8 @@ jobs:
               @Published var canGoForward: Bool = false
               @Published var showDownloadAlert: Bool = false
               @Published var showNamePrompt: Bool = false
-              @Published var showBlobError: Bool = false  // ADDED BACK
               @Published var downloadFileName: String = ""
-              @Published var customSongName: String = "" // ADDED BACK
+              @Published var customSongName: String = ""
               var capturedUrl: URL? = nil
               
               init() { addNewTab() }
@@ -245,7 +244,7 @@ jobs:
                   config.allowsInlineMediaPlayback = true
                   let newWebView = WKWebView(frame: .zero, configuration: config)
                   
-                  // CRITICAL AD-BLOCK: Completely prevents popup spam windows
+                  // CRITICAL AD-BLOCK
                   newWebView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
                   
                   tabs.append(BrowserTab(webView: newWebView, urlString: "https://cobalt.tools", title: "New Tab"))
@@ -262,22 +261,6 @@ jobs:
               func loadUrl(_ urlString: String) { 
                   var finalStr = urlString; if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr }
                   if let url = URL(string: finalStr) { currentWebView.load(URLRequest(url: url)) } 
-              }
-              
-              // RE-ADDED FOR THE HUB GRAB AUDIO BUTTON
-              func grabAudio() {
-                  let js = "(function() { var media = document.querySelector('video') || document.querySelector('audio'); if (media && media.src) return media.src; var source = document.querySelector('source'); if (source && source.src) return source.src; return null; })()"
-                  currentWebView.evaluateJavaScript(js) { result, error in
-                      if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) {
-                          if mediaUrlString.starts(with: "blob:") {
-                              self.showBlobError = true
-                          } else {
-                              self.capturedUrl = url
-                              self.customSongName = "Grabbed_Audio"
-                              self.showNamePrompt = true
-                          }
-                      }
-                  }
               }
               
               func confirmDownload(with name: String) {
@@ -313,17 +296,12 @@ jobs:
                   init(_ parent: WebViewUI) { self.parent = parent }
                   
                   func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-                      // Block all hidden popups and ads trying to open in new frames
                       if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
                       return nil
                   }
                   
-                  // INTELLIGENT JAVASCRIPT INJECTOR: Cleans up messy download sites automatically!
                   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-                      let hideAdsScript = """
-                      var badElements = document.querySelectorAll('.ad, .popup, iframe');
-                      badElements.forEach(el => el.remove());
-                      """
+                      let hideAdsScript = "var badElements = document.querySelectorAll('.ad, .popup, iframe'); badElements.forEach(el => el.remove());"
                       webView.evaluateJavaScript(hideAdsScript, completionHandler: nil)
                   }
                   
@@ -332,7 +310,6 @@ jobs:
                       if let currentURL = webView.url?.absoluteString { parent.urlString = currentURL; parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL }
                   }
                   
-                  // MAGICAL DOWNLOAD CATCHER: Intercepts anything clicked that is an audio file!
                   func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
                       if navigationAction.shouldPerformDownload { decisionHandler(.download); return }
                       decisionHandler(.allow)
@@ -364,11 +341,12 @@ jobs:
           }
           EOF
 
-      - name: Write UI Views Code 
+      - name: Write UI Views Code (FIXED AVFoundation IMPORT)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
           import WebKit
+          import AVFoundation
 
           // SECRET PREVIEW PLAYER
           class PreviewPlayer: NSObject {
@@ -438,6 +416,35 @@ jobs:
               }
           }
 
+          func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
+
+          struct VisualizerView: View {
+              @State private var isAnimating = false
+              var body: some View {
+                  HStack(spacing: 4) {
+                      ForEach(0..<4, id: \.self) { i in
+                          Capsule().fill(Color.white).frame(width: 4, height: isAnimating ? CGFloat.random(in: 10...25) : 5).animation(Animation.linear(duration: 0.3).repeatForever().delay(0.1 * Double(i)), value: isAnimating)
+                      }
+                  }.onAppear { isAnimating = true }
+              }
+          }
+
+          struct MainTabView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              @State private var showFullPlayer = false
+              var body: some View {
+                  ZStack(alignment: .bottom) {
+                      TabView {
+                          LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
+                          PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
+                          SmartDownloaderView().tabItem { Label("Magic DL", systemImage: "sparkles") }
+                          BrowserMainView().tabItem { Label("Hub", systemImage: "arrow.down.circle.fill") }
+                      }.accentColor(.purple)
+                      if musicManager.currentSong != nil { MiniPlayerView(showFullPlayer: $showFullPlayer).padding(.bottom, 50) }
+                  }.sheet(isPresented: $showFullPlayer) { FullPlayerView() }
+              }
+          }
+
           struct SmartDownloaderView: View {
               @StateObject var downloader = SmartDownloaderManager()
               @State private var searchInput = ""
@@ -487,35 +494,6 @@ jobs:
               }
           }
 
-          func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
-
-          struct VisualizerView: View {
-              @State private var isAnimating = false
-              var body: some View {
-                  HStack(spacing: 4) {
-                      ForEach(0..<4, id: \.self) { i in
-                          Capsule().fill(Color.white).frame(width: 4, height: isAnimating ? CGFloat.random(in: 10...25) : 5).animation(Animation.linear(duration: 0.3).repeatForever().delay(0.1 * Double(i)), value: isAnimating)
-                      }
-                  }.onAppear { isAnimating = true }
-              }
-          }
-
-          struct MainTabView: View {
-              @EnvironmentObject var musicManager: MusicManager
-              @State private var showFullPlayer = false
-              var body: some View {
-                  ZStack(alignment: .bottom) {
-                      TabView {
-                          LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
-                          PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
-                          SmartDownloaderView().tabItem { Label("Magic DL", systemImage: "sparkles") }
-                          BrowserMainView().tabItem { Label("Hub", systemImage: "arrow.down.circle.fill") }
-                      }.accentColor(.purple)
-                      if musicManager.currentSong != nil { MiniPlayerView(showFullPlayer: $showFullPlayer).padding(.bottom, 50) }
-                  }.sheet(isPresented: $showFullPlayer) { FullPlayerView() }
-              }
-          }
-
           struct BrowserMainView: View {
               @EnvironmentObject var musicManager: MusicManager
               @StateObject var webViewModel = WebViewModel()
@@ -529,7 +507,6 @@ jobs:
                           HStack {
                               Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack); Spacer()
                               Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward); Spacer()
-                              Button(action: { webViewModel.grabAudio() }) { Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple) }; Spacer()
                               Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text("\(webViewModel.tabs.count)").font(.caption).bold() } }; Spacer()
                               Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
                           }.padding().background(Color(uiColor: .secondarySystemBackground))
@@ -543,7 +520,6 @@ jobs:
                       }
                   }
                   .alert("Name Your Song", isPresented: $webViewModel.showNamePrompt) { TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { } }
-                  .alert("Cannot Download", isPresented: $webViewModel.showBlobError) { Button("OK", role: .cancel) { } } message: { Text("Try using the Magic DL tab instead!") }
                   .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
               }
           }
@@ -574,7 +550,7 @@ jobs:
                       VStack(spacing: 40) {
                           HStack { Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }; Spacer(); VStack(spacing: 2) { if let song = musicManager.currentSong, musicManager.isFavorite(song: song) { Text("FROM LIKED SONGS").font(.caption).bold().foregroundColor(.white.opacity(0.6)) } else { Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6)) }; Text("AS Music").font(.subheadline).bold().foregroundColor(.white) }; Spacer(); Button(action: { showTimerOptions = true }) { Image(systemName: "moon.fill").foregroundColor(musicManager.sleepTimerMinutes > 0 ? .purple : .white) } }.padding()
                           ZStack { RoundedRectangle(cornerRadius: 15).fill(generateColor(for: musicManager.currentSong?.title ?? "")).frame(width: 320, height: 320).shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 15); Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit).frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8)) }.padding(.top, 10)
-                          HStack { VStack(alignment: .leading, spacing: 8) { Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 26, weight: .bold)).foregroundColor(.white).lineLimit(2); HStack { Text("AS Music Player").font(.subheadline).foregroundColor(.white.opacity(0.6)); if musicManager.isPlaying { VisualizerView().padding(.leading, 5) } } }; Spacer(); if let song = musicManager.currentSong { Button(action: { musicManager.toggleFavorite(song: song) }) { Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart").font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white) } } }.padding(.horizontal, 30)
+                          HStack { VStack(alignment: .leading, spacing: 8) { Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 26, weight: .bold)).foregroundColor(.white).lineLimit(2); HStack { Text("Downloaded Track").font(.subheadline).foregroundColor(.white.opacity(0.6)); if musicManager.isPlaying { VisualizerView().padding(.leading, 5) } } }; Spacer(); if let song = musicManager.currentSong { Button(action: { musicManager.toggleFavorite(song: song) }) { Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart").font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white) } } }.padding(.horizontal, 30)
                           HStack(spacing: 40) {
                               Button(action: { musicManager.isShuffle.toggle() }) { Image(systemName: "shuffle").font(.title2).foregroundColor(musicManager.isShuffle ? .green : .white.opacity(0.5)) }
                               Button(action: { musicManager.playPrevious() }) { Image(systemName: "backward.fill").font(.system(size: 35)).foregroundColor(.white) }
@@ -691,8 +667,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AS Music</string>
-              <key>CFBundleShortVersionString</key><string>23.1</string>
-              <key>CFBundleVersion</key><string>36</string>
+              <key>CFBundleShortVersionString</key><string>23.2</string>
+              <key>CFBundleVersion</key><string>37</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
@@ -737,5 +713,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AS-Music-Ultimate-V23.1
+          name: AS-Music-Ultimate-V23.2
           path: TrollMusicApp/TrollMusicApp.ipa
