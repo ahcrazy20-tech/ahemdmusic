@@ -23,15 +23,21 @@ jobs:
 
           @main
           struct TrollMusicAppApp: App {
-              init() { setupAudioSession() }
+              init() {
+                  setupAudioSession()
+              }
               var body: some Scene {
                   WindowGroup {
                       MainTabView().environmentObject(MusicManager.shared)
                   }
               }
               func setupAudioSession() {
-                  try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
-                  try? AVAudioSession.sharedInstance().setActive(true)
+                  do {
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                      try AVAudioSession.sharedInstance().setActive(true)
+                  } catch {
+                      print("Audio Error")
+                  }
               }
           }
           EOF
@@ -53,16 +59,24 @@ jobs:
               var audioPlayer: AVAudioPlayer?
               
               let fileManager = FileManager.default
-              var documentsDirectory: URL { fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0] }
+              var documentsDirectory: URL {
+                  fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+              }
               
               init() {
-                  loadSongs(); loadPlaylists(); setupRemoteCommandCenter()
+                  loadSongs()
+                  loadPlaylists()
+                  setupRemoteCommandCenter()
               }
               
               func loadSongs() {
-                  let files = (try? fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)) ?? []
-                  let audioFiles = files.filter { ["mp3", "m4a", "wav"].contains($0.pathExtension.lowercased()) }
-                  songs = audioFiles.map { Song(id: UUID(), title: $0.deletingPathExtension().lastPathComponent, url: $0) }.sorted { $0.title < $1.title }
+                  do {
+                      let files = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
+                      let audioFiles = files.filter { $0.pathExtension.lowercased() == "mp3" || $0.pathExtension.lowercased() == "m4a" }
+                      songs = audioFiles.map { url in
+                          Song(id: UUID(), title: url.deletingPathExtension().lastPathComponent, url: url)
+                      }.sorted { $0.title < $1.title }
+                  } catch {}
               }
               
               func deleteSong(_ song: Song) {
@@ -76,47 +90,86 @@ jobs:
               }
               
               func addSongToPlaylist(song: Song, playlist: Playlist) {
-                  if let index = playlists.firstIndex(where: { $0.id == playlist.id }), !playlists[index].songIDs.contains(song.id) {
-                      playlists[index].songIDs.append(song.id)
-                      savePlaylists()
+                  if let index = playlists.firstIndex(where: { $0.id == playlist.id }) {
+                      if !playlists[index].songIDs.contains(song.id) {
+                          playlists[index].songIDs.append(song.id)
+                          savePlaylists()
+                      }
                   }
               }
               
               func savePlaylists() {
-                  if let encoded = try? JSONEncoder().encode(playlists) { UserDefaults.standard.set(encoded, forKey: "savedPlaylists") }
+                  if let encoded = try? JSONEncoder().encode(playlists) {
+                      UserDefaults.standard.set(encoded, forKey: "savedPlaylists")
+                  }
               }
               
               func loadPlaylists() {
-                  if let data = UserDefaults.standard.data(forKey: "savedPlaylists"), let decoded = try? JSONDecoder().decode([Playlist].self, from: data) { playlists = decoded }
+                  if let data = UserDefaults.standard.data(forKey: "savedPlaylists") {
+                      if let decoded = try? JSONDecoder().decode([Playlist].self, from: data) {
+                          playlists = decoded
+                      }
+                  }
               }
               
               func playSong(_ song: Song) {
-                  audioPlayer = try? AVAudioPlayer(contentsOf: song.url)
-                  audioPlayer?.play()
-                  currentSong = song
-                  isPlaying = true
-                  updateNowPlayingInfo()
+                  do {
+                      audioPlayer = try AVAudioPlayer(contentsOf: song.url)
+                      audioPlayer?.play()
+                      currentSong = song
+                      isPlaying = true
+                      updateNowPlayingInfo()
+                  } catch {}
               }
               
               func togglePlayPause() {
-                  isPlaying ? audioPlayer?.pause() : audioPlayer?.play()
+                  if isPlaying {
+                      audioPlayer?.pause()
+                  } else {
+                      audioPlayer?.play()
+                  }
                   isPlaying.toggle()
                   updateNowPlayingInfo()
               }
               
               func setupRemoteCommandCenter() {
                   let commandCenter = MPRemoteCommandCenter.shared()
-                  commandCenter.playCommand.addTarget { [unowned self] _ in self.isPlaying ? .commandFailed : { self.togglePlayPause(); return .success }() }
-                  commandCenter.pauseCommand.addTarget { [unowned self] _ in !self.isPlaying ? .commandFailed : { self.togglePlayPause(); return .success }() }
+                  commandCenter.playCommand.addTarget { [unowned self] _ in
+                      if !self.isPlaying {
+                          self.togglePlayPause()
+                          return .success
+                      }
+                      return .commandFailed
+                  }
+                  commandCenter.pauseCommand.addTarget { [unowned self] _ in
+                      if self.isPlaying {
+                          self.togglePlayPause()
+                          return .success
+                      }
+                      return .commandFailed
+                  }
               }
               
               func updateNowPlayingInfo() {
                   guard let currentSong = currentSong else { return }
-                  MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: currentSong.title, MPMediaItemPropertyArtist: "Ahmed's App"]
+                  var info = [String: Any]()
+                  info[MPMediaItemPropertyTitle] = currentSong.title
+                  info[MPMediaItemPropertyArtist] = "Ahmed's App"
+                  MPNowPlayingInfoCenter.default().nowPlayingInfo = info
               }
           }
-          struct Song: Identifiable, Codable { var id: UUID; var title: String; var url: URL }
-          struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
+
+          struct Song: Identifiable, Codable {
+              var id: UUID
+              var title: String
+              var url: URL
+          }
+
+          struct Playlist: Identifiable, Codable {
+              var id: UUID
+              var name: String
+              var songIDs: [UUID]
+          }
           EOF
 
       - name: Write UI Views Code
@@ -128,10 +181,16 @@ jobs:
           struct MainTabView: View {
               var body: some View {
                   TabView {
-                      LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
-                      PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
-                      BrowserView().tabItem { Label("Browser", systemImage: "safari") }
-                  }.safeAreaInset(edge: .bottom) { MiniPlayerView() }
+                      LibraryView()
+                          .tabItem { Label("Library", systemImage: "music.note.list") }
+                      PlaylistsView()
+                          .tabItem { Label("Playlists", systemImage: "music.mic") }
+                      BrowserView()
+                          .tabItem { Label("Browser", systemImage: "safari") }
+                  }
+                  .safeAreaInset(edge: .bottom) {
+                      MiniPlayerView()
+                  }
               }
           }
 
@@ -169,22 +228,22 @@ jobs:
                               .contentShape(Rectangle())
                               .onTapGesture { musicManager.playSong(song) }
                           }
-                          .onDelete { indexSet in indexSet.forEach { musicManager.deleteSong(musicManager.songs[$0]) } }
+                          .onDelete { indexSet in
+                              indexSet.forEach { index in
+                                  musicManager.deleteSong(musicManager.songs[index])
+                              }
+                          }
                           
                           Section {
                               Text("App Created by Ahmed Soliman")
-                                  .font(.footnote).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .center).listRowBackground(Color.clear)
+                                  .font(.footnote)
+                                  .foregroundColor(.gray)
+                                  .frame(maxWidth: .infinity, alignment: .center)
+                                  .listRowBackground(Color.clear)
                           }
                       }
                       .navigationTitle("Ahmed's Music")
                       .onAppear { musicManager.loadSongs() }
-                      .actionSheet(item: $showingOptionsFor) { song in
-                          var buttons: [ActionSheet.Button] = musicManager.playlists.map { playlist in
-                              .default(Text("Add to \(playlist.name)")) { musicManager.addSongToPlaylist(song: song, playlist: playlist) }
-                          }
-                          buttons.append(.cancel())
-                          return ActionSheet(title: Text("Add to Playlist"), buttons: buttons)
-                      }
                   }
               }
           }
@@ -197,28 +256,22 @@ jobs:
                   NavigationView {
                       List {
                           ForEach(musicManager.playlists) { playlist in
-                              NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline) }
+                              Text(playlist.name).font(.headline)
                           }
                       }
                       .navigationTitle("Playlists")
                       .toolbar { Button(action: { showingNewPlaylist = true }) { Image(systemName: "plus") } }
                       .alert("New Playlist", isPresented: $showingNewPlaylist) {
                           TextField("Playlist Name", text: $newPlaylistName)
-                          Button("Create") { if !newPlaylistName.isEmpty { musicManager.createPlaylist(name: newPlaylistName); newPlaylistName = "" } }
+                          Button("Create") {
+                              if !newPlaylistName.isEmpty {
+                                  musicManager.createPlaylist(name: newPlaylistName)
+                                  newPlaylistName = ""
+                              }
+                          }
                           Button("Cancel", role: .cancel) { }
                       }
                   }
-              }
-          }
-
-          struct PlaylistDetailView: View {
-              @EnvironmentObject var musicManager: MusicManager
-              var playlist: Playlist
-              var songsInPlaylist: [Song] { musicManager.songs.filter { playlist.songIDs.contains($0.id) } }
-              var body: some View {
-                  List {
-                      ForEach(songsInPlaylist) { song in Text(song.title).onTapGesture { musicManager.playSong(song) } }
-                  }.navigationTitle(playlist.name)
               }
           }
 
@@ -230,9 +283,15 @@ jobs:
               var body: some View {
                   VStack(spacing: 0) {
                       HStack {
-                          TextField("URL", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.URL).autocapitalization(.none)
-                          Button("Go") { NotificationCenter.default.post(name: NSNotification.Name("LoadURL"), object: urlString) }
+                          TextField("URL", text: $urlString)
+                              .textFieldStyle(RoundedBorderTextFieldStyle())
+                              .keyboardType(.URL)
+                              .autocapitalization(.none)
+                          Button("Go") {
+                              NotificationCenter.default.post(name: NSNotification.Name("LoadURL"), object: urlString)
+                          }
                       }.padding().background(Color(UIColor.secondarySystemBackground))
+                      
                       ScrollView(.horizontal, showsIndicators: false) {
                           HStack {
                               BookmarkButton(title: "Sm3na", url: "https://sm3na.com")
@@ -240,18 +299,25 @@ jobs:
                               BookmarkButton(title: "YtMP3", url: "https://ytmp3.cc")
                           }.padding(.horizontal).padding(.bottom, 8)
                       }.background(Color(UIColor.secondarySystemBackground))
+                      
                       WebViewUI(urlString: $urlString, didDetectDownload: { fileUrl in
-                          downloadFileName = fileUrl.lastPathComponent; showDownloadAlert = true
+                          downloadFileName = fileUrl.lastPathComponent
+                          showDownloadAlert = true
                       })
                   }
                   .alert(isPresented: $showDownloadAlert) {
-                      Alert(title: Text("Download Complete"), message: Text("Saved \(downloadFileName)"), dismissButton: .default(Text("OK")) { musicManager.loadSongs() })
+                      Alert(
+                          title: Text("Download Complete"),
+                          message: Text("Saved \(downloadFileName)"),
+                          dismissButton: .default(Text("OK")) { musicManager.loadSongs() }
+                      )
                   }
               }
           }
 
           struct BookmarkButton: View {
-              var title: String; var url: String
+              var title: String
+              var url: String
               var body: some View {
                   Button(action: { NotificationCenter.default.post(name: NSNotification.Name("LoadURL"), object: url) }) {
                       Text(title).font(.caption).padding(.horizontal, 12).padding(.vertical, 6).background(Color.blue).foregroundColor(.white).cornerRadius(12)
@@ -262,33 +328,42 @@ jobs:
           struct WebViewUI: UIViewRepresentable {
               @Binding var urlString: String
               var didDetectDownload: (URL) -> Void
+              
               func makeUIView(context: Context) -> WKWebView {
                   let webView = WKWebView()
                   webView.navigationDelegate = context.coordinator
+                  
                   NotificationCenter.default.addObserver(forName: NSNotification.Name("LoadURL"), object: nil, queue: .main) { notif in
-                      if let urlStr = notif.object as? String, let url = URL(string: urlStr.hasPrefix("http") ? urlStr : "https://" + urlStr) {
-                          webView.load(URLRequest(url: url))
+                      if let urlStr = notif.object as? String {
+                          var finalStr = urlStr
+                          if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr }
+                          if let url = URL(string: finalStr) { webView.load(URLRequest(url: url)) }
                       }
                   }
+                  
                   if let url = URL(string: urlString) { webView.load(URLRequest(url: url)) }
                   return webView
               }
+              
               func updateUIView(_ uiView: WKWebView, context: Context) {}
               func makeCoordinator() -> Coordinator { Coordinator(self) }
               
               class Coordinator: NSObject, WKNavigationDelegate {
                   var parent: WebViewUI
                   init(_ parent: WebViewUI) { self.parent = parent }
+                  
                   func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
                       if let url = navigationAction.request.url {
                           parent.urlString = url.absoluteString
-                          if ["mp3", "m4a"].contains(url.pathExtension.lowercased()) {
-                              URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
+                          if url.pathExtension.lowercased() == "mp3" || url.pathExtension.lowercased() == "m4a" {
+                              let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
                                   guard let localUrl = localUrl else { return }
-                                  let dest = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent)
-                                  try? FileManager.default.moveItem(at: localUrl, to: dest)
+                                  let fm = FileManager.default
+                                  let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent)
+                                  try? fm.moveItem(at: localUrl, to: dest)
                                   DispatchQueue.main.async { self.parent.didDetectDownload(dest) }
-                              }.resume()
+                              }
+                              task.resume()
                               decisionHandler(.cancel)
                               return
                           }
