@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V7.0
+name: Build TrollMusicApp V7.1
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp
 
-      - name: Write Main App Code & AppDelegate
+      - name: Write Main App Code
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
@@ -43,7 +43,7 @@ jobs:
           }
           EOF
 
-      - name: Write Music Manager Code (AVPlayer Upgrade)
+      - name: Write Music Manager Code (AVPlayer Play Fix)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/MusicManager.swift
           import Foundation
@@ -58,9 +58,8 @@ jobs:
               @Published var isPlaying: Bool = false
               @Published var isShuffle: Bool = false
               
-              // Upgraded to AVPlayer for flawless background audio
               var player: AVPlayer?
-              var playerItem: AVPlayerItem?
+              var timeObserverToken: Any?
               
               let fileManager = FileManager.default
               var documentsDirectory: URL { fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0] }
@@ -104,25 +103,36 @@ jobs:
                   if let data = UserDefaults.standard.data(forKey: "savedPlaylists"), let decoded = try? JSONDecoder().decode([Playlist].self, from: data) { playlists = decoded }
               }
               
+              // FIX: AVPlayer buffer and execution corrected
               func playSong(_ song: Song) {
                   do {
                       try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetooth, .mixWithOthers])
                       try AVAudioSession.sharedInstance().setActive(true)
                       
-                      playerItem = AVPlayerItem(url: song.url)
-                      player = AVPlayer(playerItem: playerItem)
-                      player?.play()
-                      
-                      currentSong = song
-                      isPlaying = true
-                      updateNowPlayingInfo()
-                      
+                      // Stop old player and remove old observers
+                      if let token = timeObserverToken {
+                          player?.removeTimeObserver(token)
+                          timeObserverToken = nil
+                      }
+                      player?.pause()
                       NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
+                      
+                      let playerItem = AVPlayerItem(url: song.url)
+                      player = AVPlayer(playerItem: playerItem)
+                      
+                      // Wait a fraction of a second for buffer, then force play
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                          self.player?.play()
+                          self.currentSong = song
+                          self.isPlaying = true
+                          self.updateNowPlayingInfo()
+                      }
+                      
                       NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: .AVPlayerItemDidPlayToEndTime, object: playerItem)
                   } catch {}
               }
               
-              @objc func songFinished() { playNext() }
+              @objc func songFinished() { DispatchQueue.main.async { self.playNext() } }
               
               func togglePlayPause() {
                   if isPlaying { player?.pause() } else { player?.play() }
@@ -165,17 +175,14 @@ jobs:
                   MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: currentSong.title, MPMediaItemPropertyArtist: "Ahmed's Music"]
               }
               
-              // NEW: In-App Video to Audio Extractor
               func extractAudioFromVideo(videoUrl: URL, completion: @escaping (Bool) -> Void) {
                   let asset = AVAsset(url: videoUrl)
                   guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
                       completion(false); return
                   }
-                  
                   let outputUrl = documentsDirectory.appendingPathComponent("Extracted_\(UUID().uuidString.prefix(4)).m4a")
                   exportSession.outputURL = outputUrl
                   exportSession.outputFileType = .m4a
-                  
                   exportSession.exportAsynchronously {
                       DispatchQueue.main.async {
                           self.loadSongs()
@@ -456,16 +463,14 @@ jobs:
                       List {
                           ForEach(musicManager.songs) { song in
                               HStack { VStack(alignment: .leading) { Text(song.title).font(.headline) }; Spacer(); Button(action: { showingOptionsFor = song }) { Image(systemName: "ellipsis") } }
-                              .contentShape(Rectangle()).onTapGesture { musicManager.playSong(song) }
+                              .contentShape(Rectangle())
+                              // THE FIX: Adding a clear button to ensure taps register properly over list items
+                              .overlay(Button(action: { musicManager.playSong(song) }) { Color.clear })
                           }
                           .onDelete { indexSet in indexSet.forEach { index in musicManager.deleteSong(musicManager.songs[index]) } }
                       }
                       .navigationTitle("Ahmed's Library")
-                      .toolbar {
-                          Button(action: { showFileImporter = true }) {
-                              HStack { Image(systemName: "video.badge.plus"); Text("Extract Video") }
-                          }
-                      }
+                      .toolbar { Button(action: { showFileImporter = true }) { HStack { Image(systemName: "video.badge.plus"); Text("Extract Video") } } }
                       .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.movie, .video], allowsMultipleSelection: false) { result in
                           if let urls = try? result.get(), let url = urls.first {
                               let secure = url.startAccessingSecurityScopedResource()
@@ -475,9 +480,7 @@ jobs:
                               }
                           }
                       }
-                      .alert("Extraction Complete", isPresented: $extractSuccess) {
-                          Button("OK", role: .cancel) { }
-                      } message: { Text("Audio successfully extracted and added to your library!") }
+                      .alert("Extraction Complete", isPresented: $extractSuccess) { Button("OK", role: .cancel) { } } message: { Text("Audio successfully extracted and added to your library!") }
                       .onAppear { musicManager.loadSongs() }
                       .confirmationDialog("Options", isPresented: Binding(get: { showingOptionsFor != nil }, set: { if !$0 { showingOptionsFor = nil } }), titleVisibility: .visible) {
                           if let song = showingOptionsFor { ForEach(musicManager.playlists) { playlist in Button("Add to \(playlist.name)") { musicManager.addSongToPlaylist(song: song, playlist: playlist) } } }
@@ -491,7 +494,11 @@ jobs:
               @EnvironmentObject var musicManager: MusicManager
               var playlist: Playlist
               var songsInPlaylist: [Song] { musicManager.songs.filter { playlist.songIDs.contains($0.id) } }
-              var body: some View { List { ForEach(songsInPlaylist) { song in Text(song.title).onTapGesture { musicManager.playSong(song) } } }.navigationTitle(playlist.name) }
+              var body: some View {
+                  List { ForEach(songsInPlaylist) { song in 
+                      HStack { Text(song.title); Spacer() }.contentShape(Rectangle()).overlay(Button(action: { musicManager.playSong(song) }) { Color.clear }) 
+                  } }.navigationTitle(playlist.name)
+              }
           }
 
           struct PlaylistsView: View {
@@ -520,8 +527,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key><string>7.0</string>
-              <key>CFBundleVersion</key><string>12</string>
+              <key>CFBundleShortVersionString</key><string>7.1</string>
+              <key>CFBundleVersion</key><string>13</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>UIFileSharingEnabled</key><true/>
               <key>LSSupportsOpeningDocumentsInPlace</key><true/>
@@ -563,5 +570,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-Ultimate-V7
+          name: TrollMusicApp-Ahmed-Ultimate-V7.1
           path: TrollMusicApp/TrollMusicApp.ipa
