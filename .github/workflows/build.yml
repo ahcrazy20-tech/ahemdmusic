@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V14.0
+name: Build TrollMusicApp V15.0
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp
 
-      - name: Write Main App Code (Deep Background Fix)
+      - name: Write Main App Code 
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
@@ -24,8 +24,8 @@ jobs:
           class AppDelegate: NSObject, UIApplicationDelegate {
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
                   do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
-                      try AVAudioSession.sharedInstance().setActive(true, options: [])
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                      try AVAudioSession.sharedInstance().setActive(true)
                       UIApplication.shared.beginReceivingRemoteControlEvents()
                   } catch { print("Background Audio Setup Failed") }
                   return true
@@ -43,7 +43,7 @@ jobs:
           }
           EOF
 
-      - name: Write Music Manager Code (AVPlayer Lock Screen Fix)
+      - name: Write Music Manager Code
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/MusicManager.swift
           import Foundation
@@ -61,9 +61,11 @@ jobs:
               @Published var currentSong: Song?
               @Published var isPlaying: Bool = false
               @Published var isShuffle: Bool = false
+              @Published var sleepTimerMinutes: Int = 0
               
               var player: AVPlayer?
               var timeObserverToken: Any?
+              var sleepTimer: Timer?
               
               let fileManager = FileManager.default
               var documentsDirectory: URL { fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0] }
@@ -77,6 +79,12 @@ jobs:
                   do {
                       let files = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
                       let audioFiles = files.filter { ["mp3", "m4a", "wav", "webm", "mp4"].contains($0.pathExtension.lowercased()) }
+                      
+                      // FIX FOR LOCK SCREEN CRASH: Strip file protection from all songs so they can be read while locked!
+                      for file in audioFiles {
+                          try? fileManager.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: file.path)
+                      }
+                      
                       DispatchQueue.main.async {
                           self.songs = audioFiles.map { url in Song(id: UUID(), title: url.deletingPathExtension().lastPathComponent, url: url) }.sorted { $0.title < $1.title }
                       }
@@ -110,7 +118,7 @@ jobs:
               
               func playSong(_ song: Song) {
                   do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
                       try AVAudioSession.sharedInstance().setActive(true)
                       
                       player?.pause()
@@ -118,7 +126,6 @@ jobs:
                       
                       let playerItem = AVPlayerItem(url: song.url)
                       player = AVPlayer(playerItem: playerItem)
-                      player?.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible // CRITICAL FOR BACKGROUND AUDIO!
                       
                       DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                           self.player?.play()
@@ -166,7 +173,7 @@ jobs:
           }
           EOF
 
-      - name: Write Shared Browser & Download Logic
+      - name: Write Web Browser Logic
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
@@ -183,6 +190,7 @@ jobs:
               @Published var canGoForward: Bool = false
               @Published var showDownloadAlert: Bool = false
               @Published var showNamePrompt: Bool = false
+              @Published var showBlobError: Bool = false
               @Published var downloadFileName: String = ""
               @Published var customSongName: String = ""
               var capturedUrl: URL? = nil
@@ -218,9 +226,13 @@ jobs:
                   let js = "(function() { var media = document.querySelector('video') || document.querySelector('audio'); if (media && media.src) return media.src; var source = document.querySelector('source'); if (source && source.src) return source.src; return null; })()"
                   currentWebView.evaluateJavaScript(js) { result, error in
                       if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) {
-                          self.capturedUrl = url
-                          self.customSongName = "Grabbed_Audio"
-                          self.showNamePrompt = true
+                          if mediaUrlString.starts(with: "blob:") {
+                              self.showBlobError = true
+                          } else {
+                              self.capturedUrl = url
+                              self.customSongName = "Grabbed_Audio"
+                              self.showNamePrompt = true
+                          }
                       }
                   }
               }
@@ -236,6 +248,10 @@ jobs:
                   URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
                       guard let localUrl = localUrl else { return }
                       try? FileManager.default.moveItem(at: localUrl, to: destPath)
+                      
+                      // LOCK SCREEN FIX
+                      try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
+                      
                       DispatchQueue.main.async { 
                           self.downloadFileName = finalName
                           self.showDownloadAlert = true 
@@ -286,7 +302,7 @@ jobs:
           }
           EOF
 
-      - name: Write UI Views Code (All 4 Tabs Intact!)
+      - name: Write UI Views Code (Clean UI)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
@@ -307,11 +323,9 @@ jobs:
                       }.accentColor(.purple)
                       
                       if musicManager.currentSong != nil { 
-                          MiniPlayerView(showFullPlayer: $showFullPlayer)
-                              .padding(.bottom, 50) 
+                          MiniPlayerView(showFullPlayer: $showFullPlayer).padding(.bottom, 50) 
                       }
-                  }
-                  .sheet(isPresented: $showFullPlayer) { FullPlayerView() }
+                  }.sheet(isPresented: $showFullPlayer) { FullPlayerView() }
               }
           }
 
@@ -373,7 +387,14 @@ jobs:
                       DispatchQueue.main.async { self.parent.downloadFileName = cleanName }
                       completionHandler(destPath)
                   }
-                  func downloadDidFinish(_ download: WKDownload) { DispatchQueue.main.async { self.parent.showDownloadAlert = true } }
+                  func downloadDidFinish(_ download: WKDownload) { 
+                      // LOCK SCREEN FIX
+                      let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                      let destPath = destDir.appendingPathComponent(parent.downloadFileName)
+                      try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
+                      
+                      DispatchQueue.main.async { self.parent.showDownloadAlert = true } 
+                  }
               }
           }
 
@@ -407,7 +428,8 @@ jobs:
                       }
                   }
                   .alert("Name Your Song", isPresented: $webViewModel.showNamePrompt) { TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { } }
-                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
+                  .alert("Cannot Download", isPresented: $webViewModel.showBlobError) { Button("OK", role: .cancel) { } } message: { Text("Try using the Smart DL tab instead!") }
+                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { MusicManager.shared.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
               }
           }
 
@@ -499,7 +521,7 @@ jobs:
           }
           EOF
 
-      - name: Write Plists & Xcode Configuration (Entitlements Included!)
+      - name: Write Plist & Force Background Modes
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
@@ -509,8 +531,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key><string>14.0</string>
-              <key>CFBundleVersion</key><string>21</string>
+              <key>CFBundleShortVersionString</key><string>15.0</string>
+              <key>CFBundleVersion</key><string>22</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
@@ -518,17 +540,7 @@ jobs:
           </plist>
           EOF
           
-          # APPLE REQUIRES THIS FOR BACKGROUND AUDIO WHEN JAILED
-          cat << 'EOF' > TrollMusicApp/TrollMusicApp.entitlements
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>com.apple.security.background.audio</key><true/>
-          </dict>
-          </plist>
-          EOF
-          
+          # HARDCODING THE BACKGROUND MODE INTO THE XCODEGEN CONFIGURATION
           cd TrollMusicApp
           brew install xcodegen
           cat << 'EOF' > project.yml
@@ -542,12 +554,14 @@ jobs:
               deploymentTarget: "16.0"
               sources: [TrollMusicApp]
               info:
-                path: TrollMusicApp/Info.plist
+                properties:
+                  UIBackgroundModes: [audio]
+                  NSAppTransportSecurity:
+                    NSAllowsArbitraryLoads: true
               settings:
                 CODE_SIGNING_ALLOWED: "NO"
                 CODE_SIGNING_REQUIRED: "NO"
                 CODE_SIGN_IDENTITY: ""
-                CODE_SIGN_ENTITLEMENTS: TrollMusicApp.entitlements
           EOF
           xcodegen generate
 
@@ -562,5 +576,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-Ultimate-V14
+          name: TrollMusicApp-Ahmed-Ultimate-V15
           path: TrollMusicApp/TrollMusicApp.ipa
