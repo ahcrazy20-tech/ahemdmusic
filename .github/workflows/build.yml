@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V18.1
+name: Build TrollMusicApp V18.2
 
 on:
   push:
@@ -218,7 +218,7 @@ jobs:
           }
           EOF
 
-      - name: Write Smart Downloader API (FIXED AVFoundation IMPORT)
+      - name: Write Smart Downloader API (with AVFoundation)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
           import SwiftUI
@@ -522,19 +522,6 @@ jobs:
                       parent.viewModel.canGoBack = webView.canGoBack; parent.viewModel.canGoForward = webView.canGoForward
                       if let currentURL = webView.url?.absoluteString { parent.urlString = currentURL; parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL }
                   }
-                  func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-                      if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm") {
-                          if let url = navigationResponse.response.url {
-                              let suggested = navigationResponse.response.suggestedFilename ?? "Song"
-                              let cleanName = suggested.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggested
-                              let nameWithoutExt = (cleanName as NSString).deletingPathExtension
-                              DispatchQueue.main.async { self.parent.viewModel.capturedUrl = url; self.parent.viewModel.customSongName = nameWithoutExt; self.parent.viewModel.showNamePrompt = true }
-                              decisionHandler(.cancel)
-                              return
-                          }
-                      }
-                      decisionHandler(.allow)
-                  }
               }
           }
           EOF
@@ -748,8 +735,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AS Music</string>
-              <key>CFBundleShortVersionString</key><string>18.1</string>
-              <key>CFBundleVersion</key><string>28</string>
+              <key>CFBundleShortVersionString</key><string>18.2</string>
+              <key>CFBundleVersion</key><string>29</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
@@ -771,10 +758,6 @@ jobs:
               sources: [TrollMusicApp]
               info:
                 path: TrollMusicApp/Info.plist
-                properties:
-                  UIBackgroundModes: [audio]
-                  NSAppTransportSecurity:
-                    NSAllowsArbitraryLoads: true
               settings:
                 CODE_SIGNING_ALLOWED: "NO"
                 CODE_SIGNING_REQUIRED: "NO"
@@ -794,5 +777,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AS-Music-Ultimate-V18.1
+          name: AS-Music-Ultimate-V18.2
           path: TrollMusicApp/TrollMusicApp.ipa
