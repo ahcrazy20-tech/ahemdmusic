@@ -117,7 +117,7 @@ jobs:
               func playNext() {
                   guard !songs.isEmpty else { return }
                   if isShuffle {
-                      playSong(songs.randomElement()!)
+                      if let randomSong = songs.randomElement() { playSong(randomSong) }
                   } else {
                       guard let current = currentSong, let index = songs.firstIndex(of: current) else { return }
                       let nextIndex = (index + 1) % songs.count
@@ -128,7 +128,7 @@ jobs:
               func playPrevious() {
                   guard !songs.isEmpty else { return }
                   if isShuffle {
-                      playSong(songs.randomElement()!)
+                      if let randomSong = songs.randomElement() { playSong(randomSong) }
                   } else {
                       guard let current = currentSong, let index = songs.firstIndex(of: current) else { return }
                       let prevIndex = (index - 1 + songs.count) % songs.count
@@ -142,10 +142,26 @@ jobs:
               
               func setupRemoteCommandCenter() {
                   let commandCenter = MPRemoteCommandCenter.shared()
-                  commandCenter.playCommand.addTarget { [unowned self] _ in self.isPlaying ? .commandFailed : { self.togglePlayPause(); return .success }() }
-                  commandCenter.pauseCommand.addTarget { [unowned self] _ in !self.isPlaying ? .commandFailed : { self.togglePlayPause(); return .success }() }
-                  commandCenter.nextTrackCommand.addTarget { [unowned self] _ in self.playNext(); return .success }
-                  commandCenter.previousTrackCommand.addTarget { [unowned self] _ in self.playPrevious(); return .success }
+                  commandCenter.playCommand.addTarget { [weak self] _ in
+                      guard let self = self else { return .commandFailed }
+                      if self.isPlaying { return .commandFailed }
+                      self.togglePlayPause()
+                      return .success
+                  }
+                  commandCenter.pauseCommand.addTarget { [weak self] _ in
+                      guard let self = self else { return .commandFailed }
+                      if !self.isPlaying { return .commandFailed }
+                      self.togglePlayPause()
+                      return .success
+                  }
+                  commandCenter.nextTrackCommand.addTarget { [weak self] _ in
+                      self?.playNext()
+                      return .success
+                  }
+                  commandCenter.previousTrackCommand.addTarget { [weak self] _ in
+                      self?.playPrevious()
+                      return .success
+                  }
               }
               
               func updateNowPlayingInfo() {
