@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V28.2
+name: Build TrollMusicApp V28.3
 
 on:
   push:
@@ -88,7 +88,7 @@ jobs:
                       DispatchQueue.main.async {
                           if self.useAVPlayer {
                               self.currentTime = self.avPlayer?.currentTime().seconds ?? 0.0
-                              let d = self.avPlayer?.currentItem?.asset.duration.seconds ?? 0.0
+                              let d = self.avPlayer?.currentItem?.duration.seconds ?? 0.0
                               self.duration = (d.isNaN || d.isInfinite) ? 1.0 : d
                           } else {
                               self.currentTime = self.audioPlayer?.currentTime ?? 0.0
@@ -220,10 +220,10 @@ jobs:
                   var info = [String: Any]()
                   info[MPMediaItemPropertyTitle] = currentSong.title; info[MPMediaItemPropertyArtist] = "AS Music"; info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
                   if useAVPlayer {
-                      let duration = avPlayer?.currentItem?.asset.duration.seconds ?? 0.0
-                      if !duration.isNaN { info[MPMediaItemPropertyPlaybackDuration] = duration; info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = avPlayer?.currentTime().seconds }
+                      let d = avPlayer?.currentItem?.duration.seconds ?? 0.0
+                      if !d.isNaN { info[MPMediaItemPropertyPlaybackDuration] = d; info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = avPlayer?.currentTime().seconds }
                   } else {
-                      if let duration = audioPlayer?.duration { info[MPMediaItemPropertyPlaybackDuration] = duration; info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = audioPlayer?.currentTime }
+                      if let d = audioPlayer?.duration { info[MPMediaItemPropertyPlaybackDuration] = d; info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = audioPlayer?.currentTime }
                   }
                   MPNowPlayingInfoCenter.default().nowPlayingInfo = info
               }
@@ -432,7 +432,7 @@ jobs:
           }
           EOF
 
-      - name: Write Web Browser Logic
+      - name: Write Web Browser Logic (MISSING VARIABLE FIXED)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
@@ -444,11 +444,14 @@ jobs:
               @Published var tabs: [BrowserTab] = []
               @Published var currentTabIndex: Int = 0
               @Published var showTabs: Bool = false
-              
               @Published var canGoBack: Bool = false
               @Published var canGoForward: Bool = false
               @Published var showDownloadAlert: Bool = false
               @Published var showNamePrompt: Bool = false
+              
+              // FIX: ADDED MISSING VARIABLE!
+              @Published var showBlobError: Bool = false
+              
               @Published var downloadFileName: String = ""
               @Published var customSongName: String = ""
               var capturedUrl: URL? = nil
@@ -475,6 +478,7 @@ jobs:
               func goBack() { currentWebView.goBack() }
               func goForward() { currentWebView.goForward() }
               func refresh() { currentWebView.reload() }
+              
               func loadUrl(_ urlString: String) { 
                   var finalStr = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
                   if finalStr.isEmpty { return }
@@ -592,7 +596,7 @@ jobs:
           }
           EOF
 
-      - name: Write UI Views Code (Fixed Slider)
+      - name: Write UI Views Code
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
@@ -660,6 +664,7 @@ jobs:
                       TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { }
                   } message: { Text("Enter a name to save the audio track.") }
                   .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
+                  .alert("Error", isPresented: $webViewModel.showBlobError) { Button("OK", role: .cancel) { } } message: { Text("Try using the Magic DL tab instead!") }
               }
           }
 
@@ -822,8 +827,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AS Music</string>
-              <key>CFBundleShortVersionString</key><string>28.2</string>
-              <key>CFBundleVersion</key><string>48</string>
+              <key>CFBundleShortVersionString</key><string>28.3</string>
+              <key>CFBundleVersion</key><string>49</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
@@ -868,5 +873,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AS-Music-Ultimate-V28.2
+          name: AS-Music-Ultimate-V28.3
           path: TrollMusicApp/TrollMusicApp.ipa
