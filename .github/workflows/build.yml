@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V3.0
+name: Build TrollMusicApp V4.0
 
 on:
   push:
@@ -15,25 +15,32 @@ jobs:
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp
 
-      - name: Write Main App Code
+      - name: Write Main App Code (With Background Fix)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
           import AVFoundation
 
+          class AppDelegate: NSObject, UIApplicationDelegate {
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
+                  do {
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: [.longFormAudio, .defaultToSpeaker])
+                      try AVAudioSession.sharedInstance().setActive(true)
+                      UIApplication.shared.beginReceivingRemoteControlEvents()
+                  } catch {
+                      print("Failed to set background audio: \(error)")
+                  }
+                  return true
+              }
+          }
+
           @main
           struct TrollMusicAppApp: App {
-              init() { setupAudioSession() }
+              @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
               var body: some Scene {
                   WindowGroup {
                       MainTabView().environmentObject(MusicManager.shared)
                   }
-              }
-              func setupAudioSession() {
-                  do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
-                      try AVAudioSession.sharedInstance().setActive(true)
-                  } catch { print("Audio Error") }
               }
           }
           EOF
@@ -153,13 +160,24 @@ jobs:
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
           EOF
 
-      - name: Write Web Browser Logic
+      - name: Write Advanced Multi-Tab Browser Logic
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
           import WebKit
 
+          struct BrowserTab: Identifiable {
+              let id = UUID()
+              var webView: WKWebView
+              var urlString: String
+              var title: String
+          }
+
           class WebViewModel: ObservableObject {
+              @Published var tabs: [BrowserTab] = []
+              @Published var currentTabIndex: Int = 0
+              @Published var showTabs: Bool = false
+              
               @Published var canGoBack: Bool = false
               @Published var canGoForward: Bool = false
               @Published var showDownloadAlert: Bool = false
@@ -168,26 +186,43 @@ jobs:
               @Published var customSongName: String = ""
               var capturedUrl: URL? = nil
               
-              var webView: WKWebView = {
+              init() { addNewTab() }
+              
+              var currentWebView: WKWebView { tabs[currentTabIndex].webView }
+              
+              func addNewTab() {
                   let prefs = WKWebpagePreferences()
                   prefs.allowsContentJavaScript = true
                   let config = WKWebViewConfiguration()
                   config.defaultWebpagePreferences = prefs
                   config.allowsInlineMediaPlayback = true
-                  return WKWebView(frame: .zero, configuration: config)
-              }()
+                  
+                  let newWebView = WKWebView(frame: .zero, configuration: config)
+                  newWebView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+                  
+                  let newTab = BrowserTab(webView: newWebView, urlString: "https://google.com", title: "New Tab")
+                  tabs.append(newTab)
+                  currentTabIndex = tabs.count - 1
+                  loadUrl("https://google.com")
+              }
               
-              func goBack() { webView.goBack() }
-              func goForward() { webView.goForward() }
-              func refresh() { webView.reload() }
+              func closeTab(at index: Int) {
+                  tabs.remove(at: index)
+                  if tabs.isEmpty { addNewTab() }
+                  else if currentTabIndex >= tabs.count { currentTabIndex = tabs.count - 1 }
+              }
+              
+              func goBack() { currentWebView.goBack() }
+              func goForward() { currentWebView.goForward() }
+              func refresh() { currentWebView.reload() }
               func loadUrl(_ urlString: String) {
                   var finalStr = urlString
                   if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr }
-                  if let url = URL(string: finalStr) { webView.load(URLRequest(url: url)) }
+                  if let url = URL(string: finalStr) { currentWebView.load(URLRequest(url: url)) }
               }
               
               func grabAudio() {
-                  webView.evaluateJavaScript("document.querySelector('audio')?.src || document.querySelector('video')?.src") { result, error in
+                  currentWebView.evaluateJavaScript("document.querySelector('audio')?.src || document.querySelector('video')?.src") { result, error in
                       if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) {
                           self.capturedUrl = url
                           self.customSongName = ""
@@ -199,7 +234,6 @@ jobs:
               func confirmDownload(with name: String) {
                   guard let url = capturedUrl else { return }
                   let finalName = name.isEmpty ? "CapturedAudio_\(UUID().uuidString.prefix(4))" : name
-                  
                   let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
                       guard let localUrl = localUrl else { return }
                       let fm = FileManager.default
@@ -219,14 +253,17 @@ jobs:
               @Binding var urlString: String
               
               func makeUIView(context: Context) -> WKWebView {
-                  let webView = viewModel.webView
+                  let webView = viewModel.currentWebView
                   webView.navigationDelegate = context.coordinator
                   webView.uiDelegate = context.coordinator
-                  if let url = URL(string: "https://google.com") { webView.load(URLRequest(url: url)) }
                   return webView
               }
               
-              func updateUIView(_ uiView: WKWebView, context: Context) {}
+              func updateUIView(_ uiView: WKWebView, context: Context) {
+                  uiView.navigationDelegate = context.coordinator
+                  uiView.uiDelegate = context.coordinator
+              }
+              
               func makeCoordinator() -> Coordinator { Coordinator(self) }
               
               class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
@@ -234,6 +271,7 @@ jobs:
                   init(_ parent: WebViewUI) { self.parent = parent }
                   
                   func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+                      // Block popup ads entirely
                       if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
                       return nil
                   }
@@ -241,13 +279,37 @@ jobs:
                   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
                       parent.viewModel.canGoBack = webView.canGoBack
                       parent.viewModel.canGoForward = webView.canGoForward
-                      if let currentURL = webView.url?.absoluteString { parent.urlString = currentURL }
+                      if let currentURL = webView.url?.absoluteString { 
+                          parent.urlString = currentURL
+                          parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL
+                      }
+                  }
+                  
+                  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                      if let url = navigationAction.request.url {
+                          if ["mp3", "m4a"].contains(url.pathExtension.lowercased()) {
+                              let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
+                                  guard let localUrl = localUrl else { return }
+                                  let fm = FileManager.default
+                                  let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent)
+                                  try? fm.moveItem(at: localUrl, to: dest)
+                                  DispatchQueue.main.async { 
+                                      self.parent.viewModel.downloadFileName = dest.lastPathComponent
+                                      self.parent.viewModel.showDownloadAlert = true 
+                                  }
+                              }
+                              task.resume()
+                              decisionHandler(.cancel)
+                              return
+                          }
+                      }
+                      decisionHandler(.allow)
                   }
               }
           }
           EOF
 
-      - name: Write UI Views Code (Fixed Tab Bar Layout)
+      - name: Write UI Views Code
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
@@ -261,19 +323,114 @@ jobs:
                       TabView {
                           LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
                           PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
-                          BrowserView().tabItem { Label("Browser", systemImage: "safari") }
+                          BrowserMainView().tabItem { Label("Browser", systemImage: "safari") }
                       }
                       .accentColor(.purple)
                       
                       if musicManager.currentSong != nil {
                           MiniPlayerView(showFullPlayer: $showFullPlayer)
-                              // Pushes the miniplayer up slightly so it doesn't cover the TabBar
                               .padding(.bottom, 50)
                       }
                   }
                   .sheet(isPresented: $showFullPlayer) {
                       FullPlayerView()
                   }
+              }
+          }
+
+          struct BrowserMainView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              @StateObject var webViewModel = WebViewModel()
+              @State private var urlString = "https://google.com"
+              
+              var body: some View {
+                  ZStack {
+                      VStack(spacing: 0) {
+                          HStack {
+                              TextField("Search or enter website", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.URL).autocapitalization(.none)
+                              Button("Go") { webViewModel.loadUrl(urlString) }
+                          }.padding(8).background(Color(UIColor.secondarySystemBackground))
+                          
+                          ScrollView(.horizontal, showsIndicators: false) {
+                              HStack {
+                                  Button("Sm3na") { webViewModel.loadUrl("https://sm3na.com") }.buttonStyle(.borderedProminent).tint(.purple)
+                                  Button("Nogomi") { webViewModel.loadUrl("https://nogomistars.com") }.buttonStyle(.borderedProminent).tint(.blue)
+                                  Button("YtMP3") { webViewModel.loadUrl("https://ytmp3.cc") }.buttonStyle(.borderedProminent).tint(.red)
+                              }.padding(.horizontal).padding(.bottom, 8)
+                          }.background(Color(UIColor.secondarySystemBackground))
+                          
+                          WebViewUI(viewModel: webViewModel, urlString: $urlString)
+                          
+                          // Browser Bottom Bar
+                          HStack {
+                              Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack)
+                              Spacer()
+                              Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward)
+                              Spacer()
+                              Button(action: { webViewModel.grabAudio() }) { 
+                                  Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple)
+                              }
+                              Spacer()
+                              Button(action: { webViewModel.showTabs = true }) { 
+                                  ZStack {
+                                      RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24)
+                                      Text("\(webViewModel.tabs.count)").font(.caption).bold()
+                                  }
+                              }
+                              Spacer()
+                              Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
+                          }.padding().background(Color(UIColor.secondarySystemBackground))
+                      }
+                      
+                      if webViewModel.showTabs {
+                          Color.black.opacity(0.8).edgesIgnoringSafeArea(.all)
+                          VStack {
+                              HStack {
+                                  Text("Tabs").font(.title).bold().foregroundColor(.white)
+                                  Spacer()
+                                  Button("Done") { webViewModel.showTabs = false }.foregroundColor(.blue)
+                              }.padding()
+                              
+                              ScrollView {
+                                  VStack(spacing: 15) {
+                                      ForEach(0..<webViewModel.tabs.count, id: \.self) { index in
+                                          HStack {
+                                              VStack(alignment: .leading) {
+                                                  Text("Tab \(index + 1)").font(.headline).foregroundColor(.white)
+                                                  Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1)
+                                              }
+                                              Spacer()
+                                              Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) }
+                                          }
+                                          .padding()
+                                          .background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color(UIColor.darkGray))
+                                          .cornerRadius(10)
+                                          .onTapGesture {
+                                              webViewModel.currentTabIndex = index
+                                              urlString = webViewModel.tabs[index].urlString
+                                              webViewModel.showTabs = false
+                                          }
+                                      }
+                                      
+                                      Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) {
+                                          HStack {
+                                              Image(systemName: "plus")
+                                              Text("New Tab")
+                                          }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10)
+                                      }.padding(.top, 10)
+                                  }.padding(.horizontal)
+                              }
+                          }
+                      }
+                  }
+                  .alert("Name Your Song", isPresented: $webViewModel.showNamePrompt) {
+                      TextField("Song Name", text: $webViewModel.customSongName)
+                      Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }
+                      Button("Cancel", role: .cancel) { }
+                  }
+                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) {
+                      Button("OK", role: .cancel) { musicManager.loadSongs() }
+                  } message: { Text("Saved \(webViewModel.downloadFileName)") }
               }
           }
 
@@ -286,13 +443,10 @@ jobs:
                       HStack(spacing: 15) {
                           ZStack {
                               LinearGradient(gradient: Gradient(colors: [.purple, .blue]), startPoint: .topLeading, endPoint: .bottomTrailing)
-                                  .frame(width: 45, height: 45)
-                                  .cornerRadius(8)
+                                  .frame(width: 45, height: 45).cornerRadius(8)
                               Image(systemName: "music.note").foregroundColor(.white)
                           }
-                          
                           Text(musicManager.currentSong?.title ?? "").font(.system(size: 16, weight: .semibold)).lineLimit(1)
-                          
                           Spacer()
                           Button(action: { musicManager.togglePlayPause() }) {
                               Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").font(.title2).foregroundColor(.primary)
@@ -311,7 +465,6 @@ jobs:
               var body: some View {
                   ZStack {
                       LinearGradient(gradient: Gradient(colors: [Color(red: 0.1, green: 0.1, blue: 0.2), Color(red: 0.3, green: 0.1, blue: 0.4)]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
-                      
                       VStack(spacing: 40) {
                           HStack {
                               Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }
@@ -325,11 +478,7 @@ jobs:
                           }.padding()
                           
                           ZStack {
-                              RoundedRectangle(cornerRadius: 30)
-                                  .fill(LinearGradient(gradient: Gradient(colors: [.blue, .purple]), startPoint: .topLeading, endPoint: .bottomTrailing))
-                                  .frame(width: 280, height: 280)
-                                  .shadow(color: .purple.opacity(0.4), radius: 20, x: 0, y: 15)
-                              
+                              RoundedRectangle(cornerRadius: 30).fill(LinearGradient(gradient: Gradient(colors: [.blue, .purple]), startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 280, height: 280).shadow(color: .purple.opacity(0.4), radius: 20, x: 0, y: 15)
                               Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit).frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8))
                           }.padding(.top, 20)
                           
@@ -339,24 +488,13 @@ jobs:
                           }
                           
                           HStack(spacing: 30) {
-                              Button(action: { musicManager.isShuffle.toggle() }) {
-                                  Image(systemName: "shuffle").font(.title2).foregroundColor(musicManager.isShuffle ? .purple : .white.opacity(0.5))
-                              }
-                              Button(action: { musicManager.playPrevious() }) {
-                                  Image(systemName: "backward.fill").font(.title).foregroundColor(.white)
-                              }
+                              Button(action: { musicManager.isShuffle.toggle() }) { Image(systemName: "shuffle").font(.title2).foregroundColor(musicManager.isShuffle ? .purple : .white.opacity(0.5)) }
+                              Button(action: { musicManager.playPrevious() }) { Image(systemName: "backward.fill").font(.title).foregroundColor(.white) }
                               Button(action: { musicManager.togglePlayPause() }) {
-                                  ZStack {
-                                      Circle().fill(Color.white).frame(width: 80, height: 80)
-                                      Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").resizable().aspectRatio(contentMode: .fit).frame(width: 30, height: 30).foregroundColor(.black)
-                                  }
+                                  ZStack { Circle().fill(Color.white).frame(width: 80, height: 80); Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").resizable().aspectRatio(contentMode: .fit).frame(width: 30, height: 30).foregroundColor(.black) }
                               }
-                              Button(action: { musicManager.playNext() }) {
-                                  Image(systemName: "forward.fill").font(.title).foregroundColor(.white)
-                              }
-                              Button(action: { }) {
-                                  Image(systemName: "repeat").font(.title2).foregroundColor(.white.opacity(0.5))
-                              }
+                              Button(action: { musicManager.playNext() }) { Image(systemName: "forward.fill").font(.title).foregroundColor(.white) }
+                              Button(action: { }) { Image(systemName: "repeat").font(.title2).foregroundColor(.white.opacity(0.5)) }
                           }.padding(.top, 20)
                           Spacer()
                       }
@@ -383,17 +521,8 @@ jobs:
                       }
                       .navigationTitle("Ahmed's Library")
                       .onAppear { musicManager.loadSongs() }
-                      .confirmationDialog("Options", isPresented: Binding(
-                          get: { showingOptionsFor != nil },
-                          set: { if !$0 { showingOptionsFor = nil } }
-                      ), titleVisibility: .visible) {
-                          if let song = showingOptionsFor {
-                              ForEach(musicManager.playlists) { playlist in
-                                  Button("Add to \(playlist.name)") {
-                                      musicManager.addSongToPlaylist(song: song, playlist: playlist)
-                                  }
-                              }
-                          }
+                      .confirmationDialog("Options", isPresented: Binding(get: { showingOptionsFor != nil }, set: { if !$0 { showingOptionsFor = nil } }), titleVisibility: .visible) {
+                          if let song = showingOptionsFor { ForEach(musicManager.playlists) { playlist in Button("Add to \(playlist.name)") { musicManager.addSongToPlaylist(song: song, playlist: playlist) } } }
                           Button("Cancel", role: .cancel) {}
                       }
                   }
@@ -405,9 +534,7 @@ jobs:
               var playlist: Playlist
               var songsInPlaylist: [Song] { musicManager.songs.filter { playlist.songIDs.contains($0.id) } }
               var body: some View {
-                  List {
-                      ForEach(songsInPlaylist) { song in Text(song.title).onTapGesture { musicManager.playSong(song) } }
-                  }.navigationTitle(playlist.name)
+                  List { ForEach(songsInPlaylist) { song in Text(song.title).onTapGesture { musicManager.playSong(song) } } }.navigationTitle(playlist.name)
               }
           }
 
@@ -418,9 +545,7 @@ jobs:
               var body: some View {
                   NavigationView {
                       List {
-                          ForEach(musicManager.playlists) { playlist in 
-                              NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline) }
-                          }
+                          ForEach(musicManager.playlists) { playlist in NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline) } }
                       }
                       .navigationTitle("Playlists")
                       .toolbar { Button(action: { showingNewPlaylist = true }) { Image(systemName: "plus") } }
@@ -432,59 +557,9 @@ jobs:
                   }
               }
           }
-
-          struct BrowserView: View {
-              @EnvironmentObject var musicManager: MusicManager
-              @StateObject var webViewModel = WebViewModel()
-              @State private var urlString = "https://google.com"
-              
-              var body: some View {
-                  VStack(spacing: 0) {
-                      HStack {
-                          TextField("Search or enter website", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.URL).autocapitalization(.none)
-                          Button("Go") { webViewModel.loadUrl(urlString) }
-                      }.padding(8).background(Color(UIColor.secondarySystemBackground))
-                      
-                      ScrollView(.horizontal, showsIndicators: false) {
-                          HStack {
-                              Button("Sm3na") { webViewModel.loadUrl("https://sm3na.com") }.buttonStyle(.borderedProminent).tint(.purple)
-                              Button("Nogomi") { webViewModel.loadUrl("https://nogomistars.com") }.buttonStyle(.borderedProminent).tint(.blue)
-                              Button("YtMP3") { webViewModel.loadUrl("https://ytmp3.cc") }.buttonStyle(.borderedProminent).tint(.red)
-                          }.padding(.horizontal).padding(.bottom, 8)
-                      }.background(Color(UIColor.secondarySystemBackground))
-                      
-                      WebViewUI(viewModel: webViewModel, urlString: $urlString)
-                      
-                      HStack {
-                          Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack)
-                          Spacer()
-                          Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward)
-                          Spacer()
-                          Button(action: { webViewModel.grabAudio() }) { 
-                              HStack {
-                                  Image(systemName: "arrow.down.circle.fill")
-                                  Text("Grab Audio")
-                              }.font(.subheadline).bold().padding(.horizontal, 10).padding(.vertical, 5).background(Color.purple).foregroundColor(.white).cornerRadius(15)
-                          }
-                          Spacer()
-                          Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
-                      }.padding().background(Color(UIColor.secondarySystemBackground))
-                  }
-                  .alert("Name Your Song", isPresented: $webViewModel.showNamePrompt) {
-                      TextField("Song Name", text: $webViewModel.customSongName)
-                      Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }
-                      Button("Cancel", role: .cancel) { }
-                  }
-                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) {
-                      Button("OK", role: .cancel) { musicManager.loadSongs() }
-                  } message: {
-                      Text("Saved \(webViewModel.downloadFileName)")
-                  }
-              }
-          }
           EOF
 
-      - name: Write Plist & Entitlements
+      - name: Write Plist
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
@@ -494,23 +569,11 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key><string>3.0</string>
-              <key>CFBundleVersion</key><string>4</string>
+              <key>CFBundleShortVersionString</key><string>4.0</string>
+              <key>CFBundleVersion</key><string>5</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
-          </dict>
-          </plist>
-          EOF
-          
-          # CRITICAL FOR BACKGROUND AUDIO!
-          cat << 'EOF' > TrollMusicApp/TrollMusicApp.entitlements
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>com.apple.security.background.audio</key>
-              <true/>
           </dict>
           </plist>
           EOF
@@ -533,7 +596,6 @@ jobs:
                 CODE_SIGNING_ALLOWED: "NO"
                 CODE_SIGNING_REQUIRED: "NO"
                 CODE_SIGN_IDENTITY: ""
-                CODE_SIGN_ENTITLEMENTS: TrollMusicApp.entitlements
           EOF
           xcodegen generate
 
@@ -548,5 +610,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-Ultimate-V3
+          name: TrollMusicApp-Ahmed-V4.0
           path: TrollMusicApp/TrollMusicApp.ipa
