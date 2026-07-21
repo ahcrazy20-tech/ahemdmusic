@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V18.0
+name: Build TrollMusicApp V18.1
 
 on:
   push:
@@ -202,7 +202,8 @@ jobs:
                   info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
                   
                   if useAVPlayer {
-                      if let duration = avPlayer?.currentItem?.asset.duration.seconds, !duration.isNaN {
+                      let duration = avPlayer?.currentItem?.duration.seconds ?? 0.0
+                      if !duration.isNaN {
                           info[MPMediaItemPropertyPlaybackDuration] = duration
                           info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = avPlayer?.currentTime().seconds
                       }
@@ -217,11 +218,12 @@ jobs:
           }
           EOF
 
-      - name: Write Smart Downloader API
+      - name: Write Smart Downloader API (FIXED AVFoundation IMPORT)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
           import SwiftUI
           import WebKit
+          import AVFoundation
 
           class PreviewPlayer: NSObject {
               static let shared = PreviewPlayer()
@@ -461,10 +463,8 @@ jobs:
               @Published var downloadFileName: String = ""
               @Published var customSongName: String = ""
               var capturedUrl: URL? = nil
-              
               init() { addNewTab() }
               var currentWebView: WKWebView { tabs[currentTabIndex].webView }
-              
               func addNewTab() {
                   let prefs = WKWebpagePreferences()
                   prefs.allowsContentJavaScript = true
@@ -477,49 +477,30 @@ jobs:
                   currentTabIndex = tabs.count - 1
                   loadUrl("https://google.com")
               }
-              
-              func closeTab(at index: Int) { 
-                  tabs.remove(at: index); if tabs.isEmpty { addNewTab() } else if currentTabIndex >= tabs.count { currentTabIndex = tabs.count - 1 } 
-              }
+              func closeTab(at index: Int) { tabs.remove(at: index); if tabs.isEmpty { addNewTab() } else if currentTabIndex >= tabs.count { currentTabIndex = tabs.count - 1 } }
               func goBack() { currentWebView.goBack() }
               func goForward() { currentWebView.goForward() }
               func refresh() { currentWebView.reload() }
-              func loadUrl(_ urlString: String) { 
-                  var finalStr = urlString; if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr }
-                  if let url = URL(string: finalStr) { currentWebView.load(URLRequest(url: url)) } 
-              }
-              
+              func loadUrl(_ urlString: String) { var finalStr = urlString; if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr }; if let url = URL(string: finalStr) { currentWebView.load(URLRequest(url: url)) } }
               func grabAudio() {
                   let js = "(function() { var media = document.querySelector('video') || document.querySelector('audio'); if (media && media.src) return media.src; var source = document.querySelector('source'); if (source && source.src) return source.src; return null; })()"
                   currentWebView.evaluateJavaScript(js) { result, error in
                       if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) {
-                          if mediaUrlString.starts(with: "blob:") {
-                              self.showBlobError = true
-                          } else {
-                              self.capturedUrl = url
-                              self.customSongName = "Grabbed_Audio"
-                              self.showNamePrompt = true
-                          }
+                          if mediaUrlString.starts(with: "blob:") { self.showBlobError = true } else { self.capturedUrl = url; self.customSongName = ""; self.showNamePrompt = true }
                       }
                   }
               }
-              
               func confirmDownload(with name: String) {
                   guard let url = capturedUrl else { return }
                   var finalName = name.replacingOccurrences(of: "/", with: "-")
                   if !finalName.hasSuffix(".mp3") && !finalName.hasSuffix(".m4a") && !finalName.hasSuffix(".wav") { finalName += ".mp3" }
-                  
                   let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                   let destPath = destDir.appendingPathComponent(finalName)
-                  
                   URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
                       guard let localUrl = localUrl else { return }
                       try? FileManager.default.moveItem(at: localUrl, to: destPath)
                       try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
-                      DispatchQueue.main.async { 
-                          self.downloadFileName = finalName
-                          self.showDownloadAlert = true 
-                      }
+                      DispatchQueue.main.async { self.downloadFileName = finalName; self.showDownloadAlert = true }
                   }.resume()
               }
           }
@@ -527,15 +508,12 @@ jobs:
           struct WebViewUI: UIViewRepresentable {
               @ObservedObject var viewModel: WebViewModel
               @Binding var urlString: String
-              
               func makeUIView(context: Context) -> WKWebView { return viewModel.currentWebView }
               func updateUIView(_ uiView: WKWebView, context: Context) { uiView.navigationDelegate = context.coordinator; uiView.uiDelegate = context.coordinator }
               func makeCoordinator() -> Coordinator { Coordinator(self) }
-              
               class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
                   var parent: WebViewUI
                   init(_ parent: WebViewUI) { self.parent = parent }
-                  
                   func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
                       if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
                       return nil
@@ -544,18 +522,13 @@ jobs:
                       parent.viewModel.canGoBack = webView.canGoBack; parent.viewModel.canGoForward = webView.canGoForward
                       if let currentURL = webView.url?.absoluteString { parent.urlString = currentURL; parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL }
                   }
-                  
                   func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
                       if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm") {
                           if let url = navigationResponse.response.url {
                               let suggested = navigationResponse.response.suggestedFilename ?? "Song"
                               let cleanName = suggested.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggested
                               let nameWithoutExt = (cleanName as NSString).deletingPathExtension
-                              DispatchQueue.main.async {
-                                  self.parent.viewModel.capturedUrl = url
-                                  self.parent.viewModel.customSongName = nameWithoutExt
-                                  self.parent.viewModel.showNamePrompt = true
-                              }
+                              DispatchQueue.main.async { self.parent.viewModel.capturedUrl = url; self.parent.viewModel.customSongName = nameWithoutExt; self.parent.viewModel.showNamePrompt = true }
                               decisionHandler(.cancel)
                               return
                           }
@@ -566,7 +539,7 @@ jobs:
           }
           EOF
 
-      - name: Write UI Views Code (Clean UI & Added Rename Support)
+      - name: Write UI Views Code
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
@@ -658,7 +631,7 @@ jobs:
                       VStack(spacing: 40) {
                           HStack { Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }; Spacer(); VStack(spacing: 2) { if let song = musicManager.currentSong, musicManager.isFavorite(song: song) { Text("FROM LIKED SONGS").font(.caption).bold().foregroundColor(.white.opacity(0.6)) } else { Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6)) }; Text("AS Music").font(.subheadline).bold().foregroundColor(.white) }; Spacer(); Button(action: { showTimerOptions = true }) { Image(systemName: "moon.fill").foregroundColor(musicManager.sleepTimerMinutes > 0 ? .purple : .white) } }.padding()
                           ZStack { RoundedRectangle(cornerRadius: 15).fill(generateColor(for: musicManager.currentSong?.title ?? "")).frame(width: 320, height: 320).shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 15); Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit).frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8)) }.padding(.top, 10)
-                          HStack { VStack(alignment: .leading, spacing: 8) { Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 26, weight: .bold)).foregroundColor(.white).lineLimit(2); HStack { Text("Downloaded Track").font(.subheadline).foregroundColor(.white.opacity(0.6)); if musicManager.isPlaying { VisualizerView().padding(.leading, 5) } } }; Spacer(); if let song = musicManager.currentSong { Button(action: { musicManager.toggleFavorite(song: song) }) { Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart").font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white) } } }.padding(.horizontal, 30)
+                          HStack { VStack(alignment: .leading, spacing: 8) { Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 26, weight: .bold)).foregroundColor(.white).lineLimit(2); HStack { Text("AS Music Player").font(.subheadline).foregroundColor(.white.opacity(0.6)); if musicManager.isPlaying { VisualizerView().padding(.leading, 5) } } }; Spacer(); if let song = musicManager.currentSong { Button(action: { musicManager.toggleFavorite(song: song) }) { Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart").font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white) } } }.padding(.horizontal, 30)
                           HStack(spacing: 40) {
                               Button(action: { musicManager.isShuffle.toggle() }) { Image(systemName: "shuffle").font(.title2).foregroundColor(musicManager.isShuffle ? .green : .white.opacity(0.5)) }
                               Button(action: { musicManager.playPrevious() }) { Image(systemName: "backward.fill").font(.system(size: 35)).foregroundColor(.white) }
@@ -775,8 +748,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AS Music</string>
-              <key>CFBundleShortVersionString</key><string>18.0</string>
-              <key>CFBundleVersion</key><string>27</string>
+              <key>CFBundleShortVersionString</key><string>18.1</string>
+              <key>CFBundleVersion</key><string>28</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
@@ -821,5 +794,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AS-Music-Ultimate-V18
+          name: AS-Music-Ultimate-V18.1
           path: TrollMusicApp/TrollMusicApp.ipa
