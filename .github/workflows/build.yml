@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V4.0
+name: Build TrollMusicApp V4.1
 
 on:
   push:
@@ -15,28 +15,20 @@ jobs:
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp
 
-      - name: Write Main App Code (With Background Fix)
+      - name: Write Main App Code
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
           import AVFoundation
 
-          class AppDelegate: NSObject, UIApplicationDelegate {
-              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
-                  do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: [.longFormAudio, .defaultToSpeaker])
-                      try AVAudioSession.sharedInstance().setActive(true)
-                      UIApplication.shared.beginReceivingRemoteControlEvents()
-                  } catch {
-                      print("Failed to set background audio: \(error)")
-                  }
-                  return true
-              }
-          }
-
           @main
           struct TrollMusicAppApp: App {
-              @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+              init() {
+                  do {
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                      try AVAudioSession.sharedInstance().setActive(true)
+                  } catch { print("Audio Init Error") }
+              }
               var body: some Scene {
                   WindowGroup {
                       MainTabView().environmentObject(MusicManager.shared)
@@ -66,7 +58,9 @@ jobs:
               
               override init() {
                   super.init()
-                  loadSongs(); loadPlaylists(); setupRemoteCommandCenter()
+                  loadSongs()
+                  loadPlaylists()
+                  setupRemoteCommandCenter()
               }
               
               func loadSongs() {
@@ -103,6 +97,10 @@ jobs:
               
               func playSong(_ song: Song) {
                   do {
+                      // CRITICAL: Force audio session active before every play
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                      try AVAudioSession.sharedInstance().setActive(true)
+                      
                       audioPlayer = try AVAudioPlayer(contentsOf: song.url)
                       audioPlayer?.delegate = self
                       audioPlayer?.play()
@@ -160,7 +158,7 @@ jobs:
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
           EOF
 
-      - name: Write Advanced Multi-Tab Browser Logic
+      - name: Write Web Browser Logic
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
@@ -260,6 +258,7 @@ jobs:
               }
               
               func updateUIView(_ uiView: WKWebView, context: Context) {
+                  // Ensure current delegate is set when view updates
                   uiView.navigationDelegate = context.coordinator
                   uiView.uiDelegate = context.coordinator
               }
@@ -271,7 +270,6 @@ jobs:
                   init(_ parent: WebViewUI) { self.parent = parent }
                   
                   func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-                      // Block popup ads entirely
                       if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
                       return nil
                   }
@@ -349,7 +347,7 @@ jobs:
                           HStack {
                               TextField("Search or enter website", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.URL).autocapitalization(.none)
                               Button("Go") { webViewModel.loadUrl(urlString) }
-                          }.padding(8).background(Color(UIColor.secondarySystemBackground))
+                          }.padding(8).background(Color(uiColor: .secondarySystemBackground))
                           
                           ScrollView(.horizontal, showsIndicators: false) {
                               HStack {
@@ -357,7 +355,7 @@ jobs:
                                   Button("Nogomi") { webViewModel.loadUrl("https://nogomistars.com") }.buttonStyle(.borderedProminent).tint(.blue)
                                   Button("YtMP3") { webViewModel.loadUrl("https://ytmp3.cc") }.buttonStyle(.borderedProminent).tint(.red)
                               }.padding(.horizontal).padding(.bottom, 8)
-                          }.background(Color(UIColor.secondarySystemBackground))
+                          }.background(Color(uiColor: .secondarySystemBackground))
                           
                           WebViewUI(viewModel: webViewModel, urlString: $urlString)
                           
@@ -379,7 +377,7 @@ jobs:
                               }
                               Spacer()
                               Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
-                          }.padding().background(Color(UIColor.secondarySystemBackground))
+                          }.padding().background(Color(uiColor: .secondarySystemBackground))
                       }
                       
                       if webViewModel.showTabs {
@@ -403,7 +401,7 @@ jobs:
                                               Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) }
                                           }
                                           .padding()
-                                          .background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color(UIColor.darkGray))
+                                          .background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3))
                                           .cornerRadius(10)
                                           .onTapGesture {
                                               webViewModel.currentTabIndex = index
@@ -559,7 +557,7 @@ jobs:
           }
           EOF
 
-      - name: Write Plist
+      - name: Write Plist & Entitlements
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
@@ -569,11 +567,23 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key><string>4.0</string>
-              <key>CFBundleVersion</key><string>5</string>
+              <key>CFBundleShortVersionString</key><string>4.1</string>
+              <key>CFBundleVersion</key><string>6</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
+          </dict>
+          </plist>
+          EOF
+          
+          # Critical for ensuring background audio doesn't get killed
+          cat << 'EOF' > TrollMusicApp/TrollMusicApp.entitlements
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.background.audio</key>
+              <true/>
           </dict>
           </plist>
           EOF
@@ -596,6 +606,7 @@ jobs:
                 CODE_SIGNING_ALLOWED: "NO"
                 CODE_SIGNING_REQUIRED: "NO"
                 CODE_SIGN_IDENTITY: ""
+                CODE_SIGN_ENTITLEMENTS: TrollMusicApp.entitlements
           EOF
           xcodegen generate
 
@@ -610,5 +621,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-V4.0
+          name: TrollMusicApp-Ahmed-Ultimate-V4
           path: TrollMusicApp/TrollMusicApp.ipa
