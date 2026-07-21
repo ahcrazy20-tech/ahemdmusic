@@ -246,8 +246,8 @@ jobs:
                       previewPlayer?.stop()
                       statusMessage = "Loading Preview..."
                       guard let url = URL(string: track.previewUrl) else { return }
-                      URLSession.shared.downloadTask(with: url) { localUrl, _, _ in
-                          guard let localUrl = localUrl else { return }
+                      URLSession.shared.downloadTask(with: url) { [weak self] localUrl, _, _ in
+                          guard let self = self, let localUrl = localUrl else { return }
                           do {
                               try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default); try AVAudioSession.sharedInstance().setActive(true)
                               let data = try Data(contentsOf: localUrl)
@@ -264,8 +264,8 @@ jobs:
                   guard !query.isEmpty else { return }; isSearching = true; statusMessage = "Searching..."; stopPreview()
                   let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
                   guard let url = URL(string: "https://itunes.apple.com/search?term=\(encodedQuery)&media=music&limit=25") else { return }
-                  URLSession.shared.dataTask(with: url) { data, _, _ in
-                      guard let data = data, let res = try? JSONDecoder().decode(ITunesResponse.self, from: data) else { DispatchQueue.main.async { self.isSearching = false; self.showError = true; self.errorDetails = "Search failed." }; return }
+                  URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(ITunesResponse.self, from: data) else { DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "Search failed." }; return }
                       DispatchQueue.main.async { self.isSearching = false; if res.results.isEmpty { self.showError = true; self.errorDetails = "No songs found." } else { self.searchResults = res.results; self.showSearchResults = true } }
                   }.resume()
               }
@@ -273,9 +273,12 @@ jobs:
               func downloadLinkOrPlaylist(urlStr: String, name: String) {
                   guard !urlStr.isEmpty else { return }
                   stopPreview()
+                  
                   if urlStr.contains("youtube.com/playlist") || urlStr.contains("list=") {
                       fetchYouTubePlaylist(urlStr: urlStr, pName: name.isEmpty ? "YT_Playlist" : name)
-                  } else { downloadSingleCobalt(urlStr: urlStr, name: name) }
+                  } else {
+                      downloadSingleCobalt(urlStr: urlStr, name: name)
+                  }
               }
               
               func fetchYouTubePlaylist(urlStr: String, pName: String) {
@@ -283,8 +286,8 @@ jobs:
                   guard let url = URL(string: urlStr) else { return }
                   var req = URLRequest(url: url)
                   req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-                  URLSession.shared.dataTask(with: req) { data, _, _ in
-                      guard let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self.isDownloading = false; self.showError = true; self.errorDetails = "Playlist extraction failed." }; return }
+                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+                      guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self?.isDownloading = false; self?.showError = true; self?.errorDetails = "Playlist extraction failed." }; return }
                       var videoIds: [String] = []
                       let chunks = html.components(separatedBy: "\"videoId\":\"")
                       for chunk in chunks.dropFirst() {
@@ -321,9 +324,9 @@ jobs:
                   let parameters: [String: Any] = ["url": urlStr, "isAudioOnly": true, "aFormat": "mp3"]
                   request.httpBody = try? JSONSerialization.data(withJSONObject: parameters)
                   
-                  URLSession.shared.dataTask(with: request) { data, response, error in
-                      guard let data = data, let res = try? JSONDecoder().decode(CobaltResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) else {
-                          DispatchQueue.main.async { if isPlaylist { self.processNextPlaylistSong() } else { self.errorDetails = "Failed to extract stream."; self.isDownloading = false; self.showError = true } }; return
+                  URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(CobaltResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) else {
+                          DispatchQueue.main.async { if isPlaylist { self?.processNextPlaylistSong() } else { self?.errorDetails = "Failed to extract stream."; self?.isDownloading = false; self?.showError = true } }; return
                       }
                       self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
                       let task = self.downloadSession.downloadTask(with: audioUrl); task.resume()
