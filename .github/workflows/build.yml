@@ -7,34 +7,26 @@ on:
 
 jobs:
   build:
-    name: Build IPA
+    name: Build Full IPA
     runs-on: macos-latest
 
     steps:
-      - name: Fetch Perfect Source Code
+      - name: Setup Folders
         run: |
-          git clone https://github.com/neoncat-og/TrollStore-IPAs.git temp_clone || echo "Using simple swift structure"
-          # We will just write the files directly on the runner to guarantee no missing files!
-          
           mkdir -p TrollMusicApp/TrollMusicApp
-          mkdir -p TrollMusicApp/TrollMusicApp.xcodeproj/project.xcworkspace
-          mkdir -p TrollMusicApp/TrollMusicApp.xcodeproj/xcshareddata/xcschemes
 
-      - name: Generate Source Code
+      - name: Write Main App Code
         run: |
-          cd TrollMusicApp
-          cat << 'EOF' > TrollMusicApp/TrollMusicAppApp.swift
+          cat << 'EOF' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
           import AVFoundation
 
           @main
           struct TrollMusicAppApp: App {
-              init() {
-                  setupAudioSession()
-              }
+              init() { setupAudioSession() }
               var body: some Scene {
                   WindowGroup {
-                      Text("Ahmed\'s Music - Loading...").onAppear { print("Loaded") }
+                      MainTabView().environmentObject(MusicManager.shared)
                   }
               }
               func setupAudioSession() {
@@ -43,38 +35,291 @@ jobs:
               }
           }
           EOF
-          
-          cat << 'EOF' > TrollMusicApp/Info.plist
+
+      - name: Write Music Manager Code
+        run: |
+          cat << 'EOF' > TrollMusicApp/TrollMusicApp/MusicManager.swift
+          import Foundation
+          import AVFoundation
+          import MediaPlayer
+          import Combine
+
+          class MusicManager: ObservableObject {
+              static let shared = MusicManager()
+              @Published var songs: [Song] = []
+              @Published var playlists: [Playlist] = []
+              @Published var currentSong: Song?
+              @Published var isPlaying: Bool = false
+              var audioPlayer: AVAudioPlayer?
+              
+              let fileManager = FileManager.default
+              var documentsDirectory: URL { fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0] }
+              
+              init() {
+                  loadSongs(); loadPlaylists(); setupRemoteCommandCenter()
+              }
+              
+              func loadSongs() {
+                  let files = (try? fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)) ?? []
+                  let audioFiles = files.filter { ["mp3", "m4a", "wav"].contains($0.pathExtension.lowercased()) }
+                  songs = audioFiles.map { Song(id: UUID(), title: $0.deletingPathExtension().lastPathComponent, url: $0) }.sorted { $0.title < $1.title }
+              }
+              
+              func deleteSong(_ song: Song) {
+                  try? fileManager.removeItem(at: song.url)
+                  loadSongs()
+              }
+              
+              func createPlaylist(name: String) {
+                  playlists.append(Playlist(id: UUID(), name: name, songIDs: []))
+                  savePlaylists()
+              }
+              
+              func addSongToPlaylist(song: Song, playlist: Playlist) {
+                  if let index = playlists.firstIndex(where: { $0.id == playlist.id }), !playlists[index].songIDs.contains(song.id) {
+                      playlists[index].songIDs.append(song.id)
+                      savePlaylists()
+                  }
+              }
+              
+              func savePlaylists() {
+                  if let encoded = try? JSONEncoder().encode(playlists) { UserDefaults.standard.set(encoded, forKey: "savedPlaylists") }
+              }
+              
+              func loadPlaylists() {
+                  if let data = UserDefaults.standard.data(forKey: "savedPlaylists"), let decoded = try? JSONDecoder().decode([Playlist].self, from: data) { playlists = decoded }
+              }
+              
+              func playSong(_ song: Song) {
+                  audioPlayer = try? AVAudioPlayer(contentsOf: song.url)
+                  audioPlayer?.play()
+                  currentSong = song
+                  isPlaying = true
+                  updateNowPlayingInfo()
+              }
+              
+              func togglePlayPause() {
+                  isPlaying ? audioPlayer?.pause() : audioPlayer?.play()
+                  isPlaying.toggle()
+                  updateNowPlayingInfo()
+              }
+              
+              func setupRemoteCommandCenter() {
+                  let commandCenter = MPRemoteCommandCenter.shared()
+                  commandCenter.playCommand.addTarget { [unowned self] _ in self.isPlaying ? .commandFailed : { self.togglePlayPause(); return .success }() }
+                  commandCenter.pauseCommand.addTarget { [unowned self] _ in !self.isPlaying ? .commandFailed : { self.togglePlayPause(); return .success }() }
+              }
+              
+              func updateNowPlayingInfo() {
+                  guard let currentSong = currentSong else { return }
+                  MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: currentSong.title, MPMediaItemPropertyArtist: "Ahmed's App"]
+              }
+          }
+          struct Song: Identifiable, Codable { var id: UUID; var title: String; var url: URL }
+          struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
+          EOF
+
+      - name: Write UI Views Code
+        run: |
+          cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
+          import SwiftUI
+          import WebKit
+
+          struct MainTabView: View {
+              var body: some View {
+                  TabView {
+                      LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
+                      PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
+                      BrowserView().tabItem { Label("Browser", systemImage: "safari") }
+                  }.safeAreaInset(edge: .bottom) { MiniPlayerView() }
+              }
+          }
+
+          struct MiniPlayerView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              var body: some View {
+                  if let currentSong = musicManager.currentSong {
+                      VStack(spacing: 0) {
+                          Divider()
+                          HStack {
+                              Image(systemName: "music.note").padding().background(Color.gray.opacity(0.2)).cornerRadius(8)
+                              Text(currentSong.title).font(.headline).lineLimit(1)
+                              Spacer()
+                              Button(action: { musicManager.togglePlayPause() }) {
+                                  Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").font(.title).foregroundColor(.primary)
+                              }.padding(.trailing)
+                          }.padding(.horizontal).padding(.vertical, 8).background(Color(UIColor.secondarySystemBackground))
+                      }
+                  }
+              }
+          }
+
+          struct LibraryView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              @State private var showingOptionsFor: Song?
+              var body: some View {
+                  NavigationView {
+                      List {
+                          ForEach(musicManager.songs) { song in
+                              HStack {
+                                  Text(song.title).font(.headline)
+                                  Spacer()
+                                  Button(action: { showingOptionsFor = song }) { Image(systemName: "ellipsis") }
+                              }
+                              .contentShape(Rectangle())
+                              .onTapGesture { musicManager.playSong(song) }
+                          }
+                          .onDelete { indexSet in indexSet.forEach { musicManager.deleteSong(musicManager.songs[$0]) } }
+                          
+                          Section {
+                              Text("App Created by Ahmed Soliman")
+                                  .font(.footnote).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .center).listRowBackground(Color.clear)
+                          }
+                      }
+                      .navigationTitle("Ahmed's Music")
+                      .onAppear { musicManager.loadSongs() }
+                      .actionSheet(item: $showingOptionsFor) { song in
+                          var buttons: [ActionSheet.Button] = musicManager.playlists.map { playlist in
+                              .default(Text("Add to \(playlist.name)")) { musicManager.addSongToPlaylist(song: song, playlist: playlist) }
+                          }
+                          buttons.append(.cancel())
+                          return ActionSheet(title: Text("Add to Playlist"), buttons: buttons)
+                      }
+                  }
+              }
+          }
+
+          struct PlaylistsView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              @State private var showingNewPlaylist = false
+              @State private var newPlaylistName = ""
+              var body: some View {
+                  NavigationView {
+                      List {
+                          ForEach(musicManager.playlists) { playlist in
+                              NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline) }
+                          }
+                      }
+                      .navigationTitle("Playlists")
+                      .toolbar { Button(action: { showingNewPlaylist = true }) { Image(systemName: "plus") } }
+                      .alert("New Playlist", isPresented: $showingNewPlaylist) {
+                          TextField("Playlist Name", text: $newPlaylistName)
+                          Button("Create") { if !newPlaylistName.isEmpty { musicManager.createPlaylist(name: newPlaylistName); newPlaylistName = "" } }
+                          Button("Cancel", role: .cancel) { }
+                      }
+                  }
+              }
+          }
+
+          struct PlaylistDetailView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              var playlist: Playlist
+              var songsInPlaylist: [Song] { musicManager.songs.filter { playlist.songIDs.contains($0.id) } }
+              var body: some View {
+                  List {
+                      ForEach(songsInPlaylist) { song in Text(song.title).onTapGesture { musicManager.playSong(song) } }
+                  }.navigationTitle(playlist.name)
+              }
+          }
+
+          struct BrowserView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              @State private var urlString = "https://google.com/search?q=mp3+download"
+              @State private var showDownloadAlert = false
+              @State private var downloadFileName = ""
+              var body: some View {
+                  VStack(spacing: 0) {
+                      HStack {
+                          TextField("URL", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.URL).autocapitalization(.none)
+                          Button("Go") { NotificationCenter.default.post(name: NSNotification.Name("LoadURL"), object: urlString) }
+                      }.padding().background(Color(UIColor.secondarySystemBackground))
+                      ScrollView(.horizontal, showsIndicators: false) {
+                          HStack {
+                              BookmarkButton(title: "Sm3na", url: "https://sm3na.com")
+                              BookmarkButton(title: "Nogomi", url: "https://nogomistars.com")
+                              BookmarkButton(title: "YtMP3", url: "https://ytmp3.cc")
+                          }.padding(.horizontal).padding(.bottom, 8)
+                      }.background(Color(UIColor.secondarySystemBackground))
+                      WebViewUI(urlString: $urlString, didDetectDownload: { fileUrl in
+                          downloadFileName = fileUrl.lastPathComponent; showDownloadAlert = true
+                      })
+                  }
+                  .alert(isPresented: $showDownloadAlert) {
+                      Alert(title: Text("Download Complete"), message: Text("Saved \(downloadFileName)"), dismissButton: .default(Text("OK")) { musicManager.loadSongs() })
+                  }
+              }
+          }
+
+          struct BookmarkButton: View {
+              var title: String; var url: String
+              var body: some View {
+                  Button(action: { NotificationCenter.default.post(name: NSNotification.Name("LoadURL"), object: url) }) {
+                      Text(title).font(.caption).padding(.horizontal, 12).padding(.vertical, 6).background(Color.blue).foregroundColor(.white).cornerRadius(12)
+                  }
+              }
+          }
+
+          struct WebViewUI: UIViewRepresentable {
+              @Binding var urlString: String
+              var didDetectDownload: (URL) -> Void
+              func makeUIView(context: Context) -> WKWebView {
+                  let webView = WKWebView()
+                  webView.navigationDelegate = context.coordinator
+                  NotificationCenter.default.addObserver(forName: NSNotification.Name("LoadURL"), object: nil, queue: .main) { notif in
+                      if let urlStr = notif.object as? String, let url = URL(string: urlStr.hasPrefix("http") ? urlStr : "https://" + urlStr) {
+                          webView.load(URLRequest(url: url))
+                      }
+                  }
+                  if let url = URL(string: urlString) { webView.load(URLRequest(url: url)) }
+                  return webView
+              }
+              func updateUIView(_ uiView: WKWebView, context: Context) {}
+              func makeCoordinator() -> Coordinator { Coordinator(self) }
+              
+              class Coordinator: NSObject, WKNavigationDelegate {
+                  var parent: WebViewUI
+                  init(_ parent: WebViewUI) { self.parent = parent }
+                  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                      if let url = navigationAction.request.url {
+                          parent.urlString = url.absoluteString
+                          if ["mp3", "m4a"].contains(url.pathExtension.lowercased()) {
+                              URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
+                                  guard let localUrl = localUrl else { return }
+                                  let dest = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent)
+                                  try? FileManager.default.moveItem(at: localUrl, to: dest)
+                                  DispatchQueue.main.async { self.parent.didDetectDownload(dest) }
+                              }.resume()
+                              decisionHandler(.cancel)
+                              return
+                          }
+                      }
+                      decisionHandler(.allow)
+                  }
+              }
+          }
+          EOF
+
+      - name: Write Plist & Project
+        run: |
+          cat << 'EOF' > TrollMusicApp/TrollMusicApp/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleExecutable</key>
-              <string>TrollMusicApp</string>
-              <key>CFBundleIdentifier</key>
-              <string>com.ahmedsoliman.trollmusic</string>
-              <key>CFBundleName</key>
-              <string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key>
-              <string>1.0</string>
-              <key>CFBundleVersion</key>
-              <string>1</string>
-              <key>UIBackgroundModes</key>
-              <array>
-                  <string>audio</string>
-              </array>
-              <key>UILaunchScreen</key>
-              <dict/>
+              <key>CFBundleExecutable</key><string>TrollMusicApp</string>
+              <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
+              <key>CFBundleName</key><string>AhmedsMusic</string>
+              <key>CFBundleShortVersionString</key><string>1.0</string>
+              <key>CFBundleVersion</key><string>1</string>
+              <key>UIBackgroundModes</key><array><string>audio</string></array>
+              <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+              <key>UILaunchScreen</key><dict/>
           </dict>
           </plist>
           EOF
-
-      - name: Create Xcode Project
-        run: |
-          cd TrollMusicApp
-          # We use xcodegen to generate a flawless project file on the fly!
-          brew install xcodegen
           
+          cd TrollMusicApp
+          brew install xcodegen
           cat << 'EOF' > project.yml
           name: TrollMusicApp
           options:
@@ -92,31 +337,18 @@ jobs:
                 CODE_SIGNING_REQUIRED: "NO"
                 CODE_SIGN_IDENTITY: ""
           EOF
-          
           xcodegen generate
 
-      - name: Build and Archive
+      - name: Build & Package IPA
         run: |
           cd TrollMusicApp
-          xcodebuild archive \
-            -project TrollMusicApp.xcodeproj \
-            -scheme TrollMusicApp \
-            -archivePath build/TrollMusicApp.xcarchive \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
-
-      - name: Package IPA (TrollStore format)
-        run: |
-          cd TrollMusicApp
+          xcodebuild archive -project TrollMusicApp.xcodeproj -scheme TrollMusicApp -archivePath build/TrollMusicApp.xcarchive -configuration Release -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
           mkdir -p Payload
           cp -r build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app Payload/
           zip -r TrollMusicApp.ipa Payload
 
-      - name: Upload IPA Artifact
+      - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed
+          name: TrollMusicApp-Ahmed-Full
           path: TrollMusicApp/TrollMusicApp.ipa
