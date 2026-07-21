@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V2.1
+name: Build TrollMusicApp V3.0
 
 on:
   push:
@@ -59,9 +59,7 @@ jobs:
               
               override init() {
                   super.init()
-                  loadSongs()
-                  loadPlaylists()
-                  setupRemoteCommandCenter()
+                  loadSongs(); loadPlaylists(); setupRemoteCommandCenter()
               }
               
               func loadSongs() {
@@ -108,11 +106,7 @@ jobs:
               }
               
               func togglePlayPause() {
-                  if isPlaying {
-                      audioPlayer?.pause()
-                  } else {
-                      audioPlayer?.play()
-                  }
+                  if isPlaying { audioPlayer?.pause() } else { audioPlayer?.play() }
                   isPlaying.toggle()
                   updateNowPlayingInfo()
               }
@@ -139,32 +133,14 @@ jobs:
                   }
               }
               
-              func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-                  playNext()
-              }
+              func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { playNext() }
               
               func setupRemoteCommandCenter() {
                   let commandCenter = MPRemoteCommandCenter.shared()
-                  commandCenter.playCommand.addTarget { [weak self] _ in
-                      guard let self = self else { return .commandFailed }
-                      if self.isPlaying { return .commandFailed }
-                      self.togglePlayPause()
-                      return .success
-                  }
-                  commandCenter.pauseCommand.addTarget { [weak self] _ in
-                      guard let self = self else { return .commandFailed }
-                      if !self.isPlaying { return .commandFailed }
-                      self.togglePlayPause()
-                      return .success
-                  }
-                  commandCenter.nextTrackCommand.addTarget { [weak self] _ in
-                      self?.playNext()
-                      return .success
-                  }
-                  commandCenter.previousTrackCommand.addTarget { [weak self] _ in
-                      self?.playPrevious()
-                      return .success
-                  }
+                  commandCenter.playCommand.addTarget { [weak self] _ in guard let self = self else { return .commandFailed }; if self.isPlaying { return .commandFailed }; self.togglePlayPause(); return .success }
+                  commandCenter.pauseCommand.addTarget { [weak self] _ in guard let self = self else { return .commandFailed }; if !self.isPlaying { return .commandFailed }; self.togglePlayPause(); return .success }
+                  commandCenter.nextTrackCommand.addTarget { [weak self] _ in self?.playNext(); return .success }
+                  commandCenter.previousTrackCommand.addTarget { [weak self] _ in self?.playPrevious(); return .success }
               }
               
               func updateNowPlayingInfo() {
@@ -187,7 +163,10 @@ jobs:
               @Published var canGoBack: Bool = false
               @Published var canGoForward: Bool = false
               @Published var showDownloadAlert: Bool = false
+              @Published var showNamePrompt: Bool = false
               @Published var downloadFileName: String = ""
+              @Published var customSongName: String = ""
+              var capturedUrl: URL? = nil
               
               var webView: WKWebView = {
                   let prefs = WKWebpagePreferences()
@@ -210,19 +189,28 @@ jobs:
               func grabAudio() {
                   webView.evaluateJavaScript("document.querySelector('audio')?.src || document.querySelector('video')?.src") { result, error in
                       if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) {
-                          let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
-                              guard let localUrl = localUrl else { return }
-                              let fm = FileManager.default
-                              let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("CapturedAudio_\(UUID().uuidString.prefix(4)).mp3")
-                              try? fm.moveItem(at: localUrl, to: dest)
-                              DispatchQueue.main.async { 
-                                  self.downloadFileName = dest.lastPathComponent
-                                  self.showDownloadAlert = true 
-                              }
-                          }
-                          task.resume()
+                          self.capturedUrl = url
+                          self.customSongName = ""
+                          self.showNamePrompt = true
                       }
                   }
+              }
+              
+              func confirmDownload(with name: String) {
+                  guard let url = capturedUrl else { return }
+                  let finalName = name.isEmpty ? "CapturedAudio_\(UUID().uuidString.prefix(4))" : name
+                  
+                  let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
+                      guard let localUrl = localUrl else { return }
+                      let fm = FileManager.default
+                      let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("\(finalName).mp3")
+                      try? fm.moveItem(at: localUrl, to: dest)
+                      DispatchQueue.main.async { 
+                          self.downloadFileName = dest.lastPathComponent
+                          self.showDownloadAlert = true 
+                      }
+                  }
+                  task.resume()
               }
           }
 
@@ -255,32 +243,11 @@ jobs:
                       parent.viewModel.canGoForward = webView.canGoForward
                       if let currentURL = webView.url?.absoluteString { parent.urlString = currentURL }
                   }
-                  
-                  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-                      if let url = navigationAction.request.url {
-                          if ["mp3", "m4a"].contains(url.pathExtension.lowercased()) {
-                              let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
-                                  guard let localUrl = localUrl else { return }
-                                  let fm = FileManager.default
-                                  let dest = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent)
-                                  try? fm.moveItem(at: localUrl, to: dest)
-                                  DispatchQueue.main.async { 
-                                      self.parent.viewModel.downloadFileName = dest.lastPathComponent
-                                      self.parent.viewModel.showDownloadAlert = true 
-                                  }
-                              }
-                              task.resume()
-                              decisionHandler(.cancel)
-                              return
-                          }
-                      }
-                      decisionHandler(.allow)
-                  }
               }
           }
           EOF
 
-      - name: Write UI Views Code
+      - name: Write UI Views Code (Fixed Tab Bar Layout)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
@@ -290,15 +257,18 @@ jobs:
               @State private var showFullPlayer = false
               
               var body: some View {
-                  TabView {
-                      LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
-                      PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
-                      BrowserView().tabItem { Label("Browser", systemImage: "safari") }
-                  }
-                  .accentColor(.purple)
-                  .safeAreaInset(edge: .bottom) {
+                  ZStack(alignment: .bottom) {
+                      TabView {
+                          LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
+                          PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
+                          BrowserView().tabItem { Label("Browser", systemImage: "safari") }
+                      }
+                      .accentColor(.purple)
+                      
                       if musicManager.currentSong != nil {
                           MiniPlayerView(showFullPlayer: $showFullPlayer)
+                              // Pushes the miniplayer up slightly so it doesn't cover the TabBar
+                              .padding(.bottom, 50)
                       }
                   }
                   .sheet(isPresented: $showFullPlayer) {
@@ -413,12 +383,18 @@ jobs:
                       }
                       .navigationTitle("Ahmed's Library")
                       .onAppear { musicManager.loadSongs() }
-                      .actionSheet(item: $showingOptionsFor) { song in
-                          var buttons: [ActionSheet.Button] = musicManager.playlists.map { playlist in
-                              .default(Text("Add to \(playlist.name)")) { musicManager.addSongToPlaylist(song: song, playlist: playlist) }
+                      .confirmationDialog("Options", isPresented: Binding(
+                          get: { showingOptionsFor != nil },
+                          set: { if !$0 { showingOptionsFor = nil } }
+                      ), titleVisibility: .visible) {
+                          if let song = showingOptionsFor {
+                              ForEach(musicManager.playlists) { playlist in
+                                  Button("Add to \(playlist.name)") {
+                                      musicManager.addSongToPlaylist(song: song, playlist: playlist)
+                                  }
+                              }
                           }
-                          buttons.append(.cancel())
-                          return ActionSheet(title: Text("Options"), buttons: buttons)
+                          Button("Cancel", role: .cancel) {}
                       }
                   }
               }
@@ -494,6 +470,11 @@ jobs:
                           Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
                       }.padding().background(Color(UIColor.secondarySystemBackground))
                   }
+                  .alert("Name Your Song", isPresented: $webViewModel.showNamePrompt) {
+                      TextField("Song Name", text: $webViewModel.customSongName)
+                      Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }
+                      Button("Cancel", role: .cancel) { }
+                  }
                   .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) {
                       Button("OK", role: .cancel) { musicManager.loadSongs() }
                   } message: {
@@ -503,7 +484,7 @@ jobs:
           }
           EOF
 
-      - name: Write Plist & Project
+      - name: Write Plist & Entitlements
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
@@ -513,11 +494,23 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key><string>2.1</string>
-              <key>CFBundleVersion</key><string>3</string>
+              <key>CFBundleShortVersionString</key><string>3.0</string>
+              <key>CFBundleVersion</key><string>4</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
+          </dict>
+          </plist>
+          EOF
+          
+          # CRITICAL FOR BACKGROUND AUDIO!
+          cat << 'EOF' > TrollMusicApp/TrollMusicApp.entitlements
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.background.audio</key>
+              <true/>
           </dict>
           </plist>
           EOF
@@ -540,6 +533,7 @@ jobs:
                 CODE_SIGNING_ALLOWED: "NO"
                 CODE_SIGNING_REQUIRED: "NO"
                 CODE_SIGN_IDENTITY: ""
+                CODE_SIGN_ENTITLEMENTS: TrollMusicApp.entitlements
           EOF
           xcodegen generate
 
@@ -554,5 +548,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-Ultimate
+          name: TrollMusicApp-Ahmed-Ultimate-V3
           path: TrollMusicApp/TrollMusicApp.ipa
