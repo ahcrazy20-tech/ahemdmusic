@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V24.1
+name: Build TrollMusicApp V24.2
 
 on:
   push:
@@ -212,7 +212,7 @@ jobs:
           }
           EOF
 
-      - name: Write Native Smart Downloader (FIXED PLAYLIST CLOSURE BUG!)
+      - name: Write Native Smart Downloader (FIXED CLOSURE BUG!)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
           import SwiftUI
@@ -273,26 +273,18 @@ jobs:
               func downloadLinkOrPlaylist(urlStr: String, name: String) {
                   guard !urlStr.isEmpty else { return }
                   stopPreview()
-                  
                   if urlStr.contains("youtube.com/playlist") || urlStr.contains("list=") {
                       fetchYouTubePlaylist(urlStr: urlStr, pName: name.isEmpty ? "YT_Playlist" : name)
-                  } else {
-                      downloadSingleCobalt(urlStr: urlStr, name: name)
-                  }
+                  } else { downloadSingleCobalt(urlStr: urlStr, name: name) }
               }
               
               func fetchYouTubePlaylist(urlStr: String, pName: String) {
                   isDownloading = true; statusMessage = "Extracting Playlist Links..."
                   guard let url = URL(string: urlStr) else { return }
-                  
                   var req = URLRequest(url: url)
                   req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
                   URLSession.shared.dataTask(with: req) { data, _, _ in
-                      guard let data = data, let html = String(data: data, encoding: .utf8) else {
-                          DispatchQueue.main.async { self.isDownloading = false; self.showError = true; self.errorDetails = "Playlist extraction failed." }
-                          return
-                      }
-                      
+                      guard let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self.isDownloading = false; self.showError = true; self.errorDetails = "Playlist extraction failed." }; return }
                       var videoIds: [String] = []
                       let chunks = html.components(separatedBy: "\"videoId\":\"")
                       for chunk in chunks.dropFirst() {
@@ -300,11 +292,8 @@ jobs:
                           let vid = String(chunk.prefix(11))
                           if !videoIds.contains(vid) { videoIds.append(vid) }
                       }
-                      
                       DispatchQueue.main.async {
-                          if videoIds.isEmpty {
-                              self.isDownloading = false; self.showError = true; self.errorDetails = "Could not find songs in playlist."
-                          } else {
+                          if videoIds.isEmpty { self.isDownloading = false; self.showError = true; self.errorDetails = "Could not find songs in playlist." } else {
                               self.playlistQueue = videoIds
                               self.playlistTotal = videoIds.count
                               self.playlistName = pName
@@ -315,36 +304,26 @@ jobs:
               }
               
               func processNextPlaylistSong() {
-                  guard !playlistQueue.isEmpty else {
-                      DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }
-                      return
-                  }
-                  
+                  guard !playlistQueue.isEmpty else { DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }; return }
                   let nextVid = playlistQueue.removeFirst()
                   let url = "https://www.youtube.com/watch?v=\(nextVid)"
                   let currentNum = playlistTotal - playlistQueue.count
                   let name = "\(playlistName) - Track \(currentNum)"
-                  
                   DispatchQueue.main.async { self.statusMessage = "Downloading \(currentNum) of \(self.playlistTotal)..." }
                   downloadSingleCobalt(urlStr: url, name: name, isPlaylist: true)
               }
               
               func downloadSingleCobalt(urlStr: String, name: String, isPlaylist: Bool = false) {
-                  if !isPlaylist { isDownloading = true; downloadProgress = 0.0; statusMessage = "Bypassing Security..." }
+                  if !isPlaylist { DispatchQueue.main.async { self.isDownloading = true; self.downloadProgress = 0.0; self.statusMessage = "Bypassing Security..." } }
                   guard let apiUrl = URL(string: "https://co.wuk.sh/api/json") else { return }
-                  var request = URLRequest(url: apiUrl)
-                  request.httpMethod = "POST"
-                  request.setValue("application/json", forHTTPHeaderField: "Accept")
-                  request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                  var request = URLRequest(url: apiUrl); request.httpMethod = "POST"
+                  request.setValue("application/json", forHTTPHeaderField: "Accept"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                   let parameters: [String: Any] = ["url": urlStr, "isAudioOnly": true, "aFormat": "mp3"]
                   request.httpBody = try? JSONSerialization.data(withJSONObject: parameters)
                   
                   URLSession.shared.dataTask(with: request) { data, response, error in
                       guard let data = data, let res = try? JSONDecoder().decode(CobaltResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) else {
-                          DispatchQueue.main.async { 
-                              if isPlaylist { self.processNextPlaylistSong() } else { self.errorDetails = "Failed to extract stream."; self.isDownloading = false; self.showError = true }
-                          }
-                          return
+                          DispatchQueue.main.async { if isPlaylist { self.processNextPlaylistSong() } else { self.errorDetails = "Failed to extract stream."; self.isDownloading = false; self.showError = true } }; return
                       }
                       self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
                       let task = self.downloadSession.downloadTask(with: audioUrl); task.resume()
@@ -608,8 +587,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AS Music</string>
-              <key>CFBundleShortVersionString</key><string>24.1</string>
-              <key>CFBundleVersion</key><string>39</string>
+              <key>CFBundleShortVersionString</key><string>24.2</string>
+              <key>CFBundleVersion</key><string>40</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
@@ -654,5 +633,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AS-Music-Ultimate-V24.1
+          name: AS-Music-Ultimate-V24.2
           path: TrollMusicApp/TrollMusicApp.ipa
