@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V13.0
+name: Build TrollMusicApp V14.0
 
 on:
   push:
@@ -24,8 +24,7 @@ jobs:
           class AppDelegate: NSObject, UIApplicationDelegate {
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
                   do {
-                      // THE ULTIMATE FIX: Just .playback. No .mixWithOthers! This guarantees Lock Screen control.
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
                       try AVAudioSession.sharedInstance().setActive(true, options: [])
                       UIApplication.shared.beginReceivingRemoteControlEvents()
                   } catch { print("Background Audio Setup Failed") }
@@ -44,7 +43,7 @@ jobs:
           }
           EOF
 
-      - name: Write Music Manager Code (AVAudioPlayer & Lock Screen)
+      - name: Write Music Manager Code (AVPlayer Lock Screen Fix)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/MusicManager.swift
           import Foundation
@@ -55,7 +54,7 @@ jobs:
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
 
-          class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
+          class MusicManager: NSObject, ObservableObject {
               static let shared = MusicManager()
               @Published var songs: [Song] = []
               @Published var playlists: [Playlist] = []
@@ -63,7 +62,8 @@ jobs:
               @Published var isPlaying: Bool = false
               @Published var isShuffle: Bool = false
               
-              var audioPlayer: AVAudioPlayer?
+              var player: AVPlayer?
+              var timeObserverToken: Any?
               
               let fileManager = FileManager.default
               var documentsDirectory: URL { fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0] }
@@ -76,7 +76,7 @@ jobs:
               func loadSongs() {
                   do {
                       let files = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
-                      let audioFiles = files.filter { ["mp3", "m4a", "wav"].contains($0.pathExtension.lowercased()) }
+                      let audioFiles = files.filter { ["mp3", "m4a", "wav", "webm", "mp4"].contains($0.pathExtension.lowercased()) }
                       DispatchQueue.main.async {
                           self.songs = audioFiles.map { url in Song(id: UUID(), title: url.deletingPathExtension().lastPathComponent, url: url) }.sorted { $0.title < $1.title }
                       }
@@ -110,23 +110,31 @@ jobs:
               
               func playSong(_ song: Song) {
                   do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
                       try AVAudioSession.sharedInstance().setActive(true)
                       
-                      audioPlayer = try AVAudioPlayer(contentsOf: song.url)
-                      audioPlayer?.delegate = self
-                      audioPlayer?.play()
+                      player?.pause()
+                      NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
                       
-                      currentSong = song
-                      isPlaying = true
-                      updateNowPlayingInfo()
+                      let playerItem = AVPlayerItem(url: song.url)
+                      player = AVPlayer(playerItem: playerItem)
+                      player?.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible // CRITICAL FOR BACKGROUND AUDIO!
+                      
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                          self.player?.play()
+                          self.currentSong = song
+                          self.isPlaying = true
+                          self.updateNowPlayingInfo()
+                      }
+                      
+                      NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: .AVPlayerItemDidPlayToEndTime, object: playerItem)
                   } catch {}
               }
               
-              func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { DispatchQueue.main.async { self.playNext() } }
+              @objc func songFinished() { DispatchQueue.main.async { self.playNext() } }
               
               func togglePlayPause() {
-                  if isPlaying { audioPlayer?.pause() } else { audioPlayer?.play() }
+                  if isPlaying { player?.pause() } else { player?.play() }
                   isPlaying.toggle()
                   updateNowPlayingInfo()
               }
@@ -153,120 +161,136 @@ jobs:
               
               func updateNowPlayingInfo() {
                   guard let currentSong = currentSong else { return }
-                  var info = [String: Any]()
-                  info[MPMediaItemPropertyTitle] = currentSong.title
-                  info[MPMediaItemPropertyArtist] = "Ahmed's Music"
-                  MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+                  MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: currentSong.title, MPMediaItemPropertyArtist: "Ahmed's Music"]
               }
           }
           EOF
 
-      - name: Write Native Smart DL Engine Code
+      - name: Write Shared Browser & Download Logic
         run: |
-          cat << 'EOF' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
+          cat << 'EOF' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
           import WebKit
 
-          struct SmartDownloaderView: View {
-              @State private var showDownloadAlert = false
-              @State private var downloadFileName = ""
-              
-              var body: some View {
-                  NavigationView {
-                      ZStack {
-                          Color(uiColor: .systemGroupedBackground).edgesIgnoringSafeArea(.all)
-                          VStack(spacing: 0) {
-                              Text("Paste your link below to download!")
-                                  .font(.subheadline).foregroundColor(.gray).padding()
-                              
-                              // Powerful Native WebView Downloader
-                              SmartDLWebViewUI(showDownloadAlert: $showDownloadAlert, downloadFileName: $downloadFileName)
-                                  .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                  .cornerRadius(12)
-                                  .padding(.horizontal)
-                                  .padding(.bottom)
-                          }
-                      }
-                      .navigationTitle("Smart Downloader")
-                      .navigationBarTitleDisplayMode(.inline)
-                      .alert("Download Complete", isPresented: $showDownloadAlert) { 
-                          Button("Awesome!", role: .cancel) { MusicManager.shared.loadSongs() } 
-                      } message: { Text("Saved \(downloadFileName) to your Library!") }
-                  }
-              }
-          }
+          struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String; var title: String }
 
-          struct SmartDLWebViewUI: UIViewRepresentable {
-              @Binding var showDownloadAlert: Bool
-              @Binding var downloadFileName: String
+          class WebViewModel: ObservableObject {
+              @Published var tabs: [BrowserTab] = []
+              @Published var currentTabIndex: Int = 0
+              @Published var showTabs: Bool = false
               
-              func makeUIView(context: Context) -> WKWebView { 
+              @Published var canGoBack: Bool = false
+              @Published var canGoForward: Bool = false
+              @Published var showDownloadAlert: Bool = false
+              @Published var showNamePrompt: Bool = false
+              @Published var downloadFileName: String = ""
+              @Published var customSongName: String = ""
+              var capturedUrl: URL? = nil
+              
+              init() { addNewTab() }
+              var currentWebView: WKWebView { tabs[currentTabIndex].webView }
+              
+              func addNewTab() {
                   let prefs = WKWebpagePreferences()
                   prefs.allowsContentJavaScript = true
                   let config = WKWebViewConfiguration()
                   config.defaultWebpagePreferences = prefs
-                  let webView = WKWebView(frame: .zero, configuration: config)
-                  webView.navigationDelegate = context.coordinator
-                  webView.load(URLRequest(url: URL(string: "https://cobalt.tools")!))
-                  return webView 
+                  config.allowsInlineMediaPlayback = true
+                  let newWebView = WKWebView(frame: .zero, configuration: config)
+                  newWebView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+                  tabs.append(BrowserTab(webView: newWebView, urlString: "https://google.com", title: "New Tab"))
+                  currentTabIndex = tabs.count - 1
+                  loadUrl("https://google.com")
               }
               
-              func updateUIView(_ uiView: WKWebView, context: Context) {}
+              func closeTab(at index: Int) { 
+                  tabs.remove(at: index); if tabs.isEmpty { addNewTab() } else if currentTabIndex >= tabs.count { currentTabIndex = tabs.count - 1 } 
+              }
+              func goBack() { currentWebView.goBack() }
+              func goForward() { currentWebView.goForward() }
+              func refresh() { currentWebView.reload() }
+              func loadUrl(_ urlString: String) { 
+                  var finalStr = urlString; if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr }
+                  if let url = URL(string: finalStr) { currentWebView.load(URLRequest(url: url)) } 
+              }
+              
+              func grabAudio() {
+                  let js = "(function() { var media = document.querySelector('video') || document.querySelector('audio'); if (media && media.src) return media.src; var source = document.querySelector('source'); if (source && source.src) return source.src; return null; })()"
+                  currentWebView.evaluateJavaScript(js) { result, error in
+                      if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) {
+                          self.capturedUrl = url
+                          self.customSongName = "Grabbed_Audio"
+                          self.showNamePrompt = true
+                      }
+                  }
+              }
+              
+              func confirmDownload(with name: String) {
+                  guard let url = capturedUrl else { return }
+                  var finalName = name.replacingOccurrences(of: "/", with: "-")
+                  if !finalName.hasSuffix(".mp3") && !finalName.hasSuffix(".m4a") && !finalName.hasSuffix(".wav") { finalName += ".mp3" }
+                  
+                  let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                  let destPath = destDir.appendingPathComponent(finalName)
+                  
+                  URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
+                      guard let localUrl = localUrl else { return }
+                      try? FileManager.default.moveItem(at: localUrl, to: destPath)
+                      DispatchQueue.main.async { 
+                          self.downloadFileName = finalName
+                          self.showDownloadAlert = true 
+                      }
+                  }.resume()
+              }
+          }
+
+          struct WebViewUI: UIViewRepresentable {
+              @ObservedObject var viewModel: WebViewModel
+              @Binding var urlString: String
+              
+              func makeUIView(context: Context) -> WKWebView { return viewModel.currentWebView }
+              func updateUIView(_ uiView: WKWebView, context: Context) { uiView.navigationDelegate = context.coordinator; uiView.uiDelegate = context.coordinator }
               func makeCoordinator() -> Coordinator { Coordinator(self) }
               
-              class Coordinator: NSObject, WKNavigationDelegate, WKDownloadDelegate {
-                  var parent: SmartDLWebViewUI
-                  init(_ parent: SmartDLWebViewUI) { self.parent = parent }
+              class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+                  var parent: WebViewUI
+                  init(_ parent: WebViewUI) { self.parent = parent }
                   
-                  // Trigger native iOS download when website attempts to download a file!
-                  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-                      if navigationAction.shouldPerformDownload {
-                          decisionHandler(.download)
-                          return
-                      }
-                      decisionHandler(.allow)
+                  func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+                      if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
+                      return nil
+                  }
+                  func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+                      parent.viewModel.canGoBack = webView.canGoBack; parent.viewModel.canGoForward = webView.canGoForward
+                      if let currentURL = webView.url?.absoluteString { parent.urlString = currentURL; parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL }
                   }
                   
                   func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-                      if navigationResponse.canShowMIMEType == false || (navigationResponse.response.mimeType?.contains("audio") == true) {
-                          decisionHandler(.download)
-                          return
+                      if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm") {
+                          if let url = navigationResponse.response.url {
+                              let suggested = navigationResponse.response.suggestedFilename ?? "Song"
+                              let cleanName = suggested.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggested
+                              let nameWithoutExt = (cleanName as NSString).deletingPathExtension
+                              DispatchQueue.main.async {
+                                  self.parent.viewModel.capturedUrl = url
+                                  self.parent.viewModel.customSongName = nameWithoutExt
+                                  self.parent.viewModel.showNamePrompt = true
+                              }
+                              decisionHandler(.cancel)
+                              return
+                          }
                       }
                       decisionHandler(.allow)
-                  }
-                  
-                  func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
-                      download.delegate = self
-                  }
-                  func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
-                      download.delegate = self
-                  }
-                  
-                  // Handle the file download completely natively
-                  func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
-                      let fm = FileManager.default
-                      let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                      let cleanName = suggestedFilename.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggestedFilename
-                      let destPath = destDir.appendingPathComponent(cleanName)
-                      
-                      // Remove if already exists to prevent duplicate error
-                      try? fm.removeItem(at: destPath)
-                      
-                      DispatchQueue.main.async { self.parent.downloadFileName = cleanName }
-                      completionHandler(destPath)
-                  }
-                  
-                  func downloadDidFinish(_ download: WKDownload) {
-                      DispatchQueue.main.async { self.parent.showDownloadAlert = true }
                   }
               }
           }
           EOF
 
-      - name: Write UI Views Code (Beautiful Spotify Clone UI)
+      - name: Write UI Views Code (All 4 Tabs Intact!)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
+          import WebKit
 
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
 
@@ -279,9 +303,111 @@ jobs:
                           LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
                           PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
                           SmartDownloaderView().tabItem { Label("Smart DL", systemImage: "bolt.fill") }
+                          BrowserMainView().tabItem { Label("Browser", systemImage: "safari") }
                       }.accentColor(.purple)
-                      if musicManager.currentSong != nil { MiniPlayerView(showFullPlayer: $showFullPlayer).padding(.bottom, 50) }
-                  }.sheet(isPresented: $showFullPlayer) { FullPlayerView() }
+                      
+                      if musicManager.currentSong != nil { 
+                          MiniPlayerView(showFullPlayer: $showFullPlayer)
+                              .padding(.bottom, 50) 
+                      }
+                  }
+                  .sheet(isPresented: $showFullPlayer) { FullPlayerView() }
+              }
+          }
+
+          struct SmartDownloaderView: View {
+              @State private var showDownloadAlert = false
+              @State private var downloadFileName = ""
+              var body: some View {
+                  NavigationView {
+                      ZStack {
+                          Color(uiColor: .systemGroupedBackground).edgesIgnoringSafeArea(.all)
+                          VStack(spacing: 0) {
+                              Text("Paste your link inside Cobalt to download!")
+                                  .font(.subheadline).foregroundColor(.gray).padding()
+                              SmartDLWebViewUI(showDownloadAlert: $showDownloadAlert, downloadFileName: $downloadFileName)
+                                  .frame(maxWidth: .infinity, maxHeight: .infinity).cornerRadius(12).padding(.horizontal).padding(.bottom)
+                          }
+                      }
+                      .navigationTitle("Smart Downloader")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .alert("Download Complete", isPresented: $showDownloadAlert) { Button("Awesome!", role: .cancel) { MusicManager.shared.loadSongs() } } message: { Text("Saved \(downloadFileName) to your Library!") }
+                  }
+              }
+          }
+
+          struct SmartDLWebViewUI: UIViewRepresentable {
+              @Binding var showDownloadAlert: Bool
+              @Binding var downloadFileName: String
+              func makeUIView(context: Context) -> WKWebView { 
+                  let prefs = WKWebpagePreferences(); prefs.allowsContentJavaScript = true
+                  let config = WKWebViewConfiguration(); config.defaultWebpagePreferences = prefs
+                  let webView = WKWebView(frame: .zero, configuration: config)
+                  webView.navigationDelegate = context.coordinator
+                  webView.load(URLRequest(url: URL(string: "https://cobalt.tools")!))
+                  return webView 
+              }
+              func updateUIView(_ uiView: WKWebView, context: Context) {}
+              func makeCoordinator() -> Coordinator { Coordinator(self) }
+              
+              class Coordinator: NSObject, WKNavigationDelegate, WKDownloadDelegate {
+                  var parent: SmartDLWebViewUI
+                  init(_ parent: SmartDLWebViewUI) { self.parent = parent }
+                  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                      if navigationAction.shouldPerformDownload { decisionHandler(.download); return }
+                      decisionHandler(.allow)
+                  }
+                  func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+                      if navigationResponse.canShowMIMEType == false || (navigationResponse.response.mimeType?.contains("audio") == true) { decisionHandler(.download); return }
+                      decisionHandler(.allow)
+                  }
+                  func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
+                  func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = self }
+                  
+                  func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+                      let fm = FileManager.default
+                      let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                      let cleanName = suggestedFilename.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggestedFilename
+                      let destPath = destDir.appendingPathComponent(cleanName)
+                      try? fm.removeItem(at: destPath)
+                      DispatchQueue.main.async { self.parent.downloadFileName = cleanName }
+                      completionHandler(destPath)
+                  }
+                  func downloadDidFinish(_ download: WKDownload) { DispatchQueue.main.async { self.parent.showDownloadAlert = true } }
+              }
+          }
+
+          struct BrowserMainView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              @StateObject var webViewModel = WebViewModel()
+              @State private var urlString = "https://google.com"
+              
+              var body: some View {
+                  ZStack {
+                      VStack(spacing: 0) {
+                          HStack { TextField("Search or enter website", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.URL).textInputAutocapitalization(.never); Button("Go") { webViewModel.loadUrl(urlString) } }.padding(8).background(Color(uiColor: .secondarySystemBackground))
+                          ScrollView(.horizontal, showsIndicators: false) {
+                              HStack { Button("Sm3na") { webViewModel.loadUrl("https://sm3na.com") }.buttonStyle(.borderedProminent).tint(.purple); Button("Nogomi") { webViewModel.loadUrl("https://nogomistars.com") }.buttonStyle(.borderedProminent).tint(.blue); Button("YtMP3") { webViewModel.loadUrl("https://ytmp3.cc") }.buttonStyle(.borderedProminent).tint(.red) }.padding(.horizontal).padding(.bottom, 8)
+                          }.background(Color(uiColor: .secondarySystemBackground))
+                          WebViewUI(viewModel: webViewModel, urlString: $urlString)
+                          HStack {
+                              Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack); Spacer()
+                              Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward); Spacer()
+                              Button(action: { webViewModel.grabAudio() }) { Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple) }; Spacer()
+                              Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text("\(webViewModel.tabs.count)").font(.caption).bold() } }; Spacer()
+                              Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
+                          }.padding().background(Color(uiColor: .secondarySystemBackground))
+                      }
+                      if webViewModel.showTabs {
+                          Color.black.opacity(0.8).edgesIgnoringSafeArea(.all)
+                          VStack {
+                              HStack { Text("Tabs").font(.title).bold().foregroundColor(.white); Spacer(); Button("Done") { webViewModel.showTabs = false }.foregroundColor(.blue) }.padding()
+                              ScrollView { VStack(spacing: 15) { ForEach(0..<webViewModel.tabs.count, id: \.self) { index in HStack { VStack(alignment: .leading) { Text("Tab \(index + 1)").font(.headline).foregroundColor(.white); Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer(); Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) } }.padding().background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3)).cornerRadius(10).onTapGesture { webViewModel.currentTabIndex = index; urlString = webViewModel.tabs[index].urlString; webViewModel.showTabs = false } }; Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) { HStack { Image(systemName: "plus"); Text("New Tab") }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10) }.padding(.top, 10) }.padding(.horizontal) }
+                          }
+                      }
+                  }
+                  .alert("Name Your Song", isPresented: $webViewModel.showNamePrompt) { TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { } }
+                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
               }
           }
 
@@ -373,7 +499,7 @@ jobs:
           }
           EOF
 
-      - name: Write Plists & Xcode Configuration (Clean)
+      - name: Write Plists & Xcode Configuration (Entitlements Included!)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
@@ -383,11 +509,22 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key><string>13.0</string>
-              <key>CFBundleVersion</key><string>20</string>
+              <key>CFBundleShortVersionString</key><string>14.0</string>
+              <key>CFBundleVersion</key><string>21</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
+          </dict>
+          </plist>
+          EOF
+          
+          # APPLE REQUIRES THIS FOR BACKGROUND AUDIO WHEN JAILED
+          cat << 'EOF' > TrollMusicApp/TrollMusicApp.entitlements
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.background.audio</key><true/>
           </dict>
           </plist>
           EOF
@@ -410,6 +547,7 @@ jobs:
                 CODE_SIGNING_ALLOWED: "NO"
                 CODE_SIGNING_REQUIRED: "NO"
                 CODE_SIGN_IDENTITY: ""
+                CODE_SIGN_ENTITLEMENTS: TrollMusicApp.entitlements
           EOF
           xcodegen generate
 
@@ -424,5 +562,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-Ultimate-V13
+          name: TrollMusicApp-Ahmed-Ultimate-V14
           path: TrollMusicApp/TrollMusicApp.ipa
