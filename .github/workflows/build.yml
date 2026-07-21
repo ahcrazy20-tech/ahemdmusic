@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V5.0
+name: Build TrollMusicApp V6.0
 
 on:
   push:
@@ -14,8 +14,9 @@ jobs:
       - name: Setup Folders
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp
+          mkdir -p TrollMusicApp/ShareExtension
 
-      - name: Write Main App Code (Reverted to V1 Audio Fix!)
+      - name: Write Main App Code (V1 Audio Fix)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
@@ -24,28 +25,20 @@ jobs:
           @main
           struct TrollMusicAppApp: App {
               init() {
-                  // Exactly the code from V1 that worked perfectly!
-                  setupAudioSession()
+                  do {
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                      try AVAudioSession.sharedInstance().setActive(true)
+                  } catch { print("Audio Init Error") }
               }
-              
               var body: some Scene {
                   WindowGroup {
                       MainTabView().environmentObject(MusicManager.shared)
                   }
               }
-              
-              func setupAudioSession() {
-                  do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
-                      try AVAudioSession.sharedInstance().setActive(true)
-                  } catch {
-                      print("Failed to set audio session category. Error: \(error)")
-                  }
-              }
           }
           EOF
 
-      - name: Write Music Manager Code
+      - name: Write Music Manager Code (Smart Video Extractor)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/MusicManager.swift
           import Foundation
@@ -62,14 +55,46 @@ jobs:
               var audioPlayer: AVAudioPlayer?
               
               let fileManager = FileManager.default
-              var documentsDirectory: URL { fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0] }
+              
+              // Smart Fallback Directory
+              var documentsDirectory: URL { 
+                  if let url = fileManager.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic") { return url }
+                  return fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0] 
+              }
               
               override init() {
                   super.init()
-                  loadSongs(); loadPlaylists(); setupRemoteCommandCenter()
-                  
-                  // Listen for shared files from other apps
-                  NotificationCenter.default.addObserver(self, selector: #selector(handleIncomingSharedFile), name: UIApplication.willEnterForegroundNotification, object: nil)
+                  processVideosToAudio()
+                  loadSongs()
+                  loadPlaylists()
+                  setupRemoteCommandCenter()
+                  NotificationCenter.default.addObserver(self, selector: #selector(appCameToForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+              }
+              
+              @objc func appCameToForeground() {
+                  processVideosToAudio()
+              }
+              
+              // Smart Background Video Extractor
+              func processVideosToAudio() {
+                  do {
+                      let files = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
+                      let videoFiles = files.filter { ["mp4", "mov", "m4v"].contains($0.pathExtension.lowercased()) }
+                      
+                      for videoUrl in videoFiles {
+                          let asset = AVAsset(url: videoUrl)
+                          guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else { continue }
+                          
+                          let outputUrl = documentsDirectory.appendingPathComponent(videoUrl.deletingPathExtension().lastPathComponent + ".m4a")
+                          exportSession.outputURL = outputUrl
+                          exportSession.outputFileType = .m4a
+                          
+                          exportSession.exportAsynchronously {
+                              try? self.fileManager.removeItem(at: videoUrl)
+                              DispatchQueue.main.async { self.loadSongs() }
+                          }
+                      }
+                  } catch {}
               }
               
               func loadSongs() {
@@ -78,14 +103,6 @@ jobs:
                       let audioFiles = files.filter { ["mp3", "m4a", "wav"].contains($0.pathExtension.lowercased()) }
                       songs = audioFiles.map { url in Song(id: UUID(), title: url.deletingPathExtension().lastPathComponent, url: url) }.sorted { $0.title < $1.title }
                   } catch {}
-              }
-              
-              @objc func handleIncomingSharedFile() {
-                  // This forces the library to refresh when you return to the app,
-                  // catching any new audio extracted from videos via the Share Extension!
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                      self.loadSongs()
-                  }
               }
               
               func deleteSong(_ song: Song) {
@@ -114,6 +131,8 @@ jobs:
               
               func playSong(_ song: Song) {
                   do {
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                      try AVAudioSession.sharedInstance().setActive(true)
                       audioPlayer = try AVAudioPlayer(contentsOf: song.url)
                       audioPlayer?.delegate = self
                       audioPlayer?.play()
@@ -171,71 +190,47 @@ jobs:
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
           EOF
 
-      - name: Write Video Audio Extractor Extension Code
+      - name: Write Video Extractor Share Extension
         run: |
-          mkdir -p TrollMusicApp/ShareExtension
           cat << 'EOF' > TrollMusicApp/ShareExtension/ShareViewController.swift
           import UIKit
           import Social
           import AVFoundation
-          import MobileCoreServices
 
           class ShareViewController: SLComposeServiceViewController {
               override func isContentValid() -> Bool { return true }
               
               override func didSelectPost() {
-                  guard let extensionItems = extensionContext?.inputItems as? [NSExtensionItem] else {
+                  guard let item = extensionContext?.inputItems.first as? NSExtensionItem,
+                        let attachments = item.attachments else {
                       self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
                       return
                   }
                   
-                  for item in extensionItems {
-                      guard let attachments = item.attachments else { continue }
-                      for provider in attachments {
-                          // Look for Video files (Movies) shared to the app
-                          if provider.hasItemConformingToTypeIdentifier(kUTTypeMovie as String) {
-                              provider.loadItem(forTypeIdentifier: kUTTypeMovie as String, options: nil) { (item, error) in
-                                  if let url = item as? URL {
-                                      self.extractAudio(from: url)
+                  let fm = FileManager.default
+                  let destDir = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic") ?? fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                  
+                  let group = DispatchGroup()
+                  let types = ["public.movie", "public.audio", "public.video", "public.mpeg-4", "com.apple.quicktime-movie"]
+                  
+                  for provider in attachments {
+                      for type in types {
+                          if provider.hasItemConformingToTypeIdentifier(type) {
+                              group.enter()
+                              provider.loadItem(forTypeIdentifier: type, options: nil) { (itemURL, error) in
+                                  if let url = itemURL as? URL {
+                                      let destPath = destDir.appendingPathComponent(url.lastPathComponent)
+                                      try? fm.copyItem(at: url, to: destPath)
                                   }
+                                  group.leave()
                               }
-                          } 
-                          // Look for pure Audio files shared to the app
-                          else if provider.hasItemConformingToTypeIdentifier(kUTTypeAudio as String) {
-                              provider.loadItem(forTypeIdentifier: kUTTypeAudio as String, options: nil) { (item, error) in
-                                  if let url = item as? URL {
-                                      self.saveDirectAudio(from: url)
-                                  }
-                              }
+                              break
                           }
                       }
                   }
                   
-                  self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
-              }
-              
-              func saveDirectAudio(from sourceURL: URL) {
-                  let fm = FileManager.default
-                  // Save to the main app's document directory via App Group
-                  if let sharedContainer = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic") {
-                      let destURL = sharedContainer.appendingPathComponent(sourceURL.lastPathComponent)
-                      try? fm.copyItem(at: sourceURL, to: destURL)
-                  }
-              }
-              
-              func extractAudio(from videoURL: URL) {
-                  let asset = AVAsset(url: videoURL)
-                  let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A)
-                  
-                  let fm = FileManager.default
-                  if let sharedContainer = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic") {
-                      let outputURL = sharedContainer.appendingPathComponent("ExtractedAudio_\(UUID().uuidString.prefix(4)).m4a")
-                      
-                      exportSession?.outputURL = outputURL
-                      exportSession?.outputFileType = .m4a
-                      exportSession?.exportAsynchronously {
-                          print("Export Complete")
-                      }
+                  group.notify(queue: .main) {
+                      self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
                   }
               }
               
@@ -249,12 +244,7 @@ jobs:
           import SwiftUI
           import WebKit
 
-          struct BrowserTab: Identifiable {
-              let id = UUID()
-              var webView: WKWebView
-              var urlString: String
-              var title: String
-          }
+          struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String; var title: String }
 
           class WebViewModel: ObservableObject {
               @Published var tabs: [BrowserTab] = []
@@ -279,20 +269,16 @@ jobs:
                   let config = WKWebViewConfiguration()
                   config.defaultWebpagePreferences = prefs
                   config.allowsInlineMediaPlayback = true
-                  
                   let newWebView = WKWebView(frame: .zero, configuration: config)
                   newWebView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-                  
-                  let newTab = BrowserTab(webView: newWebView, urlString: "https://google.com", title: "New Tab")
-                  tabs.append(newTab)
+                  tabs.append(BrowserTab(webView: newWebView, urlString: "https://google.com", title: "New Tab"))
                   currentTabIndex = tabs.count - 1
                   loadUrl("https://google.com")
               }
               
               func closeTab(at index: Int) {
                   tabs.remove(at: index)
-                  if tabs.isEmpty { addNewTab() }
-                  else if currentTabIndex >= tabs.count { currentTabIndex = tabs.count - 1 }
+                  if tabs.isEmpty { addNewTab() } else if currentTabIndex >= tabs.count { currentTabIndex = tabs.count - 1 }
               }
               
               func goBack() { currentWebView.goBack() }
@@ -317,17 +303,16 @@ jobs:
               func confirmDownload(with name: String) {
                   guard let url = capturedUrl else { return }
                   let finalName = name.isEmpty ? "CapturedAudio_\(UUID().uuidString.prefix(4))" : name
+                  let fm = FileManager.default
+                  let destDir = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic") ?? fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                  
                   let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
                       guard let localUrl = localUrl else { return }
-                      
-                      let fm = FileManager.default
-                      // Save to Shared Container so both extension and app can see it
-                      if let destPath = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic")?.appendingPathComponent("\(finalName).mp3") {
-                          try? fm.moveItem(at: localUrl, to: destPath)
-                          DispatchQueue.main.async { 
-                              self.downloadFileName = destPath.lastPathComponent
-                              self.showDownloadAlert = true 
-                          }
+                      let destPath = destDir.appendingPathComponent("\(finalName).mp3")
+                      try? fm.moveItem(at: localUrl, to: destPath)
+                      DispatchQueue.main.async { 
+                          self.downloadFileName = destPath.lastPathComponent
+                          self.showDownloadAlert = true 
                       }
                   }
                   task.resume()
@@ -337,30 +322,20 @@ jobs:
           struct WebViewUI: UIViewRepresentable {
               @ObservedObject var viewModel: WebViewModel
               @Binding var urlString: String
-              
-              func makeUIView(context: Context) -> WKWebView {
-                  let webView = viewModel.currentWebView
-                  webView.navigationDelegate = context.coordinator
-                  webView.uiDelegate = context.coordinator
-                  return webView
-              }
-              
+              func makeUIView(context: Context) -> WKWebView { return viewModel.currentWebView }
               func updateUIView(_ uiView: WKWebView, context: Context) {
                   uiView.navigationDelegate = context.coordinator
                   uiView.uiDelegate = context.coordinator
               }
-              
               func makeCoordinator() -> Coordinator { Coordinator(self) }
               
               class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
                   var parent: WebViewUI
                   init(_ parent: WebViewUI) { self.parent = parent }
-                  
                   func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
                       if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
                       return nil
                   }
-                  
                   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
                       parent.viewModel.canGoBack = webView.canGoBack
                       parent.viewModel.canGoForward = webView.canGoForward
@@ -369,25 +344,22 @@ jobs:
                           parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL
                       }
                   }
-                  
                   func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-                      if let url = navigationAction.request.url {
-                          if ["mp3", "m4a"].contains(url.pathExtension.lowercased()) {
-                              let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
-                                  guard let localUrl = localUrl else { return }
-                                  let fm = FileManager.default
-                                  if let destPath = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic")?.appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent) {
-                                      try? fm.moveItem(at: localUrl, to: destPath)
-                                      DispatchQueue.main.async { 
-                                          self.parent.viewModel.downloadFileName = destPath.lastPathComponent
-                                          self.parent.viewModel.showDownloadAlert = true 
-                                      }
-                                  }
+                      if let url = navigationAction.request.url, ["mp3", "m4a"].contains(url.pathExtension.lowercased()) {
+                          let fm = FileManager.default
+                          let destDir = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ahmedsoliman.trollmusic") ?? fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                          let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
+                              guard let localUrl = localUrl else { return }
+                              let destPath = destDir.appendingPathComponent(response?.suggestedFilename ?? url.lastPathComponent)
+                              try? fm.moveItem(at: localUrl, to: destPath)
+                              DispatchQueue.main.async { 
+                                  self.parent.viewModel.downloadFileName = destPath.lastPathComponent
+                                  self.parent.viewModel.showDownloadAlert = true 
                               }
-                              task.resume()
-                              decisionHandler(.cancel)
-                              return
                           }
+                          task.resume()
+                          decisionHandler(.cancel)
+                          return
                       }
                       decisionHandler(.allow)
                   }
@@ -410,17 +382,9 @@ jobs:
                           LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
                           PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
                           BrowserMainView().tabItem { Label("Browser", systemImage: "safari") }
-                      }
-                      .accentColor(.purple)
-                      
-                      if musicManager.currentSong != nil {
-                          MiniPlayerView(showFullPlayer: $showFullPlayer)
-                              .padding(.bottom, 50)
-                      }
-                  }
-                  .sheet(isPresented: $showFullPlayer) {
-                      FullPlayerView()
-                  }
+                      }.accentColor(.purple)
+                      if musicManager.currentSong != nil { MiniPlayerView(showFullPlayer: $showFullPlayer).padding(.bottom, 50) }
+                  }.sheet(isPresented: $showFullPlayer) { FullPlayerView() }
               }
           }
 
@@ -447,22 +411,14 @@ jobs:
                           
                           WebViewUI(viewModel: webViewModel, urlString: $urlString)
                           
-                          // Browser Bottom Bar
                           HStack {
                               Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack)
                               Spacer()
                               Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward)
                               Spacer()
-                              Button(action: { webViewModel.grabAudio() }) { 
-                                  Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple)
-                              }
+                              Button(action: { webViewModel.grabAudio() }) { Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple) }
                               Spacer()
-                              Button(action: { webViewModel.showTabs = true }) { 
-                                  ZStack {
-                                      RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24)
-                                      Text("\(webViewModel.tabs.count)").font(.caption).bold()
-                                  }
-                              }
+                              Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text("\(webViewModel.tabs.count)").font(.caption).bold() } }
                               Spacer()
                               Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
                           }.padding().background(Color(uiColor: .secondarySystemBackground))
@@ -471,39 +427,18 @@ jobs:
                       if webViewModel.showTabs {
                           Color.black.opacity(0.8).edgesIgnoringSafeArea(.all)
                           VStack {
-                              HStack {
-                                  Text("Tabs").font(.title).bold().foregroundColor(.white)
-                                  Spacer()
-                                  Button("Done") { webViewModel.showTabs = false }.foregroundColor(.blue)
-                              }.padding()
-                              
+                              HStack { Text("Tabs").font(.title).bold().foregroundColor(.white); Spacer(); Button("Done") { webViewModel.showTabs = false }.foregroundColor(.blue) }.padding()
                               ScrollView {
                                   VStack(spacing: 15) {
                                       ForEach(0..<webViewModel.tabs.count, id: \.self) { index in
                                           HStack {
-                                              VStack(alignment: .leading) {
-                                                  Text("Tab \(index + 1)").font(.headline).foregroundColor(.white)
-                                                  Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1)
-                                              }
+                                              VStack(alignment: .leading) { Text("Tab \(index + 1)").font(.headline).foregroundColor(.white); Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1) }
                                               Spacer()
                                               Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) }
-                                          }
-                                          .padding()
-                                          .background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3))
-                                          .cornerRadius(10)
-                                          .onTapGesture {
-                                              webViewModel.currentTabIndex = index
-                                              urlString = webViewModel.tabs[index].urlString
-                                              webViewModel.showTabs = false
-                                          }
+                                          }.padding().background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3)).cornerRadius(10)
+                                          .onTapGesture { webViewModel.currentTabIndex = index; urlString = webViewModel.tabs[index].urlString; webViewModel.showTabs = false }
                                       }
-                                      
-                                      Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) {
-                                          HStack {
-                                              Image(systemName: "plus")
-                                              Text("New Tab")
-                                          }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10)
-                                      }.padding(.top, 10)
+                                      Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) { HStack { Image(systemName: "plus"); Text("New Tab") }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10) }.padding(.top, 10)
                                   }.padding(.horizontal)
                               }
                           }
@@ -527,20 +462,11 @@ jobs:
                   VStack(spacing: 0) {
                       Divider().background(Color.white.opacity(0.1))
                       HStack(spacing: 15) {
-                          ZStack {
-                              LinearGradient(gradient: Gradient(colors: [.purple, .blue]), startPoint: .topLeading, endPoint: .bottomTrailing)
-                                  .frame(width: 45, height: 45).cornerRadius(8)
-                              Image(systemName: "music.note").foregroundColor(.white)
-                          }
+                          ZStack { LinearGradient(gradient: Gradient(colors: [.purple, .blue]), startPoint: .topLeading, endPoint: .bottomTrailing).frame(width: 45, height: 45).cornerRadius(8); Image(systemName: "music.note").foregroundColor(.white) }
                           Text(musicManager.currentSong?.title ?? "").font(.system(size: 16, weight: .semibold)).lineLimit(1)
                           Spacer()
-                          Button(action: { musicManager.togglePlayPause() }) {
-                              Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").font(.title2).foregroundColor(.primary)
-                          }.padding(.trailing)
-                      }
-                      .padding(.horizontal).padding(.vertical, 8)
-                      .background(.ultraThinMaterial)
-                      .onTapGesture { showFullPlayer = true }
+                          Button(action: { musicManager.togglePlayPause() }) { Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").font(.title2).foregroundColor(.primary) }.padding(.trailing)
+                      }.padding(.horizontal).padding(.vertical, 8).background(.ultraThinMaterial).onTapGesture { showFullPlayer = true }
                   }
               }
           }
@@ -552,33 +478,13 @@ jobs:
                   ZStack {
                       LinearGradient(gradient: Gradient(colors: [Color(red: 0.1, green: 0.1, blue: 0.2), Color(red: 0.3, green: 0.1, blue: 0.4)]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
                       VStack(spacing: 40) {
-                          HStack {
-                              Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }
-                              Spacer()
-                              VStack(spacing: 2) {
-                                  Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6))
-                                  Text("Ahmed's Music").font(.subheadline).bold().foregroundColor(.white)
-                              }
-                              Spacer()
-                              Button(action: {}) { Image(systemName: "ellipsis").foregroundColor(.clear) }
-                          }.padding()
-                          
-                          ZStack {
-                              RoundedRectangle(cornerRadius: 30).fill(LinearGradient(gradient: Gradient(colors: [.blue, .purple]), startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 280, height: 280).shadow(color: .purple.opacity(0.4), radius: 20, x: 0, y: 15)
-                              Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit).frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8))
-                          }.padding(.top, 20)
-                          
-                          VStack(spacing: 8) {
-                              Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 24, weight: .bold)).foregroundColor(.white).multilineTextAlignment(.center).padding(.horizontal)
-                              Text("Downloaded from Web").font(.subheadline).foregroundColor(.white.opacity(0.6))
-                          }
-                          
+                          HStack { Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }; Spacer(); VStack(spacing: 2) { Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6)); Text("Ahmed's Music").font(.subheadline).bold().foregroundColor(.white) }; Spacer(); Button(action: {}) { Image(systemName: "ellipsis").foregroundColor(.clear) } }.padding()
+                          ZStack { RoundedRectangle(cornerRadius: 30).fill(LinearGradient(gradient: Gradient(colors: [.blue, .purple]), startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 280, height: 280).shadow(color: .purple.opacity(0.4), radius: 20, x: 0, y: 15); Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit).frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8)) }.padding(.top, 20)
+                          VStack(spacing: 8) { Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 24, weight: .bold)).foregroundColor(.white).multilineTextAlignment(.center).padding(.horizontal); Text("Downloaded from Web").font(.subheadline).foregroundColor(.white.opacity(0.6)) }
                           HStack(spacing: 30) {
                               Button(action: { musicManager.isShuffle.toggle() }) { Image(systemName: "shuffle").font(.title2).foregroundColor(musicManager.isShuffle ? .purple : .white.opacity(0.5)) }
                               Button(action: { musicManager.playPrevious() }) { Image(systemName: "backward.fill").font(.title).foregroundColor(.white) }
-                              Button(action: { musicManager.togglePlayPause() }) {
-                                  ZStack { Circle().fill(Color.white).frame(width: 80, height: 80); Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").resizable().aspectRatio(contentMode: .fit).frame(width: 30, height: 30).foregroundColor(.black) }
-                              }
+                              Button(action: { musicManager.togglePlayPause() }) { ZStack { Circle().fill(Color.white).frame(width: 80, height: 80); Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").resizable().aspectRatio(contentMode: .fit).frame(width: 30, height: 30).foregroundColor(.black) } }
                               Button(action: { musicManager.playNext() }) { Image(systemName: "forward.fill").font(.title).foregroundColor(.white) }
                               Button(action: { }) { Image(systemName: "repeat").font(.title2).foregroundColor(.white.opacity(0.5)) }
                           }.padding(.top, 20)
@@ -595,18 +501,12 @@ jobs:
                   NavigationView {
                       List {
                           ForEach(musicManager.songs) { song in
-                              HStack {
-                                  VStack(alignment: .leading) { Text(song.title).font(.headline) }
-                                  Spacer()
-                                  Button(action: { showingOptionsFor = song }) { Image(systemName: "ellipsis") }
-                              }
-                              .contentShape(Rectangle())
-                              .onTapGesture { musicManager.playSong(song) }
+                              HStack { VStack(alignment: .leading) { Text(song.title).font(.headline) }; Spacer(); Button(action: { showingOptionsFor = song }) { Image(systemName: "ellipsis") } }
+                              .contentShape(Rectangle()).onTapGesture { musicManager.playSong(song) }
                           }
                           .onDelete { indexSet in indexSet.forEach { index in musicManager.deleteSong(musicManager.songs[index]) } }
                       }
-                      .navigationTitle("Ahmed's Library")
-                      .onAppear { musicManager.loadSongs() }
+                      .navigationTitle("Ahmed's Library").onAppear { musicManager.loadSongs() }
                       .confirmationDialog("Options", isPresented: Binding(get: { showingOptionsFor != nil }, set: { if !$0 { showingOptionsFor = nil } }), titleVisibility: .visible) {
                           if let song = showingOptionsFor { ForEach(musicManager.playlists) { playlist in Button("Add to \(playlist.name)") { musicManager.addSongToPlaylist(song: song, playlist: playlist) } } }
                           Button("Cancel", role: .cancel) {}
@@ -619,9 +519,7 @@ jobs:
               @EnvironmentObject var musicManager: MusicManager
               var playlist: Playlist
               var songsInPlaylist: [Song] { musicManager.songs.filter { playlist.songIDs.contains($0.id) } }
-              var body: some View {
-                  List { ForEach(songsInPlaylist) { song in Text(song.title).onTapGesture { musicManager.playSong(song) } } }.navigationTitle(playlist.name)
-              }
+              var body: some View { List { ForEach(songsInPlaylist) { song in Text(song.title).onTapGesture { musicManager.playSong(song) } } }.navigationTitle(playlist.name) }
           }
 
           struct PlaylistsView: View {
@@ -630,22 +528,17 @@ jobs:
               @State private var newPlaylistName = ""
               var body: some View {
                   NavigationView {
-                      List {
-                          ForEach(musicManager.playlists) { playlist in NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline) } }
-                      }
-                      .navigationTitle("Playlists")
-                      .toolbar { Button(action: { showingNewPlaylist = true }) { Image(systemName: "plus") } }
+                      List { ForEach(musicManager.playlists) { playlist in NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline) } } }
+                      .navigationTitle("Playlists").toolbar { Button(action: { showingNewPlaylist = true }) { Image(systemName: "plus") } }
                       .alert("New Playlist", isPresented: $showingNewPlaylist) {
-                          TextField("Playlist Name", text: $newPlaylistName)
-                          Button("Create") { if !newPlaylistName.isEmpty { musicManager.createPlaylist(name: newPlaylistName); newPlaylistName = "" } }
-                          Button("Cancel", role: .cancel) { }
+                          TextField("Playlist Name", text: $newPlaylistName); Button("Create") { if !newPlaylistName.isEmpty { musicManager.createPlaylist(name: newPlaylistName); newPlaylistName = "" } }; Button("Cancel", role: .cancel) { }
                       }
                   }
               }
           }
           EOF
 
-      - name: Write Plists & Xcode Project Generation
+      - name: Write Plists & Xcode Project Configuration
         run: |
           # Main App Info.plist
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Info.plist
@@ -656,9 +549,11 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AhmedsMusic</string>
-              <key>CFBundleShortVersionString</key><string>5.0</string>
-              <key>CFBundleVersion</key><string>10</string>
+              <key>CFBundleShortVersionString</key><string>6.0</string>
+              <key>CFBundleVersion</key><string>11</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
+              <key>UIFileSharingEnabled</key><true/>
+              <key>LSSupportsOpeningDocumentsInPlace</key><true/>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
           </dict>
@@ -681,18 +576,21 @@ jobs:
                   <key>NSExtensionAttributes</key>
                   <dict>
                       <key>NSExtensionActivationRule</key>
-                      <string>SUBQUERY (extensionItems, $extensionItem, SUBQUERY ($extensionItem.attachments, $attachment, ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.movie" OR ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.audio").@count == 1).@count == 1</string>
+                      <dict>
+                          <key>NSExtensionActivationSupportsMovieWithMaxCount</key><integer>1</integer>
+                          <key>NSExtensionActivationSupportsAudioWithMaxCount</key><integer>1</integer>
+                          <key>NSExtensionActivationSupportsFileWithMaxCount</key><integer>1</integer>
+                          <key>NSExtensionActivationSupportsWebURLWithMaxCount</key><integer>1</integer>
+                      </dict>
                   </dict>
-                  <key>NSExtensionPointIdentifier</key>
-                  <string>com.apple.share-services</string>
-                  <key>NSExtensionPrincipalClass</key>
-                  <string>ShareExtension.ShareViewController</string>
+                  <key>NSExtensionPointIdentifier</key><string>com.apple.share-services</string>
+                  <key>NSExtensionPrincipalClass</key><string>ShareExtension.ShareViewController</string>
               </dict>
           </dict>
           </plist>
           EOF
           
-          # Critical for ensuring background audio doesn't get killed
+          # Entitlements
           cat << 'EOF' > TrollMusicApp/TrollMusicApp.entitlements
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -707,6 +605,7 @@ jobs:
           </plist>
           EOF
           
+          # Generate Xcode Project linking the App and the Share Extension!
           cd TrollMusicApp
           brew install xcodegen
           cat << 'EOF' > project.yml
@@ -721,6 +620,8 @@ jobs:
               sources: [TrollMusicApp]
               info:
                 path: TrollMusicApp/Info.plist
+              dependencies:
+                - target: ShareExtension
               settings:
                 CODE_SIGNING_ALLOWED: "NO"
                 CODE_SIGNING_REQUIRED: "NO"
@@ -752,5 +653,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollMusicApp-Ahmed-Ultimate-V5
+          name: TrollMusicApp-Ahmed-Ultimate-V6
           path: TrollMusicApp/TrollMusicApp.ipa
