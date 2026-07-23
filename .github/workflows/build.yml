@@ -1,4 +1,4 @@
-name: Build TrollMusicApp V33.0
+name: Build TrollMusicApp V34.0
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
                       try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
                       try AVAudioSession.sharedInstance().setActive(true)
                       UIApplication.shared.beginReceivingRemoteControlEvents()
-                  } catch { print("Background Audio Setup Failed") }
+                  } catch {}
                   return true
               }
           }
@@ -50,7 +50,6 @@ jobs:
           import AVFoundation
           import MediaPlayer
           import SwiftUI
-          import CoreMedia
 
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
@@ -63,7 +62,6 @@ jobs:
               @Published var isPlaying: Bool = false
               @Published var isShuffle: Bool = false
               @Published var sleepTimerMinutes: Int = 0
-              
               @Published var currentTime: TimeInterval = 0.0
               @Published var duration: TimeInterval = 1.0 
               
@@ -208,7 +206,7 @@ jobs:
           }
           EOF
 
-      - name: Write Native Smart Downloader (Magic Search)
+      - name: Write Native Smart Downloader (Magic DL)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
           import SwiftUI
@@ -253,7 +251,7 @@ jobs:
                   }.resume()
               }
               func downloadDirectLink(url: String, name: String) {
-                  guard let audioUrl = URL(string: url) else { return }; stopPreview(); isDownloading = true; downloadProgress = 0.0; statusMessage = "Downloading..."
+                  guard let audioUrl = URL(string: url) else { return }; stopPreview(); isDownloading = true; downloadProgress = 0.0; statusMessage = "Downloading directly from Apple..."
                   self.finalDownloadName = name.isEmpty ? "MagicDL_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-"); self.downloadSession.downloadTask(with: audioUrl).resume()
               }
               func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
@@ -272,15 +270,19 @@ jobs:
               var body: some View {
                   NavigationView {
                       ZStack {
-                          Color(uiColor: .systemGroupedBackground).edgesIgnoringSafeArea(.all)
+                          // Premium Smart Dark Mode Gradient
+                          LinearGradient(gradient: Gradient(colors: [Color(red: 0.1, green: 0.05, blue: 0.2), Color.black]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
+                          
                           ScrollView {
                               VStack(spacing: 30) {
                                   Image(systemName: "sparkles").resizable().frame(width: 80, height: 80).foregroundColor(.purple).padding(.top, 40)
-                                  Text("Magic Search").font(.title).bold()
+                                  Text("Magic Search").font(.title).bold().foregroundColor(.white)
+                                  
                                   VStack(spacing: 15) {
                                       Text("Search Apple Music Library").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
                                       HStack { TextField("e.g. Amr Diab", text: $searchInput).padding().background(Color(uiColor: .secondarySystemGroupedBackground)).cornerRadius(12); Button(action: { downloader.performMagicSearch(query: searchInput) }) { if downloader.isSearching { ProgressView().padding() } else { Image(systemName: "magnifyingglass").foregroundColor(.white).padding().background(Color.purple).cornerRadius(12) } }.disabled(downloader.isSearching || searchInput.isEmpty) }
                                   }.padding(.horizontal)
+                                  
                                   if downloader.isDownloading { VStack(spacing: 10) { ProgressView(value: downloader.downloadProgress).progressViewStyle(LinearProgressViewStyle(tint: .purple)).scaleEffect(x: 1, y: 2, anchor: .center); Text(downloader.statusMessage).font(.headline).foregroundColor(.purple) }.padding() }
                                   Spacer()
                               }
@@ -294,7 +296,10 @@ jobs:
                                           VStack(spacing: 15) {
                                               ForEach(downloader.searchResults) { result in
                                                   HStack {
-                                                      VStack(alignment: .leading) { Text(result.trackName).font(.subheadline).foregroundColor(.white).bold().lineLimit(1); HStack { Text(result.artistName).font(.caption).foregroundColor(.gray).lineLimit(1); Text("• \(result.durationFormatted)").font(.caption).foregroundColor(.purple).bold() } }; Spacer()
+                                                      VStack(alignment: .leading) { 
+                                                          Text(result.trackName).font(.subheadline).foregroundColor(.white).bold().lineLimit(1)
+                                                          HStack { Text(result.artistName).font(.caption).foregroundColor(.gray).lineLimit(1); Text("• \(result.durationFormatted)").font(.caption).foregroundColor(.purple).bold() }
+                                                      }; Spacer()
                                                       Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.trackId && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
                                                       Button(action: { downloader.showSearchResults = false; downloader.downloadDirectLink(url: result.previewUrl, name: result.trackName) }) { Image(systemName: "arrow.down.circle.fill").font(.title).foregroundColor(.purple) }
                                                   }.padding().background(Color.white.opacity(0.1)).cornerRadius(10)
@@ -313,7 +318,7 @@ jobs:
           }
           EOF
 
-      - name: Write Web Browser Logic
+      - name: Write Advanced Web Hub (Top Bar Progress + Smart SC Grabber)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
@@ -321,19 +326,31 @@ jobs:
 
           struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String; var title: String }
 
-          class WebViewModel: ObservableObject {
+          class WebViewModel: NSObject, ObservableObject, URLSessionDownloadDelegate {
               @Published var tabs: [BrowserTab] = []
               @Published var currentTabIndex: Int = 0
               @Published var showTabs: Bool = false
+              
               @Published var canGoBack: Bool = false
               @Published var canGoForward: Bool = false
-              @Published var showDownloadAlert: Bool = false
+              @Published var showCopiedAlert: Bool = false
+              
+              // NEW: Top Bar Progress UI
+              @Published var isDownloading: Bool = false
+              @Published var downloadProgress: Double = 0.0
+              @Published var downloadMessage: String = ""
+              @Published var showDownloadSuccess: Bool = false
+              
               @Published var showNamePrompt: Bool = false
-              @Published var downloadFileName: String = ""
               @Published var customSongName: String = ""
               var capturedUrl: URL? = nil
+              var downloadSession: URLSession!
               
-              init() { addNewTab() }
+              override init() { 
+                  super.init()
+                  downloadSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+                  addNewTab() 
+              }
               var currentWebView: WKWebView { tabs[currentTabIndex].webView }
               
               func addNewTab() {
@@ -355,32 +372,75 @@ jobs:
               func goBack() { currentWebView.goBack() }
               func goForward() { currentWebView.goForward() }
               func refresh() { currentWebView.reload() }
+              
               func loadUrl(_ urlString: String) { 
                   var finalStr = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
                   if finalStr.isEmpty { return }
+                  
                   if !finalStr.contains(".") || finalStr.contains(" ") {
-                      if let encoded = finalStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) { finalStr = "https://www.google.com/search?q=\(encoded)" }
-                  } else { if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr } }
+                      if let encoded = finalStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                          finalStr = "https://www.google.com/search?q=\(encoded)"
+                      }
+                  } else {
+                      if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr }
+                  }
                   if let url = URL(string: finalStr) { currentWebView.load(URLRequest(url: url)) } 
               }
               
+              // NEW: Intelligent SoundCloud/Blob Scraper!
               func grabAudio() {
-                  let js = "(function() { var mediaElements = document.querySelectorAll('audio, video, source'); for (var i = 0; i < mediaElements.length; i++) { if (mediaElements[i].src && mediaElements[i].src.startsWith('http')) { return mediaElements[i].src; } } return null; })()"
+                  let js = """
+                  (function() { 
+                      var mediaElements = document.querySelectorAll('audio, video, source');
+                      for (var i = 0; i < mediaElements.length; i++) {
+                          if (mediaElements[i].src && mediaElements[i].src.startsWith('http') && !mediaElements[i].src.includes('blob:')) {
+                              return mediaElements[i].src;
+                          }
+                      }
+                      return "USE_URL:" + window.location.href;
+                  })()
+                  """
                   currentWebView.evaluateJavaScript(js) { result, error in
-                      if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) { self.capturedUrl = url; self.customSongName = "Web_Audio"; self.showNamePrompt = true }
+                      if let res = result as? String {
+                          if res.starts(with: "USE_URL:") {
+                              // If it's a hidden SoundCloud or blob stream, grab the URL to use in the Downloader!
+                              let pageUrl = res.replacingOccurrences(of: "USE_URL:", with: "")
+                              UIPasteboard.general.string = pageUrl
+                              self.customSongName = "Hidden stream found! Link Copied. Paste in URL DL tab."
+                              self.showNamePrompt = true
+                          } else if let url = URL(string: res) {
+                              self.capturedUrl = url
+                              self.customSongName = "Web_Audio"
+                              self.showNamePrompt = true
+                          }
+                      }
                   }
               }
               
               func confirmDownload(with name: String) {
+                  if name.contains("Hidden stream") { return }
                   guard let url = capturedUrl else { return }
-                  var finalName = name.replacingOccurrences(of: "/", with: "-"); if !finalName.hasSuffix(".mp3") && !finalName.hasSuffix(".m4a") && !finalName.hasSuffix(".wav") { finalName += ".mp3" }
-                  let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                  let destPath = destDir.appendingPathComponent(finalName)
-                  URLSession.shared.downloadTask(with: url) { localUrl, response, _ in
-                      guard let localUrl = localUrl else { return }
-                      try? FileManager.default.moveItem(at: localUrl, to: destPath); try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
-                      DispatchQueue.main.async { self.downloadFileName = finalName; self.showDownloadAlert = true }
-                  }.resume()
+                  var finalName = name.replacingOccurrences(of: "/", with: "-")
+                  if !finalName.hasSuffix(".mp3") && !finalName.hasSuffix(".m4a") && !finalName.hasSuffix(".wav") { finalName += ".mp3" }
+                  
+                  isDownloading = true; downloadProgress = 0.0; downloadMessage = "Starting download..."
+                  self.customSongName = finalName // Save name for completion delegate
+                  
+                  let task = downloadSession.downloadTask(with: url)
+                  task.resume()
+              }
+              
+              func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+                  let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+                  DispatchQueue.main.async { self.downloadProgress = progress; self.downloadMessage = "Downloading... \(Int(progress * 100))%" }
+              }
+              
+              func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+                  let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                  let destPath = destDir.appendingPathComponent(customSongName)
+                  
+                  try? fm.removeItem(at: destPath); try? fm.moveItem(at: location, to: destPath); try? fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
+                  DispatchQueue.main.async { self.isDownloading = false; self.showDownloadSuccess = true; MusicManager.shared.loadSongs() }
               }
           }
 
@@ -392,7 +452,7 @@ jobs:
               func updateUIView(_ uiView: WKWebView, context: Context) { uiView.navigationDelegate = context.coordinator; uiView.uiDelegate = context.coordinator }
               func makeCoordinator() -> Coordinator { Coordinator(self) }
               
-              class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+              class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
                   var parent: WebViewUI
                   init(_ parent: WebViewUI) { self.parent = parent }
                   
@@ -408,32 +468,10 @@ jobs:
                   
                   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
                       parent.viewModel.canGoBack = webView.canGoBack; parent.viewModel.canGoForward = webView.canGoForward
-                      if let currentURL = webView.url?.absoluteString { if !parent.urlString.contains(" ") { parent.urlString = currentURL }; parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL }
-                  }
-                  
-                  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-                      if navigationAction.shouldPerformDownload { decisionHandler(.download); return }
-                      decisionHandler(.allow)
-                  }
-                  func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-                      if navigationResponse.canShowMIMEType == false { decisionHandler(.download); return }
-                      if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm") || mime.contains("zip") || mime.contains("octet-stream") { decisionHandler(.download); return }
-                      decisionHandler(.allow)
-                  }
-                  func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
-                  func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = self }
-                  
-                  func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
-                      let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                      let cleanName = suggestedFilename.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggestedFilename
-                      let destPath = destDir.appendingPathComponent(cleanName); try? fm.removeItem(at: destPath)
-                      DispatchQueue.main.async { self.parent.viewModel.downloadFileName = cleanName }
-                      completionHandler(destPath)
-                  }
-                  func downloadDidFinish(_ download: WKDownload) {
-                      let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]; let destPath = destDir.appendingPathComponent(parent.viewModel.downloadFileName)
-                      try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
-                      DispatchQueue.main.async { self.parent.viewModel.showDownloadAlert = true; MusicManager.shared.loadSongs() }
+                      if let currentURL = webView.url?.absoluteString { 
+                          if !parent.urlString.contains(" ") { parent.urlString = currentURL }
+                          parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL 
+                      }
                   }
               }
           }
@@ -446,33 +484,21 @@ jobs:
           import AVFoundation
 
           class URLDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
-              @Published var isDownloading = false
-              @Published var statusMessage = ""
-              @Published var downloadProgress: Double = 0.0
-              @Published var showSuccess = false
-              @Published var showError = false
-              @Published var errorDetails = ""
+              @Published var isDownloading = false; @Published var statusMessage = ""; @Published var downloadProgress: Double = 0.0
+              @Published var showSuccess = false; @Published var showError = false; @Published var errorDetails = ""
               
-              var finalDownloadName = ""
-              var downloadSession: URLSession!
+              var finalDownloadName = ""; var downloadSession: URLSession!
               
               override init() {
                   super.init()
-                  let config = URLSessionConfiguration.default
-                  downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+                  downloadSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
               }
               
               func downloadDirectLink(urlStr: String, name: String) {
-                  guard let url = URL(string: urlStr) else { 
-                      DispatchQueue.main.async { self.showError = true; self.errorDetails = "Invalid URL." }
-                      return 
-                  }
-                  
+                  guard let url = URL(string: urlStr) else { DispatchQueue.main.async { self.showError = true; self.errorDetails = "Invalid URL." }; return }
                   isDownloading = true; downloadProgress = 0.0; statusMessage = "Starting Download..."
                   self.finalDownloadName = name.isEmpty ? "ExtractedAudio_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
-                  
-                  let task = self.downloadSession.downloadTask(with: url)
-                  task.resume()
+                  self.downloadSession.downloadTask(with: url).resume()
               }
               
               func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
@@ -482,12 +508,9 @@ jobs:
               
               func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
                   let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                  
                   let ext = downloadTask.originalRequest?.url?.pathExtension ?? "mp3"
                   let safeExt = ext.isEmpty || ext.count > 4 ? "mp3" : ext
-                  
                   let destPath = destDir.appendingPathComponent("\(finalDownloadName).\(safeExt)")
-                  
                   try? fm.removeItem(at: destPath); try? fm.moveItem(at: location, to: destPath); try? fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
                   DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }
               }
@@ -501,20 +524,17 @@ jobs:
               var body: some View {
                   NavigationView {
                       ZStack {
-                          Color(uiColor: .systemGroupedBackground).edgesIgnoringSafeArea(.all)
+                          LinearGradient(gradient: Gradient(colors: [Color(red: 0.1, green: 0.05, blue: 0.2), Color.black]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
                           ScrollView {
                               VStack(spacing: 30) {
                                   Image(systemName: "arrow.down.circle.fill").resizable().frame(width: 80, height: 80).foregroundColor(.purple).padding(.top, 40)
-                                  Text("Direct URL Downloader").font(.title).bold()
-                                  Text("Paste a direct .mp3 URL to download it immediately to your library!").font(.subheadline).foregroundColor(.gray).multilineTextAlignment(.center).padding(.horizontal)
+                                  Text("URL Downloader").font(.title).bold().foregroundColor(.white)
+                                  Text("Paste a direct link, or a SoundCloud/YouTube URL you copied, and download it!").font(.subheadline).foregroundColor(.gray).multilineTextAlignment(.center).padding(.horizontal)
                                   
                                   VStack(spacing: 15) {
-                                      TextField("Paste Direct URL...", text: $linkInput).padding().background(Color(uiColor: .secondarySystemGroupedBackground)).cornerRadius(12).textInputAutocapitalization(.never)
-                                      TextField("Save As (Name of Song)", text: $nameInput).padding().background(Color(uiColor: .secondarySystemGroupedBackground)).cornerRadius(12)
-                                      
-                                      Button(action: { downloader.downloadDirectLink(urlStr: linkInput, name: nameInput) }) {
-                                          Text("Download Audio").font(.headline).foregroundColor(.white).frame(maxWidth: .infinity).padding().background(Color.purple).cornerRadius(12)
-                                      }.disabled(downloader.isDownloading || linkInput.isEmpty)
+                                      TextField("Paste Direct URL...", text: $linkInput).padding().background(Color.white).cornerRadius(12).textInputAutocapitalization(.never)
+                                      TextField("Save As (Name of Song)", text: $nameInput).padding().background(Color.white).cornerRadius(12)
+                                      Button(action: { downloader.downloadDirectLink(urlStr: linkInput, name: nameInput) }) { Text("Download Audio").font(.headline).foregroundColor(.white).frame(maxWidth: .infinity).padding().background(Color.purple).cornerRadius(12) }.disabled(downloader.isDownloading || linkInput.isEmpty)
                                   }.padding(.horizontal)
                                   
                                   if downloader.isDownloading { VStack(spacing: 10) { ProgressView(value: downloader.downloadProgress).progressViewStyle(LinearProgressViewStyle(tint: .purple)).scaleEffect(x: 1, y: 2, anchor: .center); Text(downloader.statusMessage).font(.headline).foregroundColor(.purple) }.padding() }
@@ -530,7 +550,7 @@ jobs:
           }
           EOF
 
-      - name: Write UI Views Code (All 5 Tabs Fully Restored)
+      - name: Write UI Views Code (Clean Spotify UI + Top Progress Bar)
         run: |
           cat << 'EOF' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
@@ -555,18 +575,10 @@ jobs:
                           LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
                           PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
                           SmartDownloaderView().tabItem { Label("Magic DL", systemImage: "sparkles") }
-                          
-                          // WEB HUB RESTORED!
                           BrowserMainView().padding(.bottom, musicManager.currentSong != nil ? 60 : 0).tabItem { Label("Web Hub", systemImage: "safari") }
-                          
-                          // URL DL RESTORED!
                           URLDownloaderView().tabItem { Label("URL DL", systemImage: "arrow.down.doc.fill") }
                       }.accentColor(.purple)
-                      
-                      if musicManager.currentSong != nil { 
-                          MiniPlayerView(showFullPlayer: $showFullPlayer)
-                              .padding(.bottom, 50) 
-                      }
+                      if musicManager.currentSong != nil { MiniPlayerView(showFullPlayer: $showFullPlayer).padding(.bottom, 50) }
                   }.sheet(isPresented: $showFullPlayer) { FullPlayerView() }
               }
           }
@@ -575,12 +587,24 @@ jobs:
               @EnvironmentObject var musicManager: MusicManager
               @StateObject var webViewModel = WebViewModel()
               @State private var urlString = "https://google.com"
+              
               var body: some View {
                   ZStack {
                       VStack(spacing: 0) {
+                          // NEW: TOP DOWNLOAD PROGRESS BAR
+                          if webViewModel.isDownloading {
+                              HStack {
+                                  ProgressView(value: webViewModel.downloadProgress).progressViewStyle(LinearProgressViewStyle(tint: .purple))
+                                  Text(webViewModel.downloadMessage).font(.caption).bold().foregroundColor(.purple)
+                              }.padding(.horizontal).padding(.top, 5).background(Color(uiColor: .secondarySystemBackground))
+                          }
+                          
                           HStack { TextField("Search Google or enter website", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.webSearch).textInputAutocapitalization(.never); Button("Go") { webViewModel.loadUrl(urlString) } }.padding(8).background(Color(uiColor: .secondarySystemBackground))
-                          ScrollView(.horizontal, showsIndicators: false) { HStack { Button("Google") { webViewModel.loadUrl("https://google.com") }.buttonStyle(.borderedProminent).tint(.blue); Button("YouTube") { webViewModel.loadUrl("https://youtube.com") }.buttonStyle(.borderedProminent).tint(.red); Button("SoundCloud") { webViewModel.loadUrl("https://soundcloud.com") }.buttonStyle(.borderedProminent).tint(.orange); Button("Audiomack") { webViewModel.loadUrl("https://audiomack.com") }.buttonStyle(.borderedProminent).tint(.yellow); Button("Spotify Playlists") { webViewModel.loadUrl("https://spotifydown.com") }.buttonStyle(.borderedProminent).tint(.green) }.padding(.horizontal).padding(.bottom, 8) }.background(Color(uiColor: .secondarySystemBackground))
+                          
+                          ScrollView(.horizontal, showsIndicators: false) { HStack { Button("Google") { webViewModel.loadUrl("https://google.com") }.buttonStyle(.borderedProminent).tint(.blue); Button("YouTube") { webViewModel.loadUrl("https://youtube.com") }.buttonStyle(.borderedProminent).tint(.red); Button("SoundCloud") { webViewModel.loadUrl("https://soundcloud.com") }.buttonStyle(.borderedProminent).tint(.orange); Button("Audiomack") { webViewModel.loadUrl("https://audiomack.com") }.buttonStyle(.borderedProminent).tint(.yellow) }.padding(.horizontal).padding(.bottom, 8) }.background(Color(uiColor: .secondarySystemBackground))
+                          
                           WebViewUI(viewModel: webViewModel, urlString: $urlString)
+                          
                           HStack {
                               Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack); Spacer()
                               Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward); Spacer()
@@ -597,8 +621,11 @@ jobs:
                           }
                       }
                   }
-                  .alert("Grab Audio", isPresented: $webViewModel.showNamePrompt) { TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { } } message: { Text("Enter a name to save the audio track.") }
-                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
+                  .alert("Grab Audio", isPresented: $webViewModel.showNamePrompt) {
+                      if webViewModel.customSongName.contains("Hidden stream") { Button("OK", role: .cancel) { } }
+                      else { TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { } }
+                  } message: { Text(webViewModel.customSongName.contains("Hidden stream") ? webViewModel.customSongName : "Enter a name to save the audio track.") }
+                  .alert("Download Complete", isPresented: $webViewModel.showDownloadSuccess) { Button("OK", role: .cancel) { } } message: { Text("Saved to your Library!") }
               }
           }
 
@@ -630,7 +657,6 @@ jobs:
                       VStack(spacing: 30) {
                           HStack { Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }; Spacer(); VStack(spacing: 2) { if let song = musicManager.currentSong, musicManager.isFavorite(song: song) { Text("FROM LIKED SONGS").font(.caption).bold().foregroundColor(.white.opacity(0.6)) } else { Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6)) }; Text("AS Music").font(.subheadline).bold().foregroundColor(.white) }; Spacer(); Button(action: { showTimerOptions = true }) { Image(systemName: "moon.fill").foregroundColor(musicManager.sleepTimerMinutes > 0 ? .purple : .white) } }.padding()
                           ZStack { RoundedRectangle(cornerRadius: 15).fill(generateColor(for: musicManager.currentSong?.title ?? "")).frame(width: 320, height: 320).shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 15); Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit).frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8)) }.padding(.top, 10)
-                          
                           HStack { VStack(alignment: .leading, spacing: 8) { Text(musicManager.currentSong?.title ?? "Unknown").font(.system(size: 26, weight: .bold)).foregroundColor(.white).lineLimit(2); HStack { Text("AS Music Player").font(.subheadline).foregroundColor(.white.opacity(0.6)); if musicManager.isPlaying { VisualizerView().padding(.leading, 5) } } }; Spacer(); if let song = musicManager.currentSong { Button(action: { musicManager.toggleFavorite(song: song) }) { Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart").font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white) } } }.padding(.horizontal, 30)
                           
                           VStack(spacing: 5) {
@@ -658,15 +684,18 @@ jobs:
               @State private var newNameInput = ""
               var body: some View {
                   NavigationView {
-                      List {
-                          ForEach(musicManager.songs) { song in
-                              HStack {
-                                  Button(action: { musicManager.playSong(song) }) {
-                                      HStack { generateColor(for: song.title).frame(width: 40, height: 40).cornerRadius(5).overlay(Image(systemName: "music.note").foregroundColor(.white)); VStack(alignment: .leading) { Text(song.title).font(.headline); Text("AS Music").font(.caption).foregroundColor(.gray) }; Spacer() }.contentShape(Rectangle())
-                                  }.buttonStyle(BorderlessButtonStyle())
-                                  Button(action: { showingOptionsFor = song }) { Image(systemName: "ellipsis").padding() }.buttonStyle(BorderlessButtonStyle())
-                              }
-                          }.onDelete { indexSet in indexSet.forEach { index in musicManager.deleteSong(musicManager.songs[index]) } }
+                      ZStack {
+                          LinearGradient(gradient: Gradient(colors: [Color(red: 0.1, green: 0.05, blue: 0.2), Color.black]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
+                          List {
+                              ForEach(musicManager.songs) { song in
+                                  HStack {
+                                      Button(action: { musicManager.playSong(song) }) {
+                                          HStack { generateColor(for: song.title).frame(width: 40, height: 40).cornerRadius(5).overlay(Image(systemName: "music.note").foregroundColor(.white)); VStack(alignment: .leading) { Text(song.title).font(.headline).foregroundColor(.white); Text("AS Music").font(.caption).foregroundColor(.gray) }; Spacer() }.contentShape(Rectangle())
+                                      }.buttonStyle(BorderlessButtonStyle())
+                                      Button(action: { showingOptionsFor = song }) { Image(systemName: "ellipsis").padding().foregroundColor(.white) }.buttonStyle(BorderlessButtonStyle())
+                                  }.listRowBackground(Color.white.opacity(0.05))
+                              }.onDelete { indexSet in indexSet.forEach { index in musicManager.deleteSong(musicManager.songs[index]) } }
+                          }.listStyle(PlainListStyle())
                       }
                       .navigationTitle("Your Library").onAppear { musicManager.loadSongs() }
                       .confirmationDialog("Options", isPresented: Binding(get: { showingOptionsFor != nil }, set: { if !$0 { showingOptionsFor = nil } }), titleVisibility: .visible) {
@@ -690,9 +719,12 @@ jobs:
               var playlist: Playlist
               var songsInPlaylist: [Song] { musicManager.songs.filter { playlist.songIDs.contains($0.id) } }
               var body: some View {
-                  List {
-                      ForEach(songsInPlaylist) { song in Button(action: { musicManager.playSong(song) }) { HStack { generateColor(for: song.title).frame(width: 40, height: 40).cornerRadius(5).overlay(Image(systemName: "music.note").foregroundColor(.white)); Text(song.title).foregroundColor(.primary); Spacer() } } }
-                      .onDelete { indexSet in if let pIndex = musicManager.playlists.firstIndex(where: { $0.id == playlist.id }) { indexSet.forEach { musicManager.playlists[pIndex].songIDs.remove(at: $0) }; musicManager.savePlaylists() } }
+                  ZStack {
+                      LinearGradient(gradient: Gradient(colors: [Color(red: 0.1, green: 0.05, blue: 0.2), Color.black]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
+                      List {
+                          ForEach(songsInPlaylist) { song in Button(action: { musicManager.playSong(song) }) { HStack { generateColor(for: song.title).frame(width: 40, height: 40).cornerRadius(5).overlay(Image(systemName: "music.note").foregroundColor(.white)); Text(song.title).foregroundColor(.white); Spacer() } } .listRowBackground(Color.white.opacity(0.05)) }
+                          .onDelete { indexSet in if let pIndex = musicManager.playlists.firstIndex(where: { $0.id == playlist.id }) { indexSet.forEach { musicManager.playlists[pIndex].songIDs.remove(at: $0) }; musicManager.savePlaylists() } }
+                      }.listStyle(PlainListStyle())
                   }.navigationTitle(playlist.name)
               }
           }
@@ -703,7 +735,10 @@ jobs:
               @State private var newPlaylistName = ""
               var body: some View {
                   NavigationView {
-                      List { ForEach(musicManager.playlists) { playlist in NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline).padding(.vertical, 5) } } }
+                      ZStack {
+                          LinearGradient(gradient: Gradient(colors: [Color(red: 0.1, green: 0.05, blue: 0.2), Color.black]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
+                          List { ForEach(musicManager.playlists) { playlist in NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline).padding(.vertical, 5).foregroundColor(.white) }.listRowBackground(Color.white.opacity(0.05)) } }.listStyle(PlainListStyle())
+                      }
                       .navigationTitle("Playlists").toolbar { Button(action: { showingNewPlaylist = true }) { Image(systemName: "plus") } }
                       .alert("New Playlist", isPresented: $showingNewPlaylist) { TextField("Playlist Name", text: $newPlaylistName); Button("Create") { if !newPlaylistName.isEmpty { musicManager.createPlaylist(name: newPlaylistName); newPlaylistName = "" } }; Button("Cancel", role: .cancel) { } }
                   }
@@ -754,8 +789,8 @@ jobs:
               <key>CFBundleExecutable</key><string>TrollMusicApp</string>
               <key>CFBundleIdentifier</key><string>com.ahmedsoliman.trollmusic</string>
               <key>CFBundleName</key><string>AS Music</string>
-              <key>CFBundleShortVersionString</key><string>33.0</string>
-              <key>CFBundleVersion</key><string>58</string>
+              <key>CFBundleShortVersionString</key><string>34.0</string>
+              <key>CFBundleVersion</key><string>59</string>
               <key>UIBackgroundModes</key><array><string>audio</string></array>
               <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
               <key>UILaunchScreen</key><dict/>
@@ -800,5 +835,5 @@ jobs:
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AS-Music-Ultimate-V33.0
+          name: AS-Music-Premium-V34.0
           path: TrollMusicApp/TrollMusicApp.ipa
