@@ -36,7 +36,7 @@ jobs:
                     - "Preview Content"
                     - "**/*.plist"
               info:
-                path: Info.plist
+                path: TrollMusicApp/Info.plist
                 properties:
                   UIBackgroundModes: [audio]
                   NSAppTransportSecurity: { NSAllowsArbitraryLoads: true }
@@ -50,6 +50,35 @@ jobs:
           mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
           mkdir -p TrollMusicApp/Preview\ Content
           find . -name "Info.plist" -delete
+          cat << 'PLIST' > TrollMusicApp/Info.plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.ahmedsoliman.trollmusicapp</string>
+    <key>CFBundleName</key>
+    <string>AS Music</string>
+    <key>CFBundleExecutable</key>
+    <string>TrollMusicApp</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+    <key>UILaunchScreen</key>
+    <dict/>
+</dict>
+</plist>
+PLIST
           find . -name "*.swift" -delete
 
       - name: Write TrollMusicAppApp.swift
