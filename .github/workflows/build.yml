@@ -21,6 +21,10 @@ jobs:
 
       - name: Create project config
         run: |
+          mkdir -p TrollMusicApp/TrollMusicApp
+          mkdir -p TrollMusicApp/Preview\ Content
+          mkdir -p DummyAssets
+          
           cat << 'PROJ' > project.yml
           name: TrollMusicApp
           options:
@@ -45,12 +49,41 @@ jobs:
                 DEVELOPMENT_ASSET_PATHS: "DummyAssets"
           PROJ
           
-          mkdir -p TrollMusicApp
-          mkdir -p DummyAssets
-          mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
-          mkdir -p TrollMusicApp/Preview\ Content
           find . -name "Info.plist" -delete
           find . -name "*.swift" -delete
+          
+          cat << 'PLIST' > Info.plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.ahmedsoliman.trollmusicapp</string>
+    <key>CFBundleName</key>
+    <string>AS Music</string>
+    <key>CFBundleExecutable</key>
+    <string>TrollMusicApp</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+    <key>UILaunchScreen</key>
+    <dict/>
+</dict>
+</plist>
+PLIST
+          
+          cp Info.plist TrollMusicApp/Info.plist
+          cp Info.plist TrollMusicApp/TrollMusicApp/Info.plist
 
       - name: Write TrollMusicAppApp.swift
         run: |
@@ -606,6 +639,7 @@ jobs:
               var onSuccess: (() -> Void)?
               var onFailure: (() -> Void)?
               var attempt = 0
+              var isDownloadStarted = false
               var extractors: [WebExtractor] = []
               
               override init() {
@@ -625,8 +659,27 @@ jobs:
                   self.onSuccess = onSuccess
                   self.onFailure = onFailure
                   self.attempt = 0
+                  self.isDownloadStarted = false
                   
                   self.extractors = [
+                      WebExtractor(url: "https://y2mate.nu/en-OOTt/", js: """
+                      setTimeout(function() {
+                          var input = document.getElementById('video');
+                          if(input) { 
+                              input.value = '$$URL$$'; 
+                              var btn = document.querySelector('button[type="submit"]');
+                              if(btn) btn.click(); 
+                              var check = setInterval(function() {
+                                  var dBtn = document.querySelector('a[href*="download"], button[class*="download"]');
+                                  if(dBtn) {
+                                      clearInterval(check);
+                                      if (dBtn.href) { window.location.href = dBtn.href; }
+                                      else { dBtn.click(); }
+                                  }
+                              }, 1000);
+                          }
+                      }, 1000);
+                      """),
                       WebExtractor(url: "https://cobalt.tools", js: """
                       setTimeout(function() {
                           var audioBtn = document.getElementById('setting-button-save-downloadMode-audio');
@@ -636,12 +689,6 @@ jobs:
                               setTimeout(function() { var dlBtn = document.getElementById('download-button'); if(dlBtn) dlBtn.click(); }, 1000);
                           }
                       }, 1500);
-                      """),
-                      WebExtractor(url: "https://y2mate.nu/en-OOTt/", js: """
-                      setTimeout(function() {
-                          var input = document.getElementById('video');
-                          if(input) { input.value = '$$URL$$'; var btn = document.querySelector('button[type="submit"]'); if(btn) btn.click(); }
-                      }, 1500);
                       """)
                   ]
                   self.executeNextAttempt()
@@ -649,14 +696,19 @@ jobs:
               
               func executeNextAttempt() {
                   if attempt >= extractors.count { self.onFailure?(); return }
+                  self.isDownloadStarted = false
                   if let u = URL(string: extractors[attempt].url) { self.webView.load(URLRequest(url: u)) }
               }
               
               func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
                   let js = extractors[attempt].js.replacingOccurrences(of: "$$URL$$", with: self.targetUrl)
                   webView.evaluateJavaScript(js, completionHandler: nil)
+                  
                   DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
-                      // We just let it try to finish natively
+                      if !self.isDownloadStarted {
+                          self.attempt += 1
+                          self.executeNextAttempt()
+                      }
                   }
               }
               
@@ -671,6 +723,7 @@ jobs:
               func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
               
               func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+                  self.isDownloadStarted = true
                   let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
                   let cleanName = self.targetName.isEmpty ? suggestedFilename : self.targetName.replacingOccurrences(of: "/", with: "-") + ".mp3"
                   let destPath = destDir.appendingPathComponent(cleanName); try? fm.removeItem(at: destPath)
@@ -824,29 +877,13 @@ jobs:
                               }
                           }
                           
-                          if bestVideoId.isEmpty { bestVideoId = vid }
-                          if targetDuration > 0 && abs(duration - targetDuration) <= 15 { bestVideoId = vid; break }
-                      }
-                      
-                      if bestVideoId.isEmpty {
-                          let pattern = "(?i)videoId[\"\\'\s:]+([a-zA-Z0-9_-]{11})"
-                          if let regex = try? NSRegularExpression(pattern: pattern, options: []),
-                             let match = regex.firstMatch(in: cleanHtml, options: [], range: NSRange(location: 0, length: cleanHtml.utf16.count)) {
-                              if let range = Range(match.range(at: 1), in: cleanHtml) {
-                                  bestVideoId = String(cleanHtml[range])
+                          if bestVideoId.isEmpty {
+                          if let range = cleanHtml.range(of: "watch?v=") {
+                              let start = range.upperBound
+                              if let end = cleanHtml.index(start, offsetBy: 11, limitedBy: cleanHtml.endIndex) {
+                                  let vid = String(cleanHtml[start..<end])
+                                  if vid.count == 11 { bestVideoId = vid }
                               }
-                          }
-                      }
-                      
-                      if bestVideoId.isEmpty {
-                          let pattern = "watch\?v=([a-zA-Z0-9_-]{11})"
-                          if let regex = try? NSRegularExpression(pattern: pattern, options: []),
-                             let match = regex.firstMatch(in: cleanHtml, options: [], range: NSRange(location: 0, length: cleanHtml.utf16.count)) {
-                              if let range = Range(match.range(at: 1), in: cleanHtml) {
-                                  bestVideoId = String(cleanHtml[range])
-                              }
-                          }
-                      }
                           }
                       }
                       
@@ -1010,9 +1047,7 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Project
-        run: |
-          mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
-          xcodegen generate
+        run: xcodegen generate
 
       - name: Build and Archive
         run: |
