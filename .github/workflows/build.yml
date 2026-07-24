@@ -489,13 +489,10 @@ jobs:
                   NavigationView {
                       List { ForEach(musicManager.playlists) { playlist in NavigationLink(destination: PlaylistDetailView(playlist: playlist)) { Text(playlist.name).font(.headline).padding(.vertical, 5) } } }
                       .navigationTitle("Playlists").toolbar { Button(action: { showingNewPlaylist = true }) { Image(systemName: "plus") } }
-                      .alert("New Playlist", isPresented: $showingNewPlaylist) { TextField("Playlist Name", text: $newPlaylistName); Button("Create") { if !newPlaylistName.isEmpty { musicManager.createPlaylist(name: newPlaylistName); newPlaylistName = "" } }
-                              Button("Cancel", role: .cancel) { }
+                      .alert("New Playlist", isPresented: $showingNewPlaylist) { TextField("Playlist Name", text: $newPlaylistName); Button("Create") { if !newPlaylistName.isEmpty { musicManager.createPlaylist(name: newPlaylistName); newPlaylistName = "" } }; Button("Cancel", role: .cancel) { } }
                   }
               }
           }
-          
-                    }
           SWIFT
 
       - name: Write WebBrowser.swift
@@ -541,7 +538,7 @@ jobs:
                               if !finalStr.contains(".") || finalStr.contains(" ") { if let encoded = finalStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) { finalStr = "https://www.google.com/search?q=\(encoded)" } } else { if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr } }
                               if let url = URL(string: finalStr) { currentWebView.load(URLRequest(url: url)) } }
               func grabAudio() {
-                  let js = "(function() { var mediaElements = document.querySelectorAll('audio, video, source'); for (var i = 0; i < mediaElements.length; i++) { if (mediaElements[i].src && mediaElements[i].src.startsWith('http')) { return mediaElements[i].src; } }
+                  let js = "(function() { var mediaElements = document.querySelectorAll('audio, video, source'); for (var i = 0; i < mediaElements.length; i++) { if (mediaElements[i].src && mediaElements[i].src.startsWith('http')) { return mediaElements[i].src; } } return null; })()"
                   currentWebView.evaluateJavaScript(js) { result, error in
                       if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) { 
                           self.capturedUrl = url; self.customSongName = "Web_Audio"; self.showNamePrompt = true 
@@ -637,7 +634,7 @@ jobs:
                               return nil }
                   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { let hideAdsScript = "var badEls = document.querySelectorAll('.ad, .ads, .popup, iframe'); badEls.forEach(el => el.remove());"; webView.evaluateJavaScript(hideAdsScript, completionHandler: nil) }
                   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { parent.viewModel.canGoBack = webView.canGoBack; parent.viewModel.canGoForward = webView.canGoForward; if let currentURL = webView.url?.absoluteString { if !parent.urlString.contains(" ") { parent.urlString = currentURL }
-                              parent.viewModel.tabs[parent.viewModel.currentTabIndex]urlString = currentURL } }
+                              parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL } }
                   func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { if navigationAction.shouldPerformDownload { decisionHandler(.download); return }
                               decisionHandler(.allow) }
                   func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) { if navigationResponse.canShowMIMEType == false { decisionHandler(.download); return }
@@ -650,8 +647,6 @@ jobs:
                   func downloadDidFinish(_ download: WKDownload) { let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]; let destPath = destDir.appendingPathComponent(parent.viewModel.downloadFileName); try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path); DispatchQueue.main.async { self.parent.viewModel.showDownloadAlert = true; MusicManager.shared.loadSongs() } }
               }
           }
-          
-                    }
           SWIFT
 
       - name: Write SmartDownloader.swift
@@ -816,7 +811,7 @@ jobs:
               
               func performMagicSearch(query: String) {
                   guard !query.isEmpty else { return }
-                  isSearching = true; statusMessage ="Searching..."; stopPreview()
+                  isSearching = true; statusMessage = "Searching..."; stopPreview()
                   let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
                   guard let url = URL(string: "https://itunes.apple.com/search?term=\(encodedQuery)&media=music&limit=25") else { return }
                   let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
