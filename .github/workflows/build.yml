@@ -49,7 +49,7 @@ jobs:
                   NSAppTransportSecurity: { NSAllowsArbitraryLoads: true }
               settings:
                 ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-                DEVELOPMENT_ASSET_PATHS: "DummyAssets"
+                DEVELOPMENT_ASSET_PATHS: "DummyAssets.xcassets"
           PROJ
           
           cat << 'PLIST' > Info.plist
@@ -83,13 +83,13 @@ jobs:
           PLIST
           
           mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
-          mkdir -p DummyAssets
+          mkdir -p DummyAssets.xcassets
           cp Info.plist TrollMusicApp/Info.plist
           cp Info.plist TrollMusicApp/TrollMusicApp/Info.plist
 
       - name: Write TrollMusicAppApp.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
           import AVFoundation
           
@@ -118,7 +118,7 @@ jobs:
 
       - name: Write MusicManager.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/MusicManager.swift
+          cat << 'SWIFT' > TrollMusicApp/MusicManager.swift
           import Foundation
           import AVFoundation
           import MediaPlayer
@@ -305,7 +305,7 @@ jobs:
 
       - name: Write Views.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
+          cat << 'SWIFT' > TrollMusicApp/Views.swift
           import SwiftUI
           
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
@@ -497,7 +497,7 @@ jobs:
 
       - name: Write WebBrowser.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
+          cat << 'SWIFT' > TrollMusicApp/WebBrowser.swift
           import SwiftUI
           import WebKit
           
@@ -558,9 +558,9 @@ jobs:
                       return }
                   
                   let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]; let destPath = destDir.appendingPathComponent(finalName)
-                  let task = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in guard let localUrl = localUrl else { return }
+                  let taskInner = URLSession.shared.downloadTask(with: url) { localUrl, response, _ in guard let localUrl = localUrl else { return }
                               try? FileManager.default.moveItem(at: localUrl, to: destPath); try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path); DispatchQueue.main.async { self.downloadFileName = finalName; self.showDownloadAlert = true } }
-          task.resume()
+          taskInner.resume()
               }
               
               func tryDownloadCobalt(urlStr: String, name: String, attempt: Int = 0) {
@@ -589,35 +589,35 @@ jobs:
                   let parameters: [String: Any] = ["url": urlStr, "isAudioOnly": true, "aFormat": "mp3", "isNoTTWatermark": true]
                   request.httpBody = try? JSONSerialization.data(withJSONObject: parameters)
                   
-                  URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                  let taskOuter = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
                       guard let self = self else { return }
                       if let data = data, let res = try? JSONDecoder().decode(CobaltResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) {
                           let finalName = name + ".mp3"
                           let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]; let destPath = destDir.appendingPathComponent(finalName)
-                          let task = URLSession.shared.downloadTask(with: audioUrl) { localUrl, response, _ in guard let localUrl = localUrl else { return }
+                          let taskAudio = URLSession.shared.downloadTask(with: audioUrl) { localUrl, response, _ in guard let localUrl = localUrl else { return }
                               try? FileManager.default.moveItem(at: localUrl, to: destPath); try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path); DispatchQueue.main.async { self.downloadFileName = finalName; self.showDownloadAlert = true } }
-          task.resume()
+          taskAudio.resume()
                       } else {
                           guard let v10Url = URL(string: "\(server)/") else { return }
                           var req10 = request; req10.url = v10Url
                           let params10: [String: Any] = ["url": urlStr, "downloadMode": "audio", "audioFormat": "mp3"]
                           req10.httpBody = try? JSONSerialization.data(withJSONObject: params10)
-                          URLSession.shared.dataTask(with: req10) { [weak self] data10, _, _ in
+                          let taskMiddle = URLSession.shared.dataTask(with: req10) { [weak self] data10, _, _ in
                               guard let self = self else { return }
                               if let data10 = data10, let res10 = try? JSONDecoder().decode(CobaltResponse.self, from: data10), let audioUrlStr10 = res10.url, let audioUrl10 = URL(string: audioUrlStr10) {
                                   let finalName = name + ".mp3"
                                   let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]; let destPath = destDir.appendingPathComponent(finalName)
-                                  let task = URLSession.shared.downloadTask(with: audioUrl10) { localUrl, response, _ in guard let localUrl = localUrl else { return }
+                                  let taskAudio10 = URLSession.shared.downloadTask(with: audioUrl10) { localUrl, response, _ in guard let localUrl = localUrl else { return }
                               try? FileManager.default.moveItem(at: localUrl, to: destPath); try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path); DispatchQueue.main.async { self.downloadFileName = finalName; self.showDownloadAlert = true } }
-          task.resume()
+          taskAudio10.resume()
                               } else {
                                   self.tryDownloadCobalt(urlStr: urlStr, name: name, attempt: attempt + 1)
                               }
                           }
-          task.resume()
+          taskMiddle.resume()
                       }
                   }
-          task.resume()
+          taskOuter.resume()
               }
           
           }
@@ -651,8 +651,9 @@ jobs:
 
       - name: Write SmartDownloader.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
-          
+          cat << 'SWIFT' > TrollMusicApp/SmartDownloader.swift
+          import SwiftUI
+          import AVFoundation
           import WebKit
           
           struct WebExtractor { let url: String; let js: String }
@@ -761,9 +762,7 @@ jobs:
           }
           
           
-          import SwiftUI
-          import AVFoundation
-          import WebKit
+
           
           struct ITunesResponse: Codable { let results: [ITunesTrack] }
           struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId } }
@@ -929,7 +928,7 @@ jobs:
                           return }
                       self.tryDownloadCobalt(urlStr: "https://www.youtube.com/watch?v=\(bestVideoId)", name: track.trackName)
                   }
-                  task.resume()
+                  taskInner.resume()
               }
               
               func tryDownloadCobalt(urlStr: String, name: String, isPlaylist: Bool = false, attempt: Int = 0) {
@@ -973,7 +972,7 @@ jobs:
                       guard let self = self else { return }
                       if let data = data, let res = try? JSONDecoder().decode(CobaltResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) {
                           self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
-                          let task = self.downloadSession.downloadTask(with: audioUrl); task.resume()
+                          let task = self.downloadSession.downloadTask(with: audioUrl); taskAudio.resume()
                       } else {
                           guard let v10Url = URL(string: "\(server)/") else { return }
                           var req10 = request; req10.url = v10Url
@@ -983,7 +982,7 @@ jobs:
                               guard let self = self else { return }
                               if let data10 = data10, let res10 = try? JSONDecoder().decode(CobaltResponse.self, from: data10), let audioUrlStr10 = res10.url, let audioUrl10 = URL(string: audioUrlStr10) {
                                   self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
-                                  let task = self.downloadSession.downloadTask(with: audioUrl10); task.resume()
+                                  let task = self.downloadSession.downloadTask(with: audioUrl10); taskAudio10.resume()
                               } else {
                                   self.tryDownloadCobalt(urlStr: urlStr, name: name, isPlaylist: isPlaylist, attempt: attempt + 1)
                               }
@@ -1100,8 +1099,7 @@ jobs:
             -configuration Release \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_ASSET_PATHS=""
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Package IPA (TrollStore format)
         run: |
