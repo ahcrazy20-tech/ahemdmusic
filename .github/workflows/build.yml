@@ -470,6 +470,7 @@ jobs:
               @Published var downloadFileName: String = ""
               @Published var customSongName: String = ""
               var capturedUrl: URL? = nil
+              var hiddenEngine = HiddenWebEngine()
               init() { addNewTab() }
               var currentWebView: WKWebView { tabs[currentTabIndex].webView }
               func addNewTab() {
@@ -524,7 +525,16 @@ jobs:
                       "https://api.cobalt.tools"
                   ]
                   
-                  if attempt >= servers.count { DispatchQueue.main.async { self.showBlobError = true }; return }
+                          if attempt >= servers.count { 
+                      DispatchQueue.main.async {
+                          self.hiddenEngine.startExtraction(url: urlStr, name: name, onSuccess: {
+                              DispatchQueue.main.async { self.showDownloadAlert = true; MusicManager.shared.loadSongs() }
+                          }, onFailure: {
+                              DispatchQueue.main.async { self.showBlobError = true }
+                          })
+                      }
+                      return 
+                  }
                   let server = servers[attempt]
                   guard let apiUrl = URL(string: "\(server)/api/json") else { return }
                   var request = URLRequest(url: apiUrl); request.httpMethod = "POST"
@@ -584,8 +594,97 @@ jobs:
       - name: Write SmartDownloader.swift
         run: |
           cat << 'SWIFT' > TrollMusicApp/SmartDownloader.swift
+          
+          import WebKit
+          
+          struct WebExtractor { let url: String; let js: String }
+          
+          class HiddenWebEngine: NSObject, WKNavigationDelegate, WKDownloadDelegate {
+              var webView: WKWebView!
+              var targetUrl: String = ""
+              var targetName: String = ""
+              var onSuccess: (() -> Void)?
+              var onFailure: (() -> Void)?
+              var attempt = 0
+              var extractors: [WebExtractor] = []
+              
+              override init() {
+                  super.init()
+                  let config = WKWebViewConfiguration()
+                  config.allowsInlineMediaPlayback = true
+                  let prefs = WKWebpagePreferences()
+                  prefs.allowsContentJavaScript = true
+                  config.defaultWebpagePreferences = prefs
+                  self.webView = WKWebView(frame: .zero, configuration: config)
+                  self.webView.navigationDelegate = self
+              }
+              
+              func startExtraction(url: String, name: String, onSuccess: @escaping () -> Void, onFailure: @escaping () -> Void) {
+                  self.targetUrl = url
+                  self.targetName = name
+                  self.onSuccess = onSuccess
+                  self.onFailure = onFailure
+                  self.attempt = 0
+                  
+                  self.extractors = [
+                      WebExtractor(url: "https://cobalt.tools", js: """
+                      setTimeout(function() {
+                          var audioBtn = document.getElementById('setting-button-save-downloadMode-audio');
+                          if(audioBtn) audioBtn.click();
+                          var input = document.getElementById('link-area');
+                          if(input) { input.value = '$$URL$$'; input.dispatchEvent(new Event('input', { bubbles: true }));
+                              setTimeout(function() { var dlBtn = document.getElementById('download-button'); if(dlBtn) dlBtn.click(); }, 1000);
+                          }
+                      }, 1500);
+                      """),
+                      WebExtractor(url: "https://y2mate.nu/en-OOTt/", js: """
+                      setTimeout(function() {
+                          var input = document.getElementById('video');
+                          if(input) { input.value = '$$URL$$'; var btn = document.querySelector('button[type="submit"]'); if(btn) btn.click(); }
+                      }, 1500);
+                      """)
+                  ]
+                  self.executeNextAttempt()
+              }
+              
+              func executeNextAttempt() {
+                  if attempt >= extractors.count { self.onFailure?(); return }
+                  if let u = URL(string: extractors[attempt].url) { self.webView.load(URLRequest(url: u)) }
+              }
+              
+              func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+                  let js = extractors[attempt].js.replacingOccurrences(of: "$$URL$$", with: self.targetUrl)
+                  webView.evaluateJavaScript(js, completionHandler: nil)
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                      // We just let it try to finish natively
+                  }
+              }
+              
+              func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+                  if navigationResponse.canShowMIMEType == false { decisionHandler(.download); return }
+                  if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("octet-stream") || mime.contains("mp4") { decisionHandler(.download); return }
+                  decisionHandler(.allow)
+              }
+              
+              func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = self }
+              func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { if navigationAction.shouldPerformDownload { decisionHandler(.download); return }; decisionHandler(.allow) }
+              func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
+              
+              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+                  let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                  let cleanName = self.targetName.isEmpty ? suggestedFilename : self.targetName.replacingOccurrences(of: "/", with: "-") + ".mp3"
+                  let destPath = destDir.appendingPathComponent(cleanName); try? fm.removeItem(at: destPath)
+                  completionHandler(destPath)
+              }
+              
+              func downloadDidFinish(_ download: WKDownload) { self.onSuccess?() }
+              func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) { self.attempt += 1; self.executeNextAttempt() }
+          }
+          
+          
           import SwiftUI
           import AVFoundation
+          import WebKit
           
           struct ITunesResponse: Codable { let results: [ITunesTrack] }
           struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId } }
@@ -599,6 +698,7 @@ jobs:
               
               var previewPlayer: AVAudioPlayer?
               var finalDownloadName = ""; var downloadSession: URLSession!
+              var hiddenEngine = HiddenWebEngine()
               
               var playlistQueue: [String] = []
               var playlistTotal = 0
@@ -657,9 +757,8 @@ jobs:
                   req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
                   URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
                       guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self?.isDownloading = false; self?.showError = true; self?.errorDetails = "Playlist extraction failed." }; return }
-                      let cleanHtml = html.replacingOccurrences(of: "\\x22", with: "\"")
                       var videoIds: [String] = []
-                      let chunks = cleanHtml.components(separatedBy: "\"videoId\":\"")
+                      let chunks = html.components(separatedBy: "\"videoId\":\"")
                       for chunk in chunks.dropFirst() {
                           guard chunk.count >= 11 else { continue }
                           let vid = String(chunk.prefix(11))
@@ -705,8 +804,8 @@ jobs:
                       guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else {
                           DispatchQueue.main.async { self?.errorDetails = "Failed to parse YouTube."; self?.showError = true; self?.isDownloading = false }; return
                       }
-                      let cleanHtml = html.replacingOccurrences(of: "\\x22", with: "\"")
-                      let chunks = cleanHtml.components(separatedBy: "\"videoId\":\"")
+                      
+                      let chunks = html.components(separatedBy: "\"videoId\":\"")
                       var bestVideoId = ""
                       let targetDuration = (track.trackTimeMillis ?? 0) / 1000
                       
@@ -748,7 +847,18 @@ jobs:
                   
                   if attempt >= servers.count {
                       DispatchQueue.main.async {
-                          if isPlaylist { self.processNextPlaylistSong() } else { self.errorDetails = "Failed to extract stream from this website. All servers blocked."; self.isDownloading = false; self.showError = true }
+                          self.statusMessage = "Engaging Hidden Engine..."
+                          self.hiddenEngine.startExtraction(url: urlStr, name: name, onSuccess: {
+                              DispatchQueue.main.async {
+                                  if isPlaylist { self.processNextPlaylistSong() }
+                                  else { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }
+                              }
+                          }, onFailure: {
+                              DispatchQueue.main.async {
+                                  if isPlaylist { self.processNextPlaylistSong() } 
+                                  else { self.errorDetails = "Failed to extract stream. All networks blocked."; self.isDownloading = false; self.showError = true }
+                              }
+                          })
                       }
                       return
                   }
