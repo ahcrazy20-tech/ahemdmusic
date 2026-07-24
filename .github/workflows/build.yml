@@ -80,14 +80,13 @@ jobs:
           </plist>
           PLIST
           
-          mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
+          mkdir -p TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
           cp Info.plist TrollMusicApp/Info.plist
-          cp Info.plist TrollMusicApp/TrollMusicApp/Info.plist
 
       - name: Write TrollMusicAppApp.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
           import AVFoundation
           
@@ -116,7 +115,7 @@ jobs:
 
       - name: Write MusicManager.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/MusicManager.swift
+          cat << 'SWIFT' > TrollMusicApp/MusicManager.swift
           import Foundation
           import AVFoundation
           import MediaPlayer
@@ -303,7 +302,7 @@ jobs:
 
       - name: Write Views.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
+          cat << 'SWIFT' > TrollMusicApp/Views.swift
           import SwiftUI
           
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
@@ -485,7 +484,7 @@ jobs:
 
       - name: Write WebBrowser.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
+          cat << 'SWIFT' > TrollMusicApp/WebBrowser.swift
           import SwiftUI
           import WebKit
           
@@ -626,7 +625,7 @@ jobs:
 
       - name: Write SmartDownloader.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
+          cat << 'SWIFT' > TrollMusicApp/SmartDownloader.swift
           
           import WebKit
           
