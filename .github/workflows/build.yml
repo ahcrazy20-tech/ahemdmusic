@@ -41,7 +41,7 @@ jobs:
                     - "Preview Content"
                     - "**/*.plist"
               info:
-                path: TrollMusicApp/TrollMusicApp/Info.plist
+                path: Info.plist
                 properties:
                   UIBackgroundModes: [audio]
                   NSAppTransportSecurity: { NSAllowsArbitraryLoads: true }
@@ -80,15 +80,14 @@ jobs:
           </plist>
           PLIST
           
-          mkdir -p TrollMusicApp/Preview\ Content
+          mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
           cp Info.plist TrollMusicApp/Info.plist
-          mkdir -p TrollMusicApp/TrollMusicApp
           cp Info.plist TrollMusicApp/TrollMusicApp/Info.plist
 
       - name: Write TrollMusicAppApp.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicAppApp.swift
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
           import AVFoundation
           
@@ -117,7 +116,7 @@ jobs:
 
       - name: Write MusicManager.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/MusicManager.swift
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/MusicManager.swift
           import Foundation
           import AVFoundation
           import MediaPlayer
@@ -304,7 +303,7 @@ jobs:
 
       - name: Write Views.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/Views.swift
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
           
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
@@ -486,7 +485,7 @@ jobs:
 
       - name: Write WebBrowser.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/WebBrowser.swift
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
           import WebKit
           
@@ -627,7 +626,7 @@ jobs:
 
       - name: Write SmartDownloader.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/SmartDownloader.swift
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
           
           import WebKit
           
@@ -789,8 +788,7 @@ jobs:
                   let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
                   guard let url = URL(string: "https://itunes.apple.com/search?term=\(encodedQuery)&media=music&limit=25") else { return }
                   let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(ITunesResponse.self, from: data) else { DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "Search failed." }
-          return }
+                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(ITunesResponse.self, from: data) else { DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "Search failed." } return }
                       DispatchQueue.main.async { self.isSearching = false; if res.results.isEmpty { self.showError = true; self.errorDetails = "No songs found." } else { self.searchResults = res.results; self.showSearchResults = true } }
                   }
                   task.resume()
@@ -813,8 +811,7 @@ jobs:
                   var req = URLRequest(url: url)
                   req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
                   let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-                      guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self?.isDownloading = false; self?.showError = true; self?.errorDetails = "Playlist extraction failed." }
-          return }
+                      guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self?.isDownloading = false; self?.showError = true; self?.errorDetails = "Playlist extraction failed." } return }
                       var videoIds: [String] = []
                       let chunks = html.components(separatedBy: "\"videoId\":\"")
                       for chunk in chunks.dropFirst() {
@@ -835,8 +832,7 @@ jobs:
               }
               
               func processNextPlaylistSong() {
-                  guard !playlistQueue.isEmpty else { DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }
-          return }
+                  guard !playlistQueue.isEmpty else { DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() } return }
                   let nextVid = playlistQueue.removeFirst()
                   let url = "https://www.youtube.com/watch?v=\(nextVid)"
                   let currentNum = playlistTotal - playlistQueue.count
@@ -854,8 +850,7 @@ jobs:
                   let query = "\(track.artistName) \(track.trackName)"
                   let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
                   guard let url = URL(string: "https://www.youtube.com/results?search_query=\(encoded)") else {
-                      DispatchQueue.main.async { self.errorDetails = "Failed to search."; self.showError = true; self.isDownloading = false }
-          return
+                      DispatchQueue.main.async { self.errorDetails = "Failed to search."; self.showError = true; self.isDownloading = false } return
                   }
                   
                   var req = URLRequest(url: url)
@@ -863,8 +858,7 @@ jobs:
                   
                   let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
                       guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else {
-                          DispatchQueue.main.async { self?.errorDetails = "Failed to parse YouTube."; self?.showError = true; self?.isDownloading = false }
-          return
+                          DispatchQueue.main.async { self?.errorDetails = "Failed to parse YouTube."; self?.showError = true; self?.isDownloading = false } return
                       }
                       
                       let cleanHtml = html.replacingOccurrences(of: "\\\\x22", with: "\"").replacingOccurrences(of: "\\x22", with: "\"").replacingOccurrences(of: "\\u0022", with: "\"")
