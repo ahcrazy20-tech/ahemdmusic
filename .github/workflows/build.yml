@@ -48,6 +48,8 @@ jobs:
           mkdir -p TrollMusicApp
           mkdir -p TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
+          mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
+          mkdir -p TrollMusicApp/Preview\ Content
           find . -name "Info.plist" -delete
           find . -name "*.swift" -delete
           rm -rf TrollMusicApp/Assets.xcassets
@@ -850,7 +852,8 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Project
-        run: xcodegen generate
+        run: mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
+          xcodegen generate
 
       - name: Build and Archive
         run: |
@@ -861,7 +864,8 @@ jobs:
             -configuration Release \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_ASSET_PATHS=""
 
       - name: Package IPA (TrollStore format)
         run: |
