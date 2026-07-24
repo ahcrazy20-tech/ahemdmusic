@@ -32,7 +32,7 @@ jobs:
               deploymentTarget: "16.0"
               sources: [TrollMusicApp]
               info:
-                path: TrollMusicApp/Info.plist
+                path: Info.plist
                 properties:
                   UIBackgroundModes: [audio]
                   NSAppTransportSecurity: { NSAllowsArbitraryLoads: true }
