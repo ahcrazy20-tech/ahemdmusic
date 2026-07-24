@@ -41,7 +41,7 @@ jobs:
                     - "Preview Content"
                     - "**/*.plist"
               info:
-                path: Info.plist
+                path: TrollMusicApp/TrollMusicApp/Info.plist
                 properties:
                   UIBackgroundModes: [audio]
                   NSAppTransportSecurity: { NSAllowsArbitraryLoads: true }
@@ -83,6 +83,8 @@ jobs:
           mkdir -p TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
           cp Info.plist TrollMusicApp/Info.plist
+          mkdir -p TrollMusicApp/TrollMusicApp
+          cp Info.plist TrollMusicApp/TrollMusicApp/Info.plist
 
       - name: Write TrollMusicAppApp.swift
         run: |
