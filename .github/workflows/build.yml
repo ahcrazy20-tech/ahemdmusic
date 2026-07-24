@@ -528,7 +528,7 @@ jobs:
           import AVFoundation
           
           struct ITunesResponse: Codable { let results: [ITunesTrack] }
-          struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId } } }
+          struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId } }
           struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
           
           class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
@@ -740,9 +740,6 @@ jobs:
                   try? fm.removeItem(at: destPath); try? fm.moveItem(at: location, to: destPath); try? fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
                   DispatchQueue.main.async { 
                       if self.playlistTotal > 0 { self.processNextPlaylistSong() } 
-                      else { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }
-                  }
-              } 
                       else { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }
                   }
               }
