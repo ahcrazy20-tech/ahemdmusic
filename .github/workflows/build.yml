@@ -639,12 +639,12 @@ jobs:
                   
                   let query = "\(track.artistName) \(track.trackName)"
                   let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-                  guard let url = URL(string: "https://m.youtube.com/results?search_query=\(encoded)") else {
+                  guard let url = URL(string: "https://www.youtube.com/results?search_query=\(encoded)") else {
                       DispatchQueue.main.async { self.errorDetails = "Failed to search."; self.showError = true; self.isDownloading = false }; return
                   }
                   
                   var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
+                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", forHTTPHeaderField: "User-Agent")
                   
                   URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
                       guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else {
@@ -844,6 +844,9 @@ jobs:
           mkdir -p TrollMusicApp
           mkdir -p TrollMusicApp/Assets.xcassets/AppIcon.appiconset
           cp icon.png TrollMusicApp/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+          cat << 'JSON' > TrollMusicApp/Assets.xcassets/Contents.json
+          { "info": { "version": 1, "author": "xcode" } }
+          JSON
           cat << 'JSON' > TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
           { "images": [ { "size": "1024x1024", "idiom": "ios-marketing", "filename": "icon-1024.png", "scale": "1x" } ], "info": { "version": 1, "author": "xcode" } }
           JSON
