@@ -34,6 +34,7 @@ jobs:
                 - path: TrollMusicApp
                   excludes:
                     - "Preview Content"
+                    - "**/*.plist"
               info:
                 path: Info.plist
                 properties:
@@ -45,6 +46,7 @@ jobs:
           
           mkdir -p TrollMusicApp
           mkdir -p TrollMusicApp/Preview\ Content
+          find . -name "Info.plist" -delete
 
       - name: Write TrollMusicAppApp.swift
         run: |
