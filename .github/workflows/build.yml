@@ -852,7 +852,8 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Project
-        run: mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
+        run: |
+          mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
           xcodegen generate
 
       - name: Build and Archive
