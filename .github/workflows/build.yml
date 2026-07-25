@@ -641,7 +641,7 @@ jobs:
           import AVFoundation
           import WebKit
           
-          struct ITunesResponse: Codable { let results: [ITunesTrack] }
+          struct ITunesResponse: Codable { let results: [SearchResultTrack] }
           struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId } }
           struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
           
@@ -726,8 +726,8 @@ jobs:
           class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""; @Published var downloadProgress: Double = 0.0
               @Published var showSuccess = false; @Published var showError = false; @Published var errorDetails = ""
-              @Published var searchResults: [ITunesTrack] = []; @Published var showSearchResults: Bool = false
-              @Published var previewTrackId: Int? = nil; @Published var isPreviewPlaying = false
+              @Published var searchResults: [SearchResultTrack] = []; @Published var showSearchResults: Bool = false
+              @Published var previewTrackId: String? = nil; @Published var isPreviewPlaying = false
               
               var previewPlayer: AVAudioPlayer?
               var finalDownloadName = ""; var downloadSession: URLSession!
@@ -743,7 +743,7 @@ jobs:
                   downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
               }
               
-              func togglePreview(track: ITunesTrack) {
+              func togglePreview(track: SearchResultTrack) {
                   if previewTrackId == track.trackId && isPreviewPlaying { previewPlayer?.pause(); isPreviewPlaying = false } else {
                       previewPlayer?.stop()
                       statusMessage = "Loading Preview..."
@@ -822,7 +822,7 @@ jobs:
                   tryDownloadCobalt(urlStr: url, name: name, isPlaylist: true)
               }
               
-              func downloadFromItunes(track: ITunesTrack) {
+              func downloadFromItunes(track: SearchResultTrack) {
                   self.isDownloading = true
                   self.downloadProgress = 0.0
                   self.statusMessage = "Finding Perfect Audio..."
@@ -1019,8 +1019,8 @@ jobs:
                                           VStack(spacing: 15) {
                                               ForEach(downloader.searchResults) { result in
                                                   HStack {
-                                                      VStack(alignment: .leading) { Text(result.trackName).font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text(result.artistName).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
-                                                      Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.trackId && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
+                                                      VStack(alignment: .leading) { Text(result.title).font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text(result.artist).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
+                                                      Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.videoId && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
                                                       Button(action: { downloader.showSearchResults = false; downloader.downloadFromItunes(track: result) }) { Image(systemName: "arrow.down.circle.fill").font(.title).foregroundColor(.purple) }
                                                   }.padding().background(Color.white.opacity(0.1)).cornerRadius(10)
                                               }
