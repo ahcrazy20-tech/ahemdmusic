@@ -23,6 +23,9 @@ jobs:
         run: |
           find . -name "Info.plist" -delete
           find . -name "*.swift" -delete
+          rm -rf TrollMusicApp/*.swift
+          rm -rf TrollMusicApp/TrollMusicApp/*.swift
+          rm -rf TrollMusicApp/*.xcodeproj
 
       - name: Create project config
         run: |
@@ -41,7 +44,7 @@ jobs:
                     - "Preview Content"
                     - "**/*.plist"
               info:
-                path: TrollMusicApp/TrollMusicApp/Info.plist
+                path: TrollMusicApp/Info.plist
                 properties:
                   UIBackgroundModes: [audio]
                   NSAppTransportSecurity: { NSAllowsArbitraryLoads: true }
@@ -83,11 +86,11 @@ jobs:
           mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
           cp Info.plist TrollMusicApp/Info.plist
-          cp Info.plist TrollMusicApp/TrollMusicApp/Info.plist
+          
 
       - name: Write TrollMusicAppApp.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
           import AVFoundation
           
@@ -116,7 +119,7 @@ jobs:
 
       - name: Write MusicManager.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/MusicManager.swift
+          cat << 'SWIFT' > TrollMusicApp/MusicManager.swift
           import Foundation
           import AVFoundation
           import MediaPlayer
@@ -303,7 +306,7 @@ jobs:
 
       - name: Write Views.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
+          cat << 'SWIFT' > TrollMusicApp/Views.swift
           import SwiftUI
           
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
@@ -485,7 +488,7 @@ jobs:
 
       - name: Write WebBrowser.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
+          cat << 'SWIFT' > TrollMusicApp/WebBrowser.swift
           import SwiftUI
           import WebKit
           
@@ -631,12 +634,16 @@ jobs:
 
       - name: Write SmartDownloader.swift
         run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
+          cat << 'SWIFT' > TrollMusicApp/SmartDownloader.swift
+          
+          import Foundation
           import SwiftUI
           import AVFoundation
           import WebKit
-          import Foundation
           
+          struct ITunesResponse: Codable { let results: [ITunesTrack] }
+          struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId } }
+          struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
           
           struct WebExtractor { let url: String; let js: String }
           
@@ -670,34 +677,8 @@ jobs:
                   self.isDownloadStarted = false
                   
                   self.extractors = [
-                      WebExtractor(url: "https://y2mate.nu/en-OOTt/", js: """
-                      setTimeout(function() {
-                          var input = document.getElementById('video');
-                          if(input) { 
-                              input.value = '$$URL$$'; 
-                              var btn = document.querySelector('button[type="submit"]');
-                              if(btn) btn.click(); 
-                              var check = setInterval(function() {
-                                  var dBtn = document.querySelector('a[href*="download"], button[class*="download"]');
-                                  if(dBtn) {
-                                      clearInterval(check);
-                                      if (dBtn.href) { window.location.href = dBtn.href; }
-                                      else { dBtn.click(); }
-                                  }
-                              }, 1000);
-                          }
-                      }, 1000);
-                      """),
-                      WebExtractor(url: "https://cobalt.tools", js: """
-                      setTimeout(function() {
-                          var audioBtn = document.getElementById('setting-button-save-downloadMode-audio');
-                          if(audioBtn) audioBtn.click();
-                          var input = document.getElementById('link-area');
-                          if(input) { input.value = '$$URL$$'; input.dispatchEvent(new Event('input', { bubbles: true }));
-                              setTimeout(function() { var dlBtn = document.getElementById('download-button'); if(dlBtn) dlBtn.click(); }, 1000);
-                          }
-                      }, 1500);
-                      """)
+                      WebExtractor(url: "https://y2mate.nu/en-OOTt/", js: "setTimeout(function() { var input = document.getElementById('video'); if(input) { input.value = '$$URL$$'; var btn = document.querySelector('button[type=\"submit\"]'); if(btn) btn.click(); var check = setInterval(function() { var dBtn = document.querySelector('a[href*=\"download\"], button[class*=\"download\"]'); if(dBtn) { clearInterval(check); if (dBtn.href) { window.location.href = dBtn.href; } else { dBtn.click(); } } }, 1000); } }, 1000);"),
+                      WebExtractor(url: "https://cobalt.tools", js: "setTimeout(function() { var audioBtn = document.getElementById('setting-button-save-downloadMode-audio'); if(audioBtn) audioBtn.click(); var input = document.getElementById('link-area'); if(input) { input.value = '$$URL$$'; input.dispatchEvent(new Event('input', { bubbles: true })); setTimeout(function() { var dlBtn = document.getElementById('download-button'); if(dlBtn) dlBtn.click(); }, 1000); } }, 1500);")
                   ]
                   self.executeNextAttempt()
               }
@@ -742,12 +723,6 @@ jobs:
               func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) { self.attempt += 1; self.executeNextAttempt() }
           }
           
-          
-          
-          struct ITunesResponse: Codable { let results: [ITunesTrack] }
-          struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId } }
-          struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
-          
           class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""; @Published var downloadProgress: Double = 0.0
               @Published var showSuccess = false; @Published var showError = false; @Published var errorDetails = ""
@@ -773,7 +748,7 @@ jobs:
                       previewPlayer?.stop()
                       statusMessage = "Loading Preview..."
                       guard let url = URL(string: track.previewUrl) else { return }
-                      URLSession.shared.downloadTask(with: url) { [weak self] localUrl, _, _ in
+                      let task = URLSession.shared.downloadTask(with: url) { [weak self] localUrl, _, _ in
                           guard let self = self, let localUrl = localUrl else { return }
                           do {
                               try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default); try AVAudioSession.sharedInstance().setActive(true)
@@ -782,20 +757,22 @@ jobs:
                               self.previewPlayer?.play()
                               DispatchQueue.main.async { self.previewTrackId = track.trackId; self.isPreviewPlaying = true; self.statusMessage = "" }
                           } catch {}
-                      }.resume()
+                      }
+                      task.resume()
                   }
               }
               func stopPreview() { previewPlayer?.stop(); isPreviewPlaying = false }
               
               func performMagicSearch(query: String) {
-                  guard !query.isEmpty else { return }; isSearching = true; statusMessage = "Searching..."; stopPreview()
+                  guard !query.isEmpty else { return }
+                  isSearching = true; statusMessage = "Searching..."; stopPreview()
                   let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
                   guard let url = URL(string: "https://itunes.apple.com/search?term=\(encodedQuery)&media=music&limit=25") else { return }
-                  URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(ITunesResponse.self, from: data) else { DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "Search failed." } 
-          return }
+                  let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(ITunesResponse.self, from: data) else { DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "Search failed." }; return }
                       DispatchQueue.main.async { self.isSearching = false; if res.results.isEmpty { self.showError = true; self.errorDetails = "No songs found." } else { self.searchResults = res.results; self.showSearchResults = true } }
-                  }.resume()
+                  }
+                  task.resume()
               }
               
               func downloadLinkOrPlaylist(urlStr: String, name: String) {
@@ -814,9 +791,8 @@ jobs:
                   guard let url = URL(string: urlStr) else { return }
                   var req = URLRequest(url: url)
                   req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-                      guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self?.isDownloading = false; self?.showError = true; self?.errorDetails = "Playlist extraction failed." } 
-          return }
+                  let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+                      guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self?.isDownloading = false; self?.showError = true; self?.errorDetails = "Playlist extraction failed." }; return }
                       var videoIds: [String] = []
                       let chunks = html.components(separatedBy: "\"videoId\":\"")
                       for chunk in chunks.dropFirst() {
@@ -832,12 +808,12 @@ jobs:
                               self.processNextPlaylistSong()
                           }
                       }
-                  }.resume()
+                  }
+                  task.resume()
               }
               
               func processNextPlaylistSong() {
-                  guard !playlistQueue.isEmpty else { DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() } 
-          return }
+                  guard !playlistQueue.isEmpty else { DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }; return }
                   let nextVid = playlistQueue.removeFirst()
                   let url = "https://www.youtube.com/watch?v=\(nextVid)"
                   let currentNum = playlistTotal - playlistQueue.count
@@ -845,7 +821,6 @@ jobs:
                   DispatchQueue.main.async { self.statusMessage = "Downloading \(currentNum) of \(self.playlistTotal)..." }
                   tryDownloadCobalt(urlStr: url, name: name, isPlaylist: true)
               }
-              
               
               func downloadFromItunes(track: ITunesTrack) {
                   self.isDownloading = true
@@ -855,20 +830,21 @@ jobs:
                   let query = "\(track.artistName) \(track.trackName)"
                   let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
                   guard let url = URL(string: "https://www.youtube.com/results?search_query=\(encoded)") else {
-                      DispatchQueue.main.async { self.errorDetails = "Failed to search."; self.showError = true; self.isDownloading = false } 
-          return
+                      DispatchQueue.main.async { self.errorDetails = "Failed to search."; self.showError = true; self.isDownloading = false }
+                      return
                   }
                   
                   var req = URLRequest(url: url)
                   req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+                  req.setValue("CONSENT=YES+cb", forHTTPHeaderField: "Cookie")
                   
-                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+                  let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
                       guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else {
-                          DispatchQueue.main.async { self?.errorDetails = "Failed to parse YouTube."; self?.showError = true; self?.isDownloading = false } 
-          return
+                          DispatchQueue.main.async { self?.errorDetails = "Failed to parse YouTube."; self?.showError = true; self?.isDownloading = false }
+                          return
                       }
                       
-                      let cleanHtml = html.replacingOccurrences(of: "\\\\x22", with: "\"").replacingOccurrences(of: "\\x22", with: "\"").replacingOccurrences(of: "\\u0022", with: "\"")
+                      let cleanHtml = html.replacingOccurrences(of: "\x22", with: "\"").replacingOccurrences(of: "\u0022", with: "\"")
                       let chunks = cleanHtml.components(separatedBy: "\"videoId\":\"")
                       var bestVideoId = ""
                       let targetDuration = (track.trackTimeMillis ?? 0) / 1000
@@ -906,7 +882,8 @@ jobs:
                           return
                       }
                       self.tryDownloadCobalt(urlStr: "https://www.youtube.com/watch?v=\(bestVideoId)", name: track.trackName)
-                  }.resume()
+                  }
+                  taskInner.resume()
               }
               
               func tryDownloadCobalt(urlStr: String, name: String, isPlaylist: Bool = false, attempt: Int = 0) {
@@ -947,28 +924,31 @@ jobs:
                   let parameters: [String: Any] = ["url": urlStr, "isAudioOnly": true, "aFormat": "mp3", "isNoTTWatermark": true]
                   request.httpBody = try? JSONSerialization.data(withJSONObject: parameters)
                   
-                  URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                  let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
                       guard let self = self else { return }
                       if let data = data, let res = try? JSONDecoder().decode(CobaltResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) {
                           self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
-                          let task = self.downloadSession.downloadTask(with: audioUrl); 
+                          let dlTask = self.downloadSession.downloadTask(with: audioUrl)
+                          dlTask.resume()
                       } else {
                           guard let v10Url = URL(string: "\(server)/") else { return }
                           var req10 = request; req10.url = v10Url
                           let params10: [String: Any] = ["url": urlStr, "downloadMode": "audio", "audioFormat": "mp3"]
                           req10.httpBody = try? JSONSerialization.data(withJSONObject: params10)
-                          URLSession.shared.dataTask(with: req10) { [weak self] data10, _, _ in
+                          let task10 = URLSession.shared.dataTask(with: req10) { [weak self] data10, _, _ in
                               guard let self = self else { return }
                               if let data10 = data10, let res10 = try? JSONDecoder().decode(CobaltResponse.self, from: data10), let audioUrlStr10 = res10.url, let audioUrl10 = URL(string: audioUrlStr10) {
                                   self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
-                                  let task = self.downloadSession.downloadTask(with: audioUrl10); 
+                                  let dlTask = self.downloadSession.downloadTask(with: audioUrl10)
+                                  dlTask.resume()
                               } else {
                                   self.tryDownloadCobalt(urlStr: urlStr, name: name, isPlaylist: isPlaylist, attempt: attempt + 1)
                               }
                           }
-                          
+                          task10.resume()
                       }
-                  }.resume()
+                  }
+                  task.resume()
               }
               
               func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
