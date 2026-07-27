@@ -45,10 +45,8 @@ jobs:
                     - "**/*.plist"
               info:
                 path: TrollMusicApp/TrollMusicApp/Info.plist
-                properties:
-                  UIBackgroundModes: [audio]
-                  NSAppTransportSecurity: { NSAllowsArbitraryLoads: true }
               settings:
+                GENERATE_INFOPLIST_FILE: NO
                 ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
                 DEVELOPMENT_ASSET_PATHS: "DummyAssets"
           PROJ
@@ -152,8 +150,6 @@ jobs:
               
               var scClientId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
               
-              var scClientId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
-              
               override init() {
                   super.init()
                   let config = URLSessionConfiguration.default
@@ -187,28 +183,7 @@ jobs:
                       }
                   }
                   task.resume()
-              }
-              
-              func fetchClientId() {
-                  let url = URL(string: "https://soundcloud.com")!
-                  var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", forHTTPHeaderField: "User-Agent")
-                  let task = URLSession.shared.dataTask(with: req) { data, _, _ in
-                      guard let data = data, let html = String(data: data, encoding: .utf8) else { return }
-                      let pattern = "src=\"(https://a-v2.sndcdn.com/assets/[^\"]+)\""
-                      if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                          let matches = regex.matches(in: html, options: [], range: NSRange(location: 0, length: html.utf16.count))
-                          if let lastMatch = matches.last, let range = Range(lastMatch.range(at: 1), in: html) {
-                              let jsUrl = String(html[range])
-                              let jsTask = URLSession.shared.dataTask(with: URL(string: jsUrl)!) { jsData, _, _ in
-                                  if let jsData = jsData, let js = String(data: jsData, encoding: .utf8) {
-                                      let cPattern = "client_id:\"([^\"]{32})\""
-                                      if let cRegex = try? NSRegularExpression(pattern: cPattern, options: []),
-                                         let cMatch = cRegex.firstMatch(in: js, options: [], range: NSRange(location: 0, length: js.utf16.count)),
-                                         let cRange = Range(cMatch.range(at: 1), in: js) {
-                                          self.scClientId = String(js[cRange])
-                                      }
-                                  }
+              }                                  }
                               }
                               jsTask.resume()
                           }
@@ -704,9 +679,31 @@ jobs:
           import AVFoundation
           import WebKit
           
-          struct ITunesResponse: Codable { let results: [SearchResultTrack] }
+          struct ITunesResponse: Codable { let results: [ITunesTrack] }
           struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId }; var durationFormatted: String { guard let m = trackTimeMillis else { return "" }; let s = m / 1000; return String(format: "%d:%02d", s/60, s%60) } }
           struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
+
+          struct SCResponse: Codable { let collection: [SCTrack] }
+          struct SCTrack: Codable, Identifiable {
+              let id: Int
+              let title: String?
+              let user: SCUser?
+              let media: SCMedia?
+              let duration: Int?
+              let track_authorization: String?
+    
+              var durationFormatted: String {
+                  guard let d = duration else { return "" }
+                  let s = d / 1000
+                  return "• \(String(format: "%d:%02d", s / 60, s % 60))"
+              }
+          }
+          struct SCUser: Codable { let username: String? }
+          struct SCMedia: Codable { let transcodings: [SCTranscoding]? }
+          struct SCTranscoding: Codable { let url: String?; let format: SCFormat? }
+          struct SCFormat: Codable { let protocol_name: String?; let mime_type: String? }
+          struct SCStreamResponse: Codable { let url: String? }
+
           
           struct WebExtractor { let url: String; let js: String }
           
@@ -719,8 +716,6 @@ jobs:
               var attempt = 0
               var isDownloadStarted = false
               var extractors: [WebExtractor] = []
-              
-              var scClientId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
               
               var scClientId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
               
@@ -757,28 +752,7 @@ jobs:
                       }
                   }
                   task.resume()
-              }
-              
-              func fetchClientId() {
-                  let url = URL(string: "https://soundcloud.com")!
-                  var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", forHTTPHeaderField: "User-Agent")
-                  let task = URLSession.shared.dataTask(with: req) { data, _, _ in
-                      guard let data = data, let html = String(data: data, encoding: .utf8) else { return }
-                      let pattern = "src=\"(https://a-v2.sndcdn.com/assets/[^\"]+)\""
-                      if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                          let matches = regex.matches(in: html, options: [], range: NSRange(location: 0, length: html.utf16.count))
-                          if let lastMatch = matches.last, let range = Range(lastMatch.range(at: 1), in: html) {
-                              let jsUrl = String(html[range])
-                              let jsTask = URLSession.shared.dataTask(with: URL(string: jsUrl)!) { jsData, _, _ in
-                                  if let jsData = jsData, let js = String(data: jsData, encoding: .utf8) {
-                                      let cPattern = "client_id:\"([^\"]{32})\""
-                                      if let cRegex = try? NSRegularExpression(pattern: cPattern, options: []),
-                                         let cMatch = cRegex.firstMatch(in: js, options: [], range: NSRange(location: 0, length: js.utf16.count)),
-                                         let cRange = Range(cMatch.range(at: 1), in: js) {
-                                          self.scClientId = String(js[cRange])
-                                      }
-                                  }
+              }                                  }
                               }
                               jsTask.resume()
                           }
@@ -854,67 +828,20 @@ jobs:
               
               var playlistQueue: [String] = []
               var playlistTotal = 0
-              var playlistName = ""
-              
-              var scClientId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
-              
-              var scClientId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
-              
+              var playlistName = ""              
               override init() {
                   super.init()
                   let config = URLSessionConfiguration.default
                   downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
                   fetchClientId()
-              }
-              
-              func fetchClientId() {
-                  let url = URL(string: "https://soundcloud.com")!
-                  var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", forHTTPHeaderField: "User-Agent")
-                  let task = URLSession.shared.dataTask(with: req) { data, _, _ in
-                      guard let data = data, let html = String(data: data, encoding: .utf8) else { return }
-                      let pattern = "src=\"(https://a-v2.sndcdn.com/assets/[^\"]+)\""
-                      if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                          let matches = regex.matches(in: html, options: [], range: NSRange(location: 0, length: html.utf16.count))
-                          if let lastMatch = matches.last, let range = Range(lastMatch.range(at: 1), in: html) {
-                              let jsUrl = String(html[range])
-                              let jsTask = URLSession.shared.dataTask(with: URL(string: jsUrl)!) { jsData, _, _ in
-                                  if let jsData = jsData, let js = String(data: jsData, encoding: .utf8) {
-                                      let cPattern = "client_id:\"([^\"]{32})\""
-                                      if let cRegex = try? NSRegularExpression(pattern: cPattern, options: []),
-                                         let cMatch = cRegex.firstMatch(in: js, options: [], range: NSRange(location: 0, length: js.utf16.count)),
-                                         let cRange = Range(cMatch.range(at: 1), in: js) {
-                                          self.scClientId = String(js[cRange])
-                                      }
-                                  }
+              }                                  }
                               }
                               jsTask.resume()
                           }
                       }
                   }
                   task.resume()
-              }
-              
-              func fetchClientId() {
-                  let url = URL(string: "https://soundcloud.com")!
-                  var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", forHTTPHeaderField: "User-Agent")
-                  let task = URLSession.shared.dataTask(with: req) { data, _, _ in
-                      guard let data = data, let html = String(data: data, encoding: .utf8) else { return }
-                      let pattern = "src=\"(https://a-v2.sndcdn.com/assets/[^\"]+)\""
-                      if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                          let matches = regex.matches(in: html, options: [], range: NSRange(location: 0, length: html.utf16.count))
-                          if let lastMatch = matches.last, let range = Range(lastMatch.range(at: 1), in: html) {
-                              let jsUrl = String(html[range])
-                              let jsTask = URLSession.shared.dataTask(with: URL(string: jsUrl)!) { jsData, _, _ in
-                                  if let jsData = jsData, let js = String(data: jsData, encoding: .utf8) {
-                                      let cPattern = "client_id:\"([^\"]{32})\""
-                                      if let cRegex = try? NSRegularExpression(pattern: cPattern, options: []),
-                                         let cMatch = cRegex.firstMatch(in: js, options: [], range: NSRange(location: 0, length: js.utf16.count)),
-                                         let cRange = Range(cMatch.range(at: 1), in: js) {
-                                          self.scClientId = String(js[cRange])
-                                      }
-                                  }
+              }                                  }
                               }
                               jsTask.resume()
                           }
@@ -1106,7 +1033,7 @@ jobs:
                                           VStack(spacing: 15) {
                                               ForEach(downloader.searchResults) { result in
                                                   HStack {
-                                                      VStack(alignment: .leading) { Text(result.title ?? "Unknown").font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text(result.user?.username ?? "Unknown").font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
+                                                      VStack(alignment: .leading) { Text(result.title ?? "Unknown").font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text("\(result.user?.username ?? "Unknown") \(result.durationFormatted)").font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
                                                       Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.id && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
                                                       Button(action: { downloader.showSearchResults = false; downloader.downloadFromItunes(track: result) }) { Image(systemName: "arrow.down.circle.fill").font(.title).foregroundColor(.purple) }
                                                   }.padding().background(Color.white.opacity(0.1)).cornerRadius(10)
