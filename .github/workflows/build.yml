@@ -127,7 +127,7 @@ jobs:
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
           
-          class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
+          class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate, URLSessionDelegate {
               static let shared = MusicManager()
               @Published var songs: [Song] = []
               @Published var playlists: [Playlist] = []
@@ -153,7 +153,7 @@ jobs:
               override init() {
                   super.init()
                   let config = URLSessionConfiguration.default
-                  downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+                  downloadSession = URLSession(configuration: config, delegate: nil, delegateQueue: nil)
                   fetchClientId()
               }
               
@@ -700,7 +700,7 @@ jobs:
           
           struct WebExtractor { let url: String; let js: String }
           
-          class HiddenWebEngine: NSObject, WKNavigationDelegate, WKDownloadDelegate {
+          class HiddenWebEngine: NSObject, WKNavigationDelegate, WKDownloadDelegate, URLSessionDelegate {
               var webView: WKWebView!
               var targetUrl: String = ""
               var targetName: String = ""
@@ -715,7 +715,7 @@ jobs:
               override init() {
                   super.init()
                   let config = URLSessionConfiguration.default
-                  downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+                  downloadSession = URLSession(configuration: config, delegate: nil, delegateQueue: nil)
                   fetchClientId()
               }
               
@@ -802,7 +802,7 @@ jobs:
               func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) { self.attempt += 1; self.executeNextAttempt() }
           }
           
-          class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
+          class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate, URLSessionDelegate {
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""; @Published var downloadProgress: Double = 0.0
               @Published var showSuccess = false; @Published var showError = false; @Published var errorDetails = ""
               @Published var searchResults: [SCTrack] = []; @Published var showSearchResults: Bool = false
