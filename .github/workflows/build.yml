@@ -29,7 +29,7 @@ jobs:
 
       - name: Create project config
         run: |
-          cat << 'PROJ' > project.yml
+          cat << 'PROJ' | sed 's/^          //' > project.yml
           name: TrollMusicApp
           options:
             bundleIdPrefix: com.ahmedsoliman
@@ -51,7 +51,7 @@ jobs:
                 DEVELOPMENT_ASSET_PATHS: "DummyAssets"
           PROJ
           
-          cat << 'PLIST' > Info.plist
+          cat << 'PLIST' | sed 's/^ *//' > Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -1053,10 +1053,10 @@ jobs:
           try! png.write(to: u)
           ICON
           swift make_icon.swift
-          cat << 'JSON' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
+          cat << 'JSON' | sed 's/^ *//' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
           { "images": [ { "size": "1024x1024", "idiom": "ios-marketing", "filename": "icon-1024.png", "scale": "1x" } ], "info": { "version": 1, "author": "xcode" } }
           JSON
-          cat << 'JSON' > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
+          cat << 'JSON' | sed 's/^ *//' > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
           { "info": { "version": 1, "author": "xcode" } }
           JSON
 
