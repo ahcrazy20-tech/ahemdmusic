@@ -688,7 +688,8 @@ jobs:
               var durationFormatted: String {
                   guard let d = duration else { return "" }
                   let s = d / 1000
-                  return "• \(String(format: "%d:%02d", s / 60, s % 60))"
+                  let str = String(format: "%d:%02d", s / 60, s % 60)
+                  return "• \(str)"
               }
           }
           struct SCUser: Codable { let username: String? }
@@ -1005,7 +1006,7 @@ jobs:
                                           VStack(spacing: 15) {
                                               ForEach(downloader.searchResults) { result in
                                                   HStack {
-                                                      VStack(alignment: .leading) { Text(result.title ?? "Unknown").font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text("\(result.user?.username ?? "Unknown") \(result.durationFormatted)").font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
+                                                      VStack(alignment: .leading) { Text(result.title ?? "Unknown").font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text((result.user?.username ?? "Unknown") + " " + result.durationFormatted).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
                                                       Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.id && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
                                                       Button(action: { downloader.showSearchResults = false; downloader.downloadFromItunes(track: result) }) { Image(systemName: "arrow.down.circle.fill").font(.title).foregroundColor(.purple) }
                                                   }.padding().background(Color.white.opacity(0.1)).cornerRadius(10)
@@ -1029,7 +1030,7 @@ jobs:
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset
           cat << 'ICON' > make_icon.swift
-          import Cocoa
+          import AppKit
           let size = CGSize(width: 1024, height: 1024)
           let img = NSImage(size: size)
           img.lockFocus()
