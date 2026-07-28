@@ -29,7 +29,7 @@ jobs:
 
       - name: Create project config
         run: |
-          cat << 'PROJ' | sed 's/^          //' > project.yml
+          cat << 'PROJ' | cut -c 11- > project.yml
           name: TrollMusicApp
           options:
             bundleIdPrefix: com.ahmedsoliman
@@ -45,53 +45,29 @@ jobs:
                     - "**/*.plist"
               info:
                 path: TrollMusicApp/TrollMusicApp/Info.plist
+                properties:
+                  UILaunchScreen: {}
+                  UIBackgroundModes: [audio]
+                  NSAppTransportSecurity:
+                    NSAllowsArbitraryLoads: true
               settings:
                 GENERATE_INFOPLIST_FILE: "NO"
                 ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
                 DEVELOPMENT_ASSET_PATHS: "DummyAssets"
           PROJ
           
-          cat << 'PLIST' | sed 's/^ *//' > Info.plist
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleIdentifier</key>
-              <string>com.ahmedsoliman.trollmusicapp</string>
-              <key>CFBundleName</key>
-              <string>AS Music</string>
-              <key>CFBundleExecutable</key>
-              <string>TrollMusicApp</string>
-              <key>CFBundleVersion</key>
-              <string>1.0</string>
-              <key>CFBundleShortVersionString</key>
-              <string>1.0</string>
-              <key>UIBackgroundModes</key>
-              <array>
-                  <string>audio</string>
-              </array>
-              <key>NSAppTransportSecurity</key>
-              <dict>
-                  <key>NSAllowsArbitraryLoads</key>
-                  <true/>
-              </dict>
-              <key>UILaunchScreen</key>
-              <dict/>
-          </dict>
-          </plist>
-          PLIST
           
           mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
           mkdir -p TrollMusicApp/TrollMusicApp
-          cp Info.plist TrollMusicApp/TrollMusicApp/Info.plist
 
 
-      - name: Write TrollMusicAppApp.swift
+      - name: Write Swift Files
         run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
-          import SwiftUI
-          import AVFoundation
+          import FoundationNetworking
+          import Foundation
+          import Foundation
           
           class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
@@ -114,15 +90,15 @@ jobs:
               }
           }
           
+          
           SWIFT
 
-      - name: Write MusicManager.swift
-        run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/MusicManager.swift
+          import FoundationNetworking
           import Foundation
-          import AVFoundation
-          import MediaPlayer
-          import SwiftUI
+          import Foundation
+          import Foundation
+          import Foundation
           
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
@@ -333,12 +309,12 @@ jobs:
               }
           }
           
+          
           SWIFT
 
-      - name: Write Views.swift
-        run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
-          import SwiftUI
+          import FoundationNetworking
+          import Foundation
           
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
           
@@ -515,13 +491,13 @@ jobs:
               }
           }
           
+          
           SWIFT
 
-      - name: Write WebBrowser.swift
-        run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
-          import SwiftUI
-          import WebKit
+          import FoundationNetworking
+          import Foundation
+          import Foundation
           
           struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String; var title: String }
           
@@ -661,16 +637,16 @@ jobs:
               }
           }
           
+          
           SWIFT
 
-      - name: Write SmartDownloader.swift
-        run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
+          import FoundationNetworking
           
           import Foundation
-          import SwiftUI
-          import AVFoundation
-          import WebKit
+          import Foundation
+          import Foundation
+          import Foundation
           
           struct ITunesResponse: Codable { let results: [ITunesTrack] }
           struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId }; var durationFormatted: String { guard let m = trackTimeMillis else { return "" }; let s = m / 1000; return String(format: "%d:%02d", s/60, s%60) } }
@@ -684,7 +660,7 @@ jobs:
               let media: SCMedia?
               let duration: Int?
               let track_authorization: String?
-    
+
               var durationFormatted: String {
                   guard let d = duration else { return "" }
                   let s = d / 1000
@@ -1027,12 +1003,14 @@ jobs:
               }
           }
           
+          
           SWIFT
+
 
       - name: Generate Icon
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset
-          cat << 'ICON' > make_icon.swift
+          cat << 'ICON' | cut -c 11- > make_icon.swift
           import AppKit
           let size = CGSize(width: 1024, height: 1024)
           let img = NSImage(size: size)
@@ -1053,10 +1031,10 @@ jobs:
           try! png.write(to: u)
           ICON
           swift make_icon.swift
-          cat << 'JSON' | sed 's/^ *//' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
+          cat << 'JSON' | cut -c 11- > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
           { "images": [ { "size": "1024x1024", "idiom": "ios-marketing", "filename": "icon-1024.png", "scale": "1x" } ], "info": { "version": 1, "author": "xcode" } }
           JSON
-          cat << 'JSON' | sed 's/^ *//' > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
+          cat << 'JSON' | cut -c 11- > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
           { "info": { "version": 1, "author": "xcode" } }
           JSON
 
@@ -1070,22 +1048,14 @@ jobs:
 
       - name: Build and Archive
         run: |
-          xcodebuild archive \
-            -project TrollMusicApp.xcodeproj \
-            -scheme TrollMusicApp \
-            -archivePath build/TrollMusicApp.xcarchive \
-            -configuration Release \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_ASSET_PATHS=""
+          xcodebuild archive             -project TrollMusicApp.xcodeproj             -scheme TrollMusicApp             -archivePath build/TrollMusicApp.xcarchive             -configuration Release             CODE_SIGN_IDENTITY=""             CODE_SIGNING_REQUIRED=NO             CODE_SIGNING_ALLOWED=NO             DEVELOPMENT_ASSET_PATHS=""
 
       - name: Package IPA (TrollStore format)
         run: |
           mkdir -p Payload
           cp -r build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app Payload/
           zip -r TrollMusicApp.ipa Payload
-
+          
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
