@@ -183,13 +183,6 @@ jobs:
                       }
                   }
                   task.resume()
-              }                                  }
-                              }
-                              jsTask.resume()
-                          }
-                      }
-                  }
-                  task.resume()
               }
               
               func startProgressTimer() {
@@ -752,13 +745,6 @@ jobs:
                       }
                   }
                   task.resume()
-              }                                  }
-                              }
-                              jsTask.resume()
-                          }
-                      }
-                  }
-                  task.resume()
               }
               
               func startExtraction(url: String, name: String, onSuccess: @escaping () -> Void, onFailure: @escaping () -> Void) {
@@ -834,20 +820,6 @@ jobs:
                   let config = URLSessionConfiguration.default
                   downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
                   fetchClientId()
-              }                                  }
-                              }
-                              jsTask.resume()
-                          }
-                      }
-                  }
-                  task.resume()
-              }                                  }
-                              }
-                              jsTask.resume()
-                          }
-                      }
-                  }
-                  task.resume()
               }
               
               func togglePreview(track: SCTrack) {
