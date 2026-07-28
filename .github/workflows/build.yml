@@ -725,14 +725,27 @@ jobs:
           
           
           
-          struct ITunesResponse: Codable { let results: [ITunesTrack] }
-          struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId } }
+          struct SCResponse: Codable { let collection: [SCTrack] }
+          struct SCTrack: Codable, Identifiable {
+              let id: Int
+              let title: String?
+              let user: SCUser?
+              let duration: Int?
+              let permalink_url: String?
+              var durationFormatted: String {
+                  guard let d = duration else { return "" }
+                  let s = d / 1000
+                  let str = String(format: "%d:%02d", s / 60, s % 60)
+                  return "• " + str
+              }
+          }
+          struct SCUser: Codable { let username: String? }
           struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
           
           class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""; @Published var downloadProgress: Double = 0.0
               @Published var showSuccess = false; @Published var showError = false; @Published var errorDetails = ""
-              @Published var searchResults: [ITunesTrack] = []; @Published var showSearchResults: Bool = false
+              @Published var searchResults: [SCTrack] = []; @Published var showSearchResults: Bool = false
               @Published var previewTrackId: Int? = nil; @Published var isPreviewPlaying = false
               
               var previewPlayer: AVAudioPlayer?
@@ -749,7 +762,7 @@ jobs:
                   downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
               }
               
-              func togglePreview(track: ITunesTrack) {
+              func togglePreview(track: SCTrack) {
                   if previewTrackId == track.trackId && isPreviewPlaying { previewPlayer?.pause(); isPreviewPlaying = false } else {
                       previewPlayer?.stop()
                       statusMessage = "Loading Preview..."
@@ -769,13 +782,14 @@ jobs:
               func stopPreview() { previewPlayer?.stop(); isPreviewPlaying = false }
               
               func performMagicSearch(query: String) {
-                  guard !query.isEmpty else { return }; isSearching = true; statusMessage = "Searching..."; stopPreview()
+                  guard !query.isEmpty else { return }; isSearching = true; statusMessage = "Searching SoundCloud..."; stopPreview()
                   let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-                  guard let url = URL(string: "https://itunes.apple.com/search?term=\(encodedQuery)&media=music&limit=25") else { return }
-                  URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(ITunesResponse.self, from: data) else { DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "Search failed." } 
-          return }
-                      DispatchQueue.main.async { self.isSearching = false; if res.results.isEmpty { self.showError = true; self.errorDetails = "No songs found." } else { self.searchResults = res.results; self.showSearchResults = true } }
+                  guard let url = URL(string: "https://api-v2.soundcloud.com/search/tracks?q=\(encodedQuery)&client_id=" + scClientId + "&limit=25") else { return }
+                  var req = URLRequest(url: url)
+                  req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(SCResponse.self, from: data) else { DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "SoundCloud search failed." }; return }
+                      DispatchQueue.main.async { self.isSearching = false; if res.collection.isEmpty { self.showError = true; self.errorDetails = "No songs found." } else { self.searchResults = res.collection; self.showSearchResults = true } }
                   }.resume()
               }
               
@@ -828,66 +842,16 @@ jobs:
               }
               
               
-              func downloadFromItunes(track: ITunesTrack) {
-                  self.isDownloading = true
-                  self.downloadProgress = 0.0
-                  self.statusMessage = "Finding Perfect Audio..."
-                  
-                  let query = "\(track.artistName) \(track.trackName)"
-                  let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-                  guard let url = URL(string: "https://www.youtube.com/results?search_query=\(encoded)") else {
-                      DispatchQueue.main.async { self.errorDetails = "Failed to search."; self.showError = true; self.isDownloading = false } 
-          return
+              func downloadFromItunes(track: SCTrack) {
+                  self.showSearchResults = false
+                  let uName = track.user?.username ?? "Unknown"
+                  let tName = track.title ?? "Unknown"
+                  let cleanName = (uName + " - " + tName).replacingOccurrences(of: "/", with: "-")
+                  guard let url = track.permalink_url else {
+                      self.errorDetails = "No valid track link found."; self.showError = true; return
                   }
-                  
-                  var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
-                  
-                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-                      guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else {
-                          DispatchQueue.main.async { self?.errorDetails = "Failed to parse YouTube."; self?.showError = true; self?.isDownloading = false } 
-          return
-                      }
-                      
-                      let cleanHtml = html.replacingOccurrences(of: "\\\\x22", with: "\"").replacingOccurrences(of: "\\x22", with: "\"").replacingOccurrences(of: "\\u0022", with: "\"")
-                      let chunks = cleanHtml.components(separatedBy: "\"videoId\":\"")
-                      var bestVideoId = ""
-                      let targetDuration = (track.trackTimeMillis ?? 0) / 1000
-                      
-                      for chunk in chunks.dropFirst() {
-                          guard chunk.count >= 11 else { continue }
-                          let vid = String(chunk.prefix(11))
-                          var duration = 0
-                          if let range = chunk.range(of: "\"simpleText\":\"") {
-                              let sub = chunk[range.upperBound...]
-                              if let endRange = sub.range(of: "\"") {
-                                  let timeStr = String(sub[..<endRange.lowerBound])
-                                  let parts = timeStr.components(separatedBy: ":")
-                                  if parts.count == 2, let m = Int(parts[0]), let s = Int(parts[1]) { duration = m * 60 + s }
-                                  else if parts.count == 3, let h = Int(parts[0]), let m = Int(parts[1]), let s = Int(parts[2]) { duration = h * 3600 + m * 60 + s }
-                              }
-                          }
-                          
-                          if bestVideoId.isEmpty { bestVideoId = vid }
-                          if targetDuration > 0 && abs(duration - targetDuration) <= 15 { bestVideoId = vid; break }
-                      }
-                      
-                      if bestVideoId.isEmpty {
-                          if let range = cleanHtml.range(of: "watch?v=") {
-                              let start = range.upperBound
-                              if let end = cleanHtml.index(start, offsetBy: 11, limitedBy: cleanHtml.endIndex) {
-                                  let vid = String(cleanHtml[start..<end])
-                                  if vid.count == 11 { bestVideoId = vid }
-                              }
-                          }
-                      }
-                      
-                      guard !bestVideoId.isEmpty else {
-                          DispatchQueue.main.async { self.errorDetails = "Failed to find full version of stream."; self.showError = true; self.isDownloading = false }
-                          return
-                      }
-                      self.tryDownloadCobalt(urlStr: "https://www.youtube.com/watch?v=\(bestVideoId)", name: track.trackName)
-                  }.resume()
+                  self.statusMessage = "Starting download..."
+                  self.downloadLinkOrPlaylist(urlStr: url, name: cleanName)
               }
               
               func tryDownloadCobalt(urlStr: String, name: String, isPlaylist: Bool = false, attempt: Int = 0) {
@@ -1020,9 +984,9 @@ jobs:
                                           VStack(spacing: 15) {
                                               ForEach(downloader.searchResults) { result in
                                                   HStack {
-                                                      VStack(alignment: .leading) { Text(result.trackName).font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text(result.artistName).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
-                                                      Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.trackId && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
-                                                      Button(action: { downloader.showSearchResults = false; downloader.downloadFromItunes(track: result) }) { Image(systemName: "arrow.down.circle.fill").font(.title).foregroundColor(.purple) }
+                                                      VStack(alignment: .leading) { Text(result.title ?? "Unknown").font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text((result.user?.username ?? "Unknown") + " " + result.durationFormatted).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
+                                                      Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.id && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
+                                                      Button(action: { downloader.downloadFromItunes(track: result) }) { Image(systemName: "arrow.down.circle.fill").font(.title).foregroundColor(.purple) }
                                                   }.padding().background(Color.white.opacity(0.1)).cornerRadius(10)
                                               }
                                           }.padding(.horizontal)
@@ -1067,7 +1031,7 @@ jobs:
           
           swift make_icon.swift
           
-          echo '{ "images": [ { "size": "1024x1024", "idiom": "ios-marketing", "filename": "icon-1024.png", "scale": "1x" } ], "info": { "version": 1, "author": "xcode" } }' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
+          echo '{ "images": [ { "filename": "icon-1024.png", "idiom": "universal", "platform": "ios", "size": "1024x1024" } ], "info": { "author": "xcode", "version": 1 } }' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
           echo '{ "info": { "version": 1, "author": "xcode" } }' > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
 
       - name: Install xcodegen
