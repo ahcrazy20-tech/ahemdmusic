@@ -21,11 +21,7 @@ jobs:
 
       - name: Clean Environment
         run: |
-          find . -name "Info.plist" -delete
           find . -name "*.swift" -delete
-          rm -rf TrollMusicApp/*.swift
-          rm -rf TrollMusicApp/TrollMusicApp/*.swift
-          rm -rf TrollMusicApp/*.xcodeproj
 
       - name: Create project config
         run: |
@@ -39,7 +35,7 @@ jobs:
               platform: iOS
               deploymentTarget: "16.0"
               sources:
-                - path: TrollMusicApp/TrollMusicApp
+                - path: TrollMusicApp
                   excludes:
                     - "Preview Content"
                     - "**/*.plist"
@@ -50,8 +46,10 @@ jobs:
                   UIBackgroundModes: [audio]
                   NSAppTransportSecurity:
                     NSAllowsArbitraryLoads: true
+                properties:
+                  UIBackgroundModes: [audio]
+                  NSAppTransportSecurity: { NSAllowsArbitraryLoads: true }
               settings:
-                GENERATE_INFOPLIST_FILE: "NO"
                 ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
                 DEVELOPMENT_ASSET_PATHS: "DummyAssets"
           PROJ
@@ -59,15 +57,13 @@ jobs:
           
           mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
-          mkdir -p TrollMusicApp/TrollMusicApp
+          cp Info.plist TrollMusicApp/Info.plist
 
-
-      - name: Write Swift Files
+      - name: Write TrollMusicAppApp.swift
         run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
-          import FoundationNetworking
-          import Foundation
-          import Foundation
+          import SwiftUI
+          import AVFoundation
           
           class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
@@ -90,15 +86,15 @@ jobs:
               }
           }
           
-          
           SWIFT
 
+      - name: Write MusicManager.swift
+        run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/MusicManager.swift
-          import FoundationNetworking
           import Foundation
-          import Foundation
-          import Foundation
-          import Foundation
+          import AVFoundation
+          import MediaPlayer
+          import SwiftUI
           
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
@@ -124,41 +120,9 @@ jobs:
               let fileManager = FileManager.default
               var documentsDirectory: URL { fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0] }
               
-              var scClientId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
-              
               override init() {
                   super.init()
-                  let config = URLSessionConfiguration.default
-                  downloadSession = URLSession(configuration: config, delegate: nil, delegateQueue: nil)
-                  fetchClientId()
-              }
-              
-              func fetchClientId() {
-                  let url = URL(string: "https://soundcloud.com")!
-                  var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", forHTTPHeaderField: "User-Agent")
-                  let task = URLSession.shared.dataTask(with: req) { data, _, _ in
-                      guard let data = data, let html = String(data: data, encoding: .utf8) else { return }
-                      let pattern = "src=\"(https://a-v2.sndcdn.com/assets/[^\"]+)\""
-                      if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                          let matches = regex.matches(in: html, options: [], range: NSRange(location: 0, length: html.utf16.count))
-                          if let lastMatch = matches.last, let range = Range(lastMatch.range(at: 1), in: html) {
-                              let jsUrl = String(html[range])
-                              let jsTask = URLSession.shared.dataTask(with: URL(string: jsUrl)!) { jsData, _, _ in
-                                  if let jsData = jsData, let js = String(data: jsData, encoding: .utf8) {
-                                      let cPattern = "client_id:\"([^\"]{32})\""
-                                      if let cRegex = try? NSRegularExpression(pattern: cPattern, options: []),
-                                         let cMatch = cRegex.firstMatch(in: js, options: [], range: NSRange(location: 0, length: js.utf16.count)),
-                                         let cRange = Range(cMatch.range(at: 1), in: js) {
-                                          self.scClientId = String(js[cRange])
-                                      }
-                                  }
-                              }
-                              jsTask.resume()
-                          }
-                      }
-                  }
-                  task.resume()
+                  loadSongs(); loadPlaylists(); setupRemoteCommandCenter()
               }
               
               func startProgressTimer() {
@@ -246,7 +210,7 @@ jobs:
                       UIApplication.shared.beginReceivingRemoteControlEvents()
                       
                       audioPlayer?.stop(); avPlayer?.pause()
-                      NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
+                      NotificationCenter.default.removeObserver(self, name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: nil)
                       
                       do {
                           audioPlayer = try AVAudioPlayer(contentsOf: song.url)
@@ -259,7 +223,7 @@ jobs:
                           avPlayer = AVPlayer(playerItem: playerItem)
                           avPlayer?.play()
                           useAVPlayer = true
-                          NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: .AVPlayerItemDidPlayToEndTime, object: playerItem)
+                          NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: playerItem)
                       }
                       currentSong = song; isPlaying = true
                       updateNowPlayingInfo()
@@ -289,10 +253,10 @@ jobs:
               
               func setupRemoteCommandCenter() {
                   let commandCenter = MPRemoteCommandCenter.shared()
-                  commandCenter.playCommand.addTarget { [weak self] (event) -> MPRemoteCommandHandlerStatus in guard let self = self else { return .commandFailed }; if self.isPlaying { return .commandFailed }; self.togglePlayPause(); return .success }
-                  commandCenter.pauseCommand.addTarget { [weak self] (event) -> MPRemoteCommandHandlerStatus in guard let self = self else { return .commandFailed }; if !self.isPlaying { return .commandFailed }; self.togglePlayPause(); return .success }
-                  commandCenter.nextTrackCommand.addTarget { [weak self] (event) -> MPRemoteCommandHandlerStatus in self?.playNext(); return .success }
-                  commandCenter.previousTrackCommand.addTarget { [weak self] (event) -> MPRemoteCommandHandlerStatus in self?.playPrevious(); return .success }
+                  commandCenter.playCommand.addTarget { [weak self] event in guard let self = self else { return MPRemoteCommandHandlerStatus.commandFailed }; if self.isPlaying { return MPRemoteCommandHandlerStatus.commandFailed }; self.togglePlayPause(); return MPRemoteCommandHandlerStatus.success }
+                  commandCenter.pauseCommand.addTarget { [weak self] event in guard let self = self else { return MPRemoteCommandHandlerStatus.commandFailed }; if !self.isPlaying { return MPRemoteCommandHandlerStatus.commandFailed }; self.togglePlayPause(); return MPRemoteCommandHandlerStatus.success }
+                  commandCenter.nextTrackCommand.addTarget { [weak self] event in self?.playNext(); return MPRemoteCommandHandlerStatus.success }
+                  commandCenter.previousTrackCommand.addTarget { [weak self] event in self?.playPrevious(); return MPRemoteCommandHandlerStatus.success }
               }
               
               func updateNowPlayingInfo() {
@@ -309,12 +273,12 @@ jobs:
               }
           }
           
-          
           SWIFT
 
+      - name: Write Views.swift
+        run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
-          import FoundationNetworking
-          import Foundation
+          import SwiftUI
           
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
           
@@ -363,7 +327,7 @@ jobs:
                               Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack); Spacer()
                               Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward); Spacer()
                               Button(action: { webViewModel.grabAudio() }) { Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple) }; Spacer()
-                              Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text(String(webViewModel.tabs.count)).font(.caption).bold() } }; Spacer()
+                              Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text("\(webViewModel.tabs.count)").font(.caption).bold() } }; Spacer()
                               Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
                           }.padding().background(Color(uiColor: .secondarySystemBackground))
                       }
@@ -371,14 +335,14 @@ jobs:
                           Color.black.opacity(0.8).edgesIgnoringSafeArea(.all)
                           VStack {
                               HStack { Text("Tabs").font(.title).bold().foregroundColor(.white); Spacer(); Button("Done") { webViewModel.showTabs = false }.foregroundColor(.blue) }.padding()
-                              ScrollView { VStack(spacing: 15) { ForEach(0..<webViewModel.tabs.count, id: \.self) { index in HStack { VStack(alignment: .leading) { Text("Tab " + String(index + 1)).font(.headline).foregroundColor(.white); Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer(); Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) } }.padding().background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3)).cornerRadius(10).onTapGesture { webViewModel.currentTabIndex = index; urlString = webViewModel.tabs[index].urlString; webViewModel.showTabs = false } }; Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) { HStack { Image(systemName: "plus"); Text("New Tab") }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10) }.padding(.top, 10) }.padding(.horizontal) }
+                              ScrollView { VStack(spacing: 15) { ForEach(0..<webViewModel.tabs.count, id: \.self) { index in HStack { VStack(alignment: .leading) { Text("Tab \(index + 1)").font(.headline).foregroundColor(.white); Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer(); Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) } }.padding().background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3)).cornerRadius(10).onTapGesture { webViewModel.currentTabIndex = index; urlString = webViewModel.tabs[index].urlString; webViewModel.showTabs = false } }; Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) { HStack { Image(systemName: "plus"); Text("New Tab") }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10) }.padding(.top, 10) }.padding(.horizontal) }
                           }
                       }
                   }
                   .alert("Grab Audio", isPresented: $webViewModel.showNamePrompt) {
                       TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { }
                   } message: { Text("Enter a name to save the audio track.") }
-                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved " + webViewModel.downloadFileName) }
+                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
                   .alert("Download Error", isPresented: $webViewModel.showBlobError) { Button("OK", role: .cancel) { } } message: { Text("Failed to extract media from this page. Try Magic DL.") }
               }
           }
@@ -491,13 +455,13 @@ jobs:
               }
           }
           
-          
           SWIFT
 
+      - name: Write WebBrowser.swift
+        run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
-          import FoundationNetworking
-          import Foundation
-          import Foundation
+          import SwiftUI
+          import WebKit
           
           struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String; var title: String }
           
@@ -637,43 +601,16 @@ jobs:
               }
           }
           
-          
           SWIFT
 
+      - name: Write SmartDownloader.swift
+        run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
-          import FoundationNetworking
-          
-          import Foundation
-          import Foundation
-          import Foundation
+          import SwiftUI
+          import AVFoundation
+          import WebKit
           import Foundation
           
-          struct ITunesResponse: Codable { let results: [ITunesTrack] }
-          struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId }; var durationFormatted: String { guard let m = trackTimeMillis else { return "" }; let s = m / 1000; return String(format: "%d:%02d", s/60, s%60) } }
-          struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
-
-          struct SCResponse: Codable { let collection: [SCTrack] }
-          struct SCTrack: Codable, Identifiable {
-              let id: Int
-              let title: String?
-              let user: SCUser?
-              let media: SCMedia?
-              let duration: Int?
-              let track_authorization: String?
-
-              var durationFormatted: String {
-                  guard let d = duration else { return "" }
-                  let s = d / 1000
-                  let str = String(format: "%d:%02d", s / 60, s % 60)
-                  return "• \(str)"
-              }
-          }
-          struct SCUser: Codable { let username: String? }
-          struct SCMedia: Codable { let transcodings: [SCTranscoding]? }
-          struct SCTranscoding: Codable { let url: String?; let format: SCFormat? }
-          struct SCFormat: Codable { let protocol_name: String?; let mime_type: String? }
-          struct SCStreamResponse: Codable { let url: String? }
-
           
           struct WebExtractor { let url: String; let js: String }
           
@@ -687,41 +624,15 @@ jobs:
               var isDownloadStarted = false
               var extractors: [WebExtractor] = []
               
-              var scClientId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
-              
               override init() {
                   super.init()
-                  let config = URLSessionConfiguration.default
-                  downloadSession = URLSession(configuration: config, delegate: nil, delegateQueue: nil)
-                  fetchClientId()
-              }
-              
-              func fetchClientId() {
-                  let url = URL(string: "https://soundcloud.com")!
-                  var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", forHTTPHeaderField: "User-Agent")
-                  let task = URLSession.shared.dataTask(with: req) { data, _, _ in
-                      guard let data = data, let html = String(data: data, encoding: .utf8) else { return }
-                      let pattern = "src=\"(https://a-v2.sndcdn.com/assets/[^\"]+)\""
-                      if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                          let matches = regex.matches(in: html, options: [], range: NSRange(location: 0, length: html.utf16.count))
-                          if let lastMatch = matches.last, let range = Range(lastMatch.range(at: 1), in: html) {
-                              let jsUrl = String(html[range])
-                              let jsTask = URLSession.shared.dataTask(with: URL(string: jsUrl)!) { jsData, _, _ in
-                                  if let jsData = jsData, let js = String(data: jsData, encoding: .utf8) {
-                                      let cPattern = "client_id:\"([^\"]{32})\""
-                                      if let cRegex = try? NSRegularExpression(pattern: cPattern, options: []),
-                                         let cMatch = cRegex.firstMatch(in: js, options: [], range: NSRange(location: 0, length: js.utf16.count)),
-                                         let cRange = Range(cMatch.range(at: 1), in: js) {
-                                          self.scClientId = String(js[cRange])
-                                      }
-                                  }
-                              }
-                              jsTask.resume()
-                          }
-                      }
-                  }
-                  task.resume()
+                  let config = WKWebViewConfiguration()
+                  config.allowsInlineMediaPlayback = true
+                  let prefs = WKWebpagePreferences()
+                  prefs.allowsContentJavaScript = true
+                  config.defaultWebpagePreferences = prefs
+                  self.webView = WKWebView(frame: .zero, configuration: config)
+                  self.webView.navigationDelegate = self
               }
               
               func startExtraction(url: String, name: String, onSuccess: @escaping () -> Void, onFailure: @escaping () -> Void) {
@@ -733,8 +644,34 @@ jobs:
                   self.isDownloadStarted = false
                   
                   self.extractors = [
-                      WebExtractor(url: "https://y2mate.nu/en-OOTt/", js: "setTimeout(function() { var input = document.getElementById('video'); if(input) { input.value = '$$URL$$'; var btn = document.querySelector('button[type=\"submit\"]'); if(btn) btn.click(); var check = setInterval(function() { var dBtn = document.querySelector('a[href*=\"download\"], button[class*=\"download\"]'); if(dBtn) { clearInterval(check); if (dBtn.href) { window.location.href = dBtn.href; } else { dBtn.click(); } } }, 1000); } }, 1000);"),
-                      WebExtractor(url: "https://cobalt.tools", js: "setTimeout(function() { var audioBtn = document.getElementById('setting-button-save-downloadMode-audio'); if(audioBtn) audioBtn.click(); var input = document.getElementById('link-area'); if(input) { input.value = '$$URL$$'; input.dispatchEvent(new Event('input', { bubbles: true })); setTimeout(function() { var dlBtn = document.getElementById('download-button'); if(dlBtn) dlBtn.click(); }, 1000); } }, 1500);")
+                      WebExtractor(url: "https://y2mate.nu/en-OOTt/", js: """
+                      setTimeout(function() {
+                          var input = document.getElementById('video');
+                          if(input) { 
+                              input.value = '$$URL$$'; 
+                              var btn = document.querySelector('button[type="submit"]');
+                              if(btn) btn.click(); 
+                              var check = setInterval(function() {
+                                  var dBtn = document.querySelector('a[href*="download"], button[class*="download"]');
+                                  if(dBtn) {
+                                      clearInterval(check);
+                                      if (dBtn.href) { window.location.href = dBtn.href; }
+                                      else { dBtn.click(); }
+                                  }
+                              }, 1000);
+                          }
+                      }, 1000);
+                      """),
+                      WebExtractor(url: "https://cobalt.tools", js: """
+                      setTimeout(function() {
+                          var audioBtn = document.getElementById('setting-button-save-downloadMode-audio');
+                          if(audioBtn) audioBtn.click();
+                          var input = document.getElementById('link-area');
+                          if(input) { input.value = '$$URL$$'; input.dispatchEvent(new Event('input', { bubbles: true }));
+                              setTimeout(function() { var dlBtn = document.getElementById('download-button'); if(dlBtn) dlBtn.click(); }, 1000);
+                          }
+                      }, 1500);
+                      """)
                   ]
                   self.executeNextAttempt()
               }
@@ -779,10 +716,16 @@ jobs:
               func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) { self.attempt += 1; self.executeNextAttempt() }
           }
           
+          
+          
+          struct ITunesResponse: Codable { let results: [ITunesTrack] }
+          struct ITunesTrack: Codable, Identifiable { let trackId: Int; let trackName: String; let artistName: String; let previewUrl: String; let trackTimeMillis: Int?; var id: Int { trackId } }
+          struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
+          
           class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""; @Published var downloadProgress: Double = 0.0
               @Published var showSuccess = false; @Published var showError = false; @Published var errorDetails = ""
-              @Published var searchResults: [SCTrack] = []; @Published var showSearchResults: Bool = false
+              @Published var searchResults: [ITunesTrack] = []; @Published var showSearchResults: Bool = false
               @Published var previewTrackId: Int? = nil; @Published var isPreviewPlaying = false
               
               var previewPlayer: AVAudioPlayer?
@@ -791,40 +734,42 @@ jobs:
               
               var playlistQueue: [String] = []
               var playlistTotal = 0
-              var playlistName = ""              
+              var playlistName = ""
+              
               override init() {
                   super.init()
                   let config = URLSessionConfiguration.default
                   downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-                  fetchClientId()
               }
               
-              func togglePreview(track: SCTrack) {
-                  DispatchQueue.main.async { self.errorDetails = "Previews are disabled in Universal Search Mode. Please click Download to listen."; self.showError = true }
+              func togglePreview(track: ITunesTrack) {
+                  if previewTrackId == track.trackId && isPreviewPlaying { previewPlayer?.pause(); isPreviewPlaying = false } else {
+                      previewPlayer?.stop()
+                      statusMessage = "Loading Preview..."
+                      guard let url = URL(string: track.previewUrl) else { return }
+                      URLSession.shared.downloadTask(with: url) { [weak self] localUrl, _, _ in
+                          guard let self = self, let localUrl = localUrl else { return }
+                          do {
+                              try AVAudioSession.sharedInstance().setCategory(AVAudioSession.Category.playback, mode: AVAudioSession.Mode.default); try AVAudioSession.sharedInstance().setActive(true)
+                              let data = try Data(contentsOf: localUrl)
+                              self.previewPlayer = try AVAudioPlayer(data: data)
+                              self.previewPlayer?.play()
+                              DispatchQueue.main.async { self.previewTrackId = track.trackId; self.isPreviewPlaying = true; self.statusMessage = "" }
+                          } catch {}
+                      }.resume()
+                  }
               }
               func stopPreview() { previewPlayer?.stop(); isPreviewPlaying = false }
               
               func performMagicSearch(query: String) {
-                  guard !query.isEmpty else { return }
-                  isSearching = true; statusMessage = "Searching SoundCloud..."; stopPreview()
+                  guard !query.isEmpty else { return }; isSearching = true; statusMessage = "Searching..."; stopPreview()
                   let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-                  guard let url = URL(string: "https://api-v2.soundcloud.com/search/tracks?q=\(encodedQuery)&client_id=\(scClientId)&limit=25") else { return }
-                  
-                  var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", forHTTPHeaderField: "User-Agent")
-                  
-                  let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(SCResponse.self, from: data) else {
-                          DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "SoundCloud Search Failed." }; return
-                      }
-                      
-                      DispatchQueue.main.async { 
-                          self.isSearching = false
-                          if res.collection.isEmpty { self.showError = true; self.errorDetails = "No songs found." } 
-                          else { self.searchResults = res.collection; self.showSearchResults = true } 
-                      }
-                  }
-                  task.resume()
+                  guard let url = URL(string: "https://itunes.apple.com/search?term=\(encodedQuery)&media=music&limit=25") else { return }
+                  URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(ITunesResponse.self, from: data) else { DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "Search failed." } 
+          return }
+                      DispatchQueue.main.async { self.isSearching = false; if res.results.isEmpty { self.showError = true; self.errorDetails = "No songs found." } else { self.searchResults = res.results; self.showSearchResults = true } }
+                  }.resume()
               }
               
               func downloadLinkOrPlaylist(urlStr: String, name: String) {
@@ -843,8 +788,9 @@ jobs:
                   guard let url = URL(string: urlStr) else { return }
                   var req = URLRequest(url: url)
                   req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-                  let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-                      guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self?.isDownloading = false; self?.showError = true; self?.errorDetails = "Playlist extraction failed." }; return }
+                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+                      guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else { DispatchQueue.main.async { self?.isDownloading = false; self?.showError = true; self?.errorDetails = "Playlist extraction failed." } 
+          return }
                       var videoIds: [String] = []
                       let chunks = html.components(separatedBy: "\"videoId\":\"")
                       for chunk in chunks.dropFirst() {
@@ -860,12 +806,12 @@ jobs:
                               self.processNextPlaylistSong()
                           }
                       }
-                  }
-                  task.resume()
+                  }.resume()
               }
               
               func processNextPlaylistSong() {
-                  guard !playlistQueue.isEmpty else { DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }; return }
+                  guard !playlistQueue.isEmpty else { DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() } 
+          return }
                   let nextVid = playlistQueue.removeFirst()
                   let url = "https://www.youtube.com/watch?v=\(nextVid)"
                   let currentNum = playlistTotal - playlistQueue.count
@@ -874,52 +820,134 @@ jobs:
                   tryDownloadCobalt(urlStr: url, name: name, isPlaylist: true)
               }
               
-              func downloadFromItunes(track: SCTrack) {
-                      self.isDownloading = true
-                      self.downloadProgress = 0.0
-                      self.statusMessage = "Extracting Native Audio..."
-                      let uName = track.user?.username ?? "Unknown"
-                      let tName = track.title ?? "Unknown"
-                      let cleanName = (uName + " - " + tName).replacingOccurrences(of: "/", with: "-")
-                      
-                      guard let transcodings = track.media?.transcodings else {
-                          DispatchQueue.main.async { self.errorDetails = "No media streams found."; self.showError = true; self.isDownloading = false }
-                          return
+              
+              func downloadFromItunes(track: ITunesTrack) {
+                  self.isDownloading = true
+                  self.downloadProgress = 0.0
+                  self.statusMessage = "Finding Perfect Audio..."
+                  
+                  let query = "\(track.artistName) \(track.trackName)"
+                  let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+                  guard let url = URL(string: "https://www.youtube.com/results?search_query=\(encoded)") else {
+                      DispatchQueue.main.async { self.errorDetails = "Failed to search."; self.showError = true; self.isDownloading = false } 
+          return
+                  }
+                  
+                  var req = URLRequest(url: url)
+                  req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+                  
+                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+                      guard let self = self, let data = data, let html = String(data: data, encoding: .utf8) else {
+                          DispatchQueue.main.async { self?.errorDetails = "Failed to parse YouTube."; self?.showError = true; self?.isDownloading = false } 
+          return
                       }
                       
-                      var streamUrl: String? = nil
-                      for t in transcodings {
-                          if t.format?.protocol_name == "progressive" {
-                              streamUrl = t.url
-                              break
-                          }
-                      }
+                      let cleanHtml = html.replacingOccurrences(of: "\\\\x22", with: "\"").replacingOccurrences(of: "\\x22", with: "\"").replacingOccurrences(of: "\\u0022", with: "\"")
+                      let chunks = cleanHtml.components(separatedBy: "\"videoId\":\"")
+                      var bestVideoId = ""
+                      let targetDuration = (track.trackTimeMillis ?? 0) / 1000
                       
-                      let auth = track.track_authorization ?? ""
-                      guard let finalStreamUrl = streamUrl, let targetUrl = URL(string: finalStreamUrl + "?client_id=\(scClientId)&track_authorization=\(auth)") else {
-                          DispatchQueue.main.async { self.errorDetails = "No progressive MP3 found."; self.showError = true; self.isDownloading = false }
-                          return
-                      }
-                      
-                      var req = URLRequest(url: targetUrl)
-                      req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", forHTTPHeaderField: "User-Agent")
-                      let task = URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
-                          guard let self = self, let data = data, let res = try? JSONDecoder().decode(SCStreamResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) else {
-                              DispatchQueue.main.async { self?.errorDetails = "Failed to fetch media stream."; self?.showError = true; self?.isDownloading = false }
-                              return
+                      for chunk in chunks.dropFirst() {
+                          guard chunk.count >= 11 else { continue }
+                          let vid = String(chunk.prefix(11))
+                          var duration = 0
+                          if let range = chunk.range(of: "\"simpleText\":\"") {
+                              let sub = chunk[range.upperBound...]
+                              if let endRange = sub.range(of: "\"") {
+                                  let timeStr = String(sub[..<endRange.lowerBound])
+                                  let parts = timeStr.components(separatedBy: ":")
+                                  if parts.count == 2, let m = Int(parts[0]), let s = Int(parts[1]) { duration = m * 60 + s }
+                                  else if parts.count == 3, let h = Int(parts[0]), let m = Int(parts[1]), let s = Int(parts[2]) { duration = h * 3600 + m * 60 + s }
+                              }
                           }
                           
-                          self.finalDownloadName = cleanName
-                          DispatchQueue.main.async { self.statusMessage = "Downloading High-Quality MP3..." }
-                          let dlTask = self.downloadSession.downloadTask(with: audioUrl)
-                          dlTask.resume()
+                          if bestVideoId.isEmpty { bestVideoId = vid }
+                          if targetDuration > 0 && abs(duration - targetDuration) <= 15 { bestVideoId = vid; break }
                       }
-                      task.resume()
+                      
+                      if bestVideoId.isEmpty {
+                          if let range = cleanHtml.range(of: "watch?v=") {
+                              let start = range.upperBound
+                              if let end = cleanHtml.index(start, offsetBy: 11, limitedBy: cleanHtml.endIndex) {
+                                  let vid = String(cleanHtml[start..<end])
+                                  if vid.count == 11 { bestVideoId = vid }
+                              }
+                          }
+                      }
+                      
+                      guard !bestVideoId.isEmpty else {
+                          DispatchQueue.main.async { self.errorDetails = "Failed to find full version of stream."; self.showError = true; self.isDownloading = false }
+                          return
+                      }
+                      self.tryDownloadCobalt(urlStr: "https://www.youtube.com/watch?v=\(bestVideoId)", name: track.trackName)
+                  }.resume()
+              }
+              
+              func tryDownloadCobalt(urlStr: String, name: String, isPlaylist: Bool = false, attempt: Int = 0) {
+                  if !isPlaylist && attempt == 0 { DispatchQueue.main.async { self.isDownloading = true; self.downloadProgress = 0.0 } }
+                  let servers = [
+                      "https://co.wuk.sh",
+                      "https://cobalt.api.timeless.top",
+                      "https://co.eepy.today",
+                      "https://cobalt.q0.is",
+                      "https://api.vidiq.org",
+                      "https://api.cobalt.tools"
+                  ]
+                  
+                  if attempt >= servers.count {
+                      DispatchQueue.main.async {
+                          self.statusMessage = "Engaging Hidden Engine..."
+                          self.hiddenEngine.startExtraction(url: urlStr, name: name, onSuccess: {
+                              DispatchQueue.main.async {
+                                  if isPlaylist { self.processNextPlaylistSong() }
+                                  else { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }
+                              }
+                          }, onFailure: {
+                              DispatchQueue.main.async {
+                                  if isPlaylist { self.processNextPlaylistSong() } 
+                                  else { self.errorDetails = "Failed to extract stream. All networks blocked."; self.isDownloading = false; self.showError = true }
+                              }
+                          })
+                      }
+                      return
                   }
+                  
+                  let server = servers[attempt]
+                  DispatchQueue.main.async { self.statusMessage = "Bypassing Security (Server \(attempt + 1))..." }
+                  
+                  guard let apiUrl = URL(string: "\(server)/api/json") else { return }
+                  var request = URLRequest(url: apiUrl); request.httpMethod = "POST"
+                  request.setValue("application/json", forHTTPHeaderField: "Accept"); request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.setValue(server, forHTTPHeaderField: "Origin")
+                  let parameters: [String: Any] = ["url": urlStr, "isAudioOnly": true, "aFormat": "mp3", "isNoTTWatermark": true]
+                  request.httpBody = try? JSONSerialization.data(withJSONObject: parameters)
+                  
+                  URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                      guard let self = self else { return }
+                      if let data = data, let res = try? JSONDecoder().decode(CobaltResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) {
+                          self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
+                          let task = self.downloadSession.downloadTask(with: audioUrl); 
+                      } else {
+                          guard let v10Url = URL(string: "\(server)/") else { return }
+                          var req10 = request; req10.url = v10Url
+                          let params10: [String: Any] = ["url": urlStr, "downloadMode": "audio", "audioFormat": "mp3"]
+                          req10.httpBody = try? JSONSerialization.data(withJSONObject: params10)
+                          URLSession.shared.dataTask(with: req10) { [weak self] data10, _, _ in
+                              guard let self = self else { return }
+                              if let data10 = data10, let res10 = try? JSONDecoder().decode(CobaltResponse.self, from: data10), let audioUrlStr10 = res10.url, let audioUrl10 = URL(string: audioUrlStr10) {
+                                  self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
+                                  let task = self.downloadSession.downloadTask(with: audioUrl10); 
+                              } else {
+                                  self.tryDownloadCobalt(urlStr: urlStr, name: name, isPlaylist: isPlaylist, attempt: attempt + 1)
+                              }
+                          }
+                          
+                      }
+                  }.resume()
+              }
               
               func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
                   let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-                  DispatchQueue.main.async { self.downloadProgress = progress; if self.playlistTotal == 0 { self.statusMessage = "Downloading... " + String(Int(progress * 100)) + "%" } }
+                  DispatchQueue.main.async { self.downloadProgress = progress; if self.playlistTotal == 0 { self.statusMessage = "Downloading... \(Int(progress * 100))%" } }
               }
               
               func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
@@ -953,7 +981,7 @@ jobs:
                                   Text("Smart Search & Playlists").font(.title).bold()
                                   
                                   VStack(spacing: 15) {
-                                      Text("Universal Name Search (SoundCloud)").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
+                                      Text("Search by Name").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
                                       HStack {
                                           TextField("e.g. Amr Diab", text: $searchInput).padding().background(Color(uiColor: .secondarySystemGroupedBackground)).cornerRadius(12)
                                           Button(action: { downloader.performMagicSearch(query: searchInput) }) { if downloader.isSearching { ProgressView().padding() } else { Image(systemName: "magnifyingglass").foregroundColor(.white).padding().background(Color.purple).cornerRadius(12) } }.disabled(downloader.isSearching || searchInput.isEmpty)
@@ -985,8 +1013,8 @@ jobs:
                                           VStack(spacing: 15) {
                                               ForEach(downloader.searchResults) { result in
                                                   HStack {
-                                                      VStack(alignment: .leading) { Text(result.title ?? "Unknown").font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text((result.user?.username ?? "Unknown") + " " + result.durationFormatted).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
-                                                      Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.id && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
+                                                      VStack(alignment: .leading) { Text(result.trackName).font(.subheadline).foregroundColor(.white).bold().lineLimit(1); Text(result.artistName).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer()
+                                                      Button(action: { downloader.togglePreview(track: result) }) { Image(systemName: (downloader.previewTrackId == result.trackId && downloader.isPreviewPlaying) ? "pause.circle.fill" : "play.circle.fill").font(.title).foregroundColor(.blue) }
                                                       Button(action: { downloader.showSearchResults = false; downloader.downloadFromItunes(track: result) }) { Image(systemName: "arrow.down.circle.fill").font(.title).foregroundColor(.purple) }
                                                   }.padding().background(Color.white.opacity(0.1)).cornerRadius(10)
                                               }
@@ -1003,40 +1031,7 @@ jobs:
               }
           }
           
-          
           SWIFT
-
-
-      - name: Generate Icon
-        run: |
-          mkdir -p TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset
-          cat << 'ICON' > make_icon.swift
-          import AppKit
-          let size = CGSize(width: 1024, height: 1024)
-          let img = NSImage(size: size)
-          img.lockFocus()
-          let ctx = NSGraphicsContext.current!.cgContext
-          let colors = [NSColor.systemPurple.cgColor, NSColor.black.cgColor] as CFArray
-          let grad = CGGradient(colorsSpace: nil, colors: colors, locations: [0.0, 1.0])!
-          ctx.drawLinearGradient(grad, start: CGPoint(x: 0, y: 1024), end: CGPoint(x: 1024, y: 0), options: [])
-          let attr: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 500), .foregroundColor: NSColor.white]
-          let str = NSAttributedString(string: "AS", attributes: attr)
-          let r = str.boundingRect(with: size, options: .usesLineFragmentOrigin)
-          str.draw(at: NSPoint(x: (size.width - r.width)/2, y: (size.height - r.height)/2 - 80))
-          img.unlockFocus()
-          let data = img.tiffRepresentation!
-          let rep = NSBitmapImageRep(data: data)!
-          let png = rep.representation(using: .png, properties: [:])!
-          let u = URL(fileURLWithPath: "TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/icon-1024.png")
-          try! png.write(to: u)
-          ICON
-          swift make_icon.swift
-          cat << 'JSON' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
-          { "images": [ { "size": "1024x1024", "idiom": "ios-marketing", "filename": "icon-1024.png", "scale": "1x" } ], "info": { "version": 1, "author": "xcode" } }
-          JSON
-          cat << 'JSON' > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
-          { "info": { "version": 1, "author": "xcode" } }
-          JSON
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -1048,14 +1043,22 @@ jobs:
 
       - name: Build and Archive
         run: |
-          xcodebuild archive             -project TrollMusicApp.xcodeproj             -scheme TrollMusicApp             -archivePath build/TrollMusicApp.xcarchive             -configuration Release             CODE_SIGN_IDENTITY=""             CODE_SIGNING_REQUIRED=NO             CODE_SIGNING_ALLOWED=NO             DEVELOPMENT_ASSET_PATHS=""
+          xcodebuild archive \
+            -project TrollMusicApp.xcodeproj \
+            -scheme TrollMusicApp \
+            -archivePath build/TrollMusicApp.xcarchive \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_ASSET_PATHS=""
 
       - name: Package IPA (TrollStore format)
         run: |
           mkdir -p Payload
           cp -r build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app Payload/
           zip -r TrollMusicApp.ipa Payload
-          
+
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
