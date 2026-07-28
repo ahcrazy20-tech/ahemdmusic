@@ -93,7 +93,7 @@ jobs:
           import SwiftUI
           import AVFoundation
           
-          class AppDelegate: NSObject, UIApplicationDelegate {
+          class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
                   do {
                       try AVAudioSession.sharedInstance().setCategory(AVAudioSession.Category.playback, mode: AVAudioSession.Mode.default, options: [])
@@ -387,7 +387,7 @@ jobs:
                               Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack); Spacer()
                               Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward); Spacer()
                               Button(action: { webViewModel.grabAudio() }) { Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple) }; Spacer()
-                              Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text("\(webViewModel.tabs.count)").font(.caption).bold() } }; Spacer()
+                              Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text(String(webViewModel.tabs.count)).font(.caption).bold() } }; Spacer()
                               Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
                           }.padding().background(Color(uiColor: .secondarySystemBackground))
                       }
@@ -395,14 +395,14 @@ jobs:
                           Color.black.opacity(0.8).edgesIgnoringSafeArea(.all)
                           VStack {
                               HStack { Text("Tabs").font(.title).bold().foregroundColor(.white); Spacer(); Button("Done") { webViewModel.showTabs = false }.foregroundColor(.blue) }.padding()
-                              ScrollView { VStack(spacing: 15) { ForEach(0..<webViewModel.tabs.count, id: \.self) { index in HStack { VStack(alignment: .leading) { Text("Tab \(index + 1)").font(.headline).foregroundColor(.white); Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer(); Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) } }.padding().background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3)).cornerRadius(10).onTapGesture { webViewModel.currentTabIndex = index; urlString = webViewModel.tabs[index].urlString; webViewModel.showTabs = false } }; Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) { HStack { Image(systemName: "plus"); Text("New Tab") }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10) }.padding(.top, 10) }.padding(.horizontal) }
+                              ScrollView { VStack(spacing: 15) { ForEach(0..<webViewModel.tabs.count, id: \.self) { index in HStack { VStack(alignment: .leading) { Text("Tab " + String(index + 1)).font(.headline).foregroundColor(.white); Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer(); Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) } }.padding().background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3)).cornerRadius(10).onTapGesture { webViewModel.currentTabIndex = index; urlString = webViewModel.tabs[index].urlString; webViewModel.showTabs = false } }; Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) { HStack { Image(systemName: "plus"); Text("New Tab") }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10) }.padding(.top, 10) }.padding(.horizontal) }
                           }
                       }
                   }
                   .alert("Grab Audio", isPresented: $webViewModel.showNamePrompt) {
                       TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { }
                   } message: { Text("Enter a name to save the audio track.") }
-                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
+                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved " + webViewModel.downloadFileName) }
                   .alert("Download Error", isPresented: $webViewModel.showBlobError) { Button("OK", role: .cancel) { } } message: { Text("Failed to extract media from this page. Try Magic DL.") }
               }
           }
@@ -650,10 +650,10 @@ jobs:
                   var parent: WebViewUI
                   init(_ parent: WebViewUI) { self.parent = parent }
                   func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }; return nil }
-                  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { let hideAdsScript = "var badEls = document.querySelectorAll('.ad, .ads, .popup, iframe'); badEls.forEach(el => el.remove());"; webView.evaluateJavaScript(hideAdsScript, completionHandler: nil) }
+                  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { let hideAdsScript = "var badEls = document.querySelectorAll('.ad, .ads, .popup, iframe'); badEls.forEach(el => el.remove());"; webView.evaluateJavaScript(hideAdsScript, completionHandler: { _, _ in }) }
                   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { parent.viewModel.canGoBack = webView.canGoBack; parent.viewModel.canGoForward = webView.canGoForward; if let currentURL = webView.url?.absoluteString { if !parent.urlString.contains(" ") { parent.urlString = currentURL }; parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL } }
-                  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { if navigationAction.shouldPerformDownload { decisionHandler(.download); return }; decisionHandler(.allow) }
-                  func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) { if navigationResponse.canShowMIMEType == false { decisionHandler(.download); return }; if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm") || mime.contains("zip") || mime.contains("octet-stream") { decisionHandler(.download); return }; decisionHandler(.allow) }
+                  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { if navigationAction.shouldPerformDownload { decisionHandler(WKNavigationActionPolicy.download); return }; decisionHandler(WKNavigationActionPolicy.allow) }
+                  func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) { if navigationResponse.canShowMIMEType == false { decisionHandler(WKNavigationResponsePolicy.download); return }; if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm") || mime.contains("zip") || mime.contains("octet-stream") { decisionHandler(WKNavigationResponsePolicy.download); return }; decisionHandler(WKNavigationResponsePolicy.allow) }
                   func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
                   func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = self }
                   func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) { let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]; let cleanName = suggestedFilename.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggestedFilename; let destPath = destDir.appendingPathComponent(cleanName); try? fm.removeItem(at: destPath); DispatchQueue.main.async { self.parent.viewModel.downloadFileName = cleanName }; completionHandler(destPath) }
@@ -771,7 +771,7 @@ jobs:
               
               func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
                   let js = extractors[attempt].js.replacingOccurrences(of: "$$URL$$", with: self.targetUrl)
-                  webView.evaluateJavaScript(js, completionHandler: nil)
+                  webView.evaluateJavaScript(js, completionHandler: { _, _ in })
                   
                   DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
                       if !self.isDownloadStarted {
@@ -782,13 +782,13 @@ jobs:
               }
               
               func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-                  if navigationResponse.canShowMIMEType == false { decisionHandler(.download); return }
-                  if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("octet-stream") || mime.contains("mp4") { decisionHandler(.download); return }
-                  decisionHandler(.allow)
+                  if navigationResponse.canShowMIMEType == false { decisionHandler(WKNavigationResponsePolicy.download); return }
+                  if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("octet-stream") || mime.contains("mp4") { decisionHandler(WKNavigationResponsePolicy.download); return }
+                  decisionHandler(WKNavigationResponsePolicy.allow)
               }
               
               func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = self }
-              func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { if navigationAction.shouldPerformDownload { decisionHandler(.download); return }; decisionHandler(.allow) }
+              func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { if navigationAction.shouldPerformDownload { decisionHandler(WKNavigationActionPolicy.download); return }; decisionHandler(WKNavigationActionPolicy.allow) }
               func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
               
               func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
@@ -902,7 +902,9 @@ jobs:
                       self.isDownloading = true
                       self.downloadProgress = 0.0
                       self.statusMessage = "Extracting Native Audio..."
-                      let cleanName = "\(track.user?.username ?? "Unknown") - \(track.title ?? "Unknown")".replacingOccurrences(of: "/", with: "-")
+                      let uName = track.user?.username ?? "Unknown"
+                      let tName = track.title ?? "Unknown"
+                      let cleanName = (uName + " - " + tName).replacingOccurrences(of: "/", with: "-")
                       
                       guard let transcodings = track.media?.transcodings else {
                           DispatchQueue.main.async { self.errorDetails = "No media streams found."; self.showError = true; self.isDownloading = false }
@@ -917,7 +919,8 @@ jobs:
                           }
                       }
                       
-                      guard let finalStreamUrl = streamUrl, let targetUrl = URL(string: finalStreamUrl + "?client_id=\(scClientId)&track_authorization=\(track.track_authorization ?? "")") else {
+                      let auth = track.track_authorization ?? ""
+                      guard let finalStreamUrl = streamUrl, let targetUrl = URL(string: finalStreamUrl + "?client_id=\(scClientId)&track_authorization=\(auth)") else {
                           DispatchQueue.main.async { self.errorDetails = "No progressive MP3 found."; self.showError = true; self.isDownloading = false }
                           return
                       }
@@ -940,7 +943,7 @@ jobs:
               
               func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
                   let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-                  DispatchQueue.main.async { self.downloadProgress = progress; if self.playlistTotal == 0 { self.statusMessage = "Downloading... \(Int(progress * 100))%" } }
+                  DispatchQueue.main.async { self.downloadProgress = progress; if self.playlistTotal == 0 { self.statusMessage = "Downloading... " + String(Int(progress * 100)) + "%" } }
               }
               
               func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
