@@ -29,7 +29,7 @@ jobs:
 
       - name: Create project config
         run: |
-          cat << 'PROJ' | sed 's/^ *//' > project.yml
+          cat << 'PROJ' > project.yml
           name: TrollMusicApp
           options:
             bundleIdPrefix: com.ahmedsoliman
@@ -1010,7 +1010,7 @@ jobs:
       - name: Generate Icon
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset
-          cat << 'ICON' | sed 's/^ *//' > make_icon.swift
+          cat << 'ICON' > make_icon.swift
           import AppKit
           let size = CGSize(width: 1024, height: 1024)
           let img = NSImage(size: size)
@@ -1031,10 +1031,10 @@ jobs:
           try! png.write(to: u)
           ICON
           swift make_icon.swift
-          cat << 'JSON' | sed 's/^ *//' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
+          cat << 'JSON' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
           { "images": [ { "size": "1024x1024", "idiom": "ios-marketing", "filename": "icon-1024.png", "scale": "1x" } ], "info": { "version": 1, "author": "xcode" } }
           JSON
-          cat << 'JSON' | sed 's/^ *//' > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
+          cat << 'JSON' > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
           { "info": { "version": 1, "author": "xcode" } }
           JSON
 
