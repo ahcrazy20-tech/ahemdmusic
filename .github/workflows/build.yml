@@ -96,7 +96,7 @@ jobs:
           class AppDelegate: NSObject, UIApplicationDelegate {
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
                   do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                      try AVAudioSession.sharedInstance().setCategory(AVAudioSession.Category.playback, mode: AVAudioSession.Mode.default, options: [])
                       try AVAudioSession.sharedInstance().setActive(true)
                       UIApplication.shared.beginReceivingRemoteControlEvents()
                   } catch { print("Background Audio Setup Failed") }
@@ -127,7 +127,7 @@ jobs:
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
           
-          class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate, URLSessionDelegate {
+          class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
               static let shared = MusicManager()
               @Published var songs: [Song] = []
               @Published var playlists: [Playlist] = []
@@ -265,7 +265,7 @@ jobs:
               
               func playSong(_ song: Song) {
                   do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                      try AVAudioSession.sharedInstance().setCategory(AVAudioSession.Category.playback, mode: AVAudioSession.Mode.default, options: [])
                       try AVAudioSession.sharedInstance().setActive(true)
                       UIApplication.shared.beginReceivingRemoteControlEvents()
                       
@@ -313,10 +313,10 @@ jobs:
               
               func setupRemoteCommandCenter() {
                   let commandCenter = MPRemoteCommandCenter.shared()
-                  commandCenter.playCommand.addTarget { [weak self] _ in guard let self = self else { return .commandFailed }; if self.isPlaying { return .commandFailed }; self.togglePlayPause(); return .success }
-                  commandCenter.pauseCommand.addTarget { [weak self] _ in guard let self = self else { return .commandFailed }; if !self.isPlaying { return .commandFailed }; self.togglePlayPause(); return .success }
-                  commandCenter.nextTrackCommand.addTarget { [weak self] _ in self?.playNext(); return .success }
-                  commandCenter.previousTrackCommand.addTarget { [weak self] _ in self?.playPrevious(); return .success }
+                  commandCenter.playCommand.addTarget { [weak self] (event) -> MPRemoteCommandHandlerStatus in guard let self = self else { return .commandFailed }; if self.isPlaying { return .commandFailed }; self.togglePlayPause(); return .success }
+                  commandCenter.pauseCommand.addTarget { [weak self] (event) -> MPRemoteCommandHandlerStatus in guard let self = self else { return .commandFailed }; if !self.isPlaying { return .commandFailed }; self.togglePlayPause(); return .success }
+                  commandCenter.nextTrackCommand.addTarget { [weak self] (event) -> MPRemoteCommandHandlerStatus in self?.playNext(); return .success }
+                  commandCenter.previousTrackCommand.addTarget { [weak self] (event) -> MPRemoteCommandHandlerStatus in self?.playPrevious(); return .success }
               }
               
               func updateNowPlayingInfo() {
@@ -701,7 +701,7 @@ jobs:
           
           struct WebExtractor { let url: String; let js: String }
           
-          class HiddenWebEngine: NSObject, WKNavigationDelegate, WKDownloadDelegate, URLSessionDelegate {
+          class HiddenWebEngine: NSObject, WKNavigationDelegate, WKDownloadDelegate {
               var webView: WKWebView!
               var targetUrl: String = ""
               var targetName: String = ""
@@ -803,7 +803,7 @@ jobs:
               func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) { self.attempt += 1; self.executeNextAttempt() }
           }
           
-          class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate, URLSessionDelegate {
+          class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""; @Published var downloadProgress: Double = 0.0
               @Published var showSuccess = false; @Published var showError = false; @Published var errorDetails = ""
               @Published var searchResults: [SCTrack] = []; @Published var showSearchResults: Bool = false
