@@ -43,6 +43,11 @@ jobs:
           echo '          - "Preview Content"' >> project.yml
           echo '    info:' >> project.yml
           echo '      path: TrollMusicApp/TrollMusicApp/Info.plist' >> project.yml
+          echo '      properties:' >> project.yml
+          echo '        UILaunchScreen: {}' >> project.yml
+          echo '        UIBackgroundModes: [audio]' >> project.yml
+          echo '        NSAppTransportSecurity:' >> project.yml
+          echo '          NSAllowsArbitraryLoads: true' >> project.yml
           echo '    settings:' >> project.yml
           echo '      GENERATE_INFOPLIST_FILE: "NO"' >> project.yml
           echo '      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon' >> project.yml
@@ -51,47 +56,14 @@ jobs:
           mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
           mkdir -p TrollMusicApp/TrollMusicApp
-          echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '<plist version="1.0">' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '<dict>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <key>CFBundleIdentifier</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <string>com.ahmedsoliman.trollmusicapp</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <key>CFBundleName</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <string>AS Music</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <key>CFBundleExecutable</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <string>TrollMusicApp</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <key>CFBundleVersion</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <string>1.0</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <key>CFBundleShortVersionString</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <string>1.0</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <key>UIBackgroundModes</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <array>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '        <string>audio</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    </array>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <key>NSAppTransportSecurity</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <dict>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '        <key>NSAllowsArbitraryLoads</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '        <true/>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    </dict>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <key>UILaunchScreen</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '    <dict/>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '</dict>' >> TrollMusicApp/TrollMusicApp/Info.plist
-          echo '</plist>' >> TrollMusicApp/TrollMusicApp/Info.plist
-
-      - name: Create Info.plist
-        run: |
-          mkdir -p TrollMusicApp/TrollMusicApp
-          echo "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPCFET0NUWVBFIHBsaXN0IFBVQkxJQyAiLS8vQXBwbGUvL0RURCBQTElTVCAxLjAvL0VOIiAiaHR0cDovL3d3dy5hcHBsZS5jb20vRFREcy9Qcm9wZXJ0eUxpc3QtMS4wLmR0ZCI+CjxwbGlzdCB2ZXJzaW9uPSIxLjAiPgo8ZGljdD4KICAgIDxrZXk+Q0ZCdW5kbGVJZGVudGlmaWVyPC9rZXk+CiAgICA8c3RyaW5nPmNvbS5haG1lZHNvbGltYW4udHJvbGxtdXNpY2FwcDwvc3RyaW5nPgogICAgPGtleT5DRkJ1bmRsZU5hbWU8L2tleT4KICAgIDxzdHJpbmc+QVMgTXVzaWM8L3N0cmluZz4KICAgIDxrZXk+Q0ZCdW5kbGVFeGVjdXRhYmxlPC9rZXk+CiAgICA8c3RyaW5nPlRyb2xsTXVzaWNBcHA8L3N0cmluZz4KICAgIDxrZXk+Q0ZCdW5kbGVWZXJzaW9uPC9rZXk+CiAgICA8c3RyaW5nPjEuMDwvc3RyaW5nPgogICAgPGtleT5DRkJ1bmRsZVNob3J0VmVyc2lvblN0cmluZzwva2V5PgogICAgPHN0cmluZz4xLjA8L3N0cmluZz4KICAgIDxrZXk+VUlCYWNrZ3JvdW5kTW9kZXM8L2tleT4KICAgIDxhcnJheT4KICAgICAgICA8c3RyaW5nPmF1ZGlvPC9zdHJpbmc+CiAgICA8L2FycmF5PgogICAgPGtleT5OU0FwcFRyYW5zcG9ydFNlY3VyaXR5PC9rZXk+CiAgICA8ZGljdD4KICAgICAgICA8a2V5Pk5TQWxsb3dzQXJiaXRyYXJ5TG9hZHM8L2tleT4KICAgICAgICA8dHJ1ZS8+CiAgICA8L2RpY3Q+CiAgICA8a2V5PlVJTGF1bmNoU2NyZWVuPC9rZXk+CiAgICA8ZGljdC8+CjwvZGljdD4KPC9wbGlzdD4K" | base64 -d > TrollMusicApp/TrollMusicApp/Info.plist
 
       - name: Write Swift Files
         run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
           import AVFoundation
-          import Foundation
-          import Foundation
           
-          class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
+          class AppDelegate: NSObject, UIApplicationDelegate {
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
                   do {
                       try AVAudioSession.sharedInstance().setCategory(AVAudioSession.Category.playback, mode: AVAudioSession.Mode.default, options: [])
@@ -120,10 +92,6 @@ jobs:
           import AVFoundation
           import MediaPlayer
           import SwiftUI
-          import Foundation
-          import Foundation
-          import Foundation
-          import Foundation
           
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
@@ -239,7 +207,7 @@ jobs:
                       UIApplication.shared.beginReceivingRemoteControlEvents()
                       
                       audioPlayer?.stop(); avPlayer?.pause()
-                      NotificationCenter.default.removeObserver(self, name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: nil)
+                      NotificationCenter.default.removeObserver(self, name: AVPlayerItem.didPlayToEndTimeNotification, object: nil)
                       
                       do {
                           audioPlayer = try AVAudioPlayer(contentsOf: song.url)
@@ -252,7 +220,7 @@ jobs:
                           avPlayer = AVPlayer(playerItem: playerItem)
                           avPlayer?.play()
                           useAVPlayer = true
-                          NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: playerItem)
+                          NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: AVPlayerItem.didPlayToEndTimeNotification, object: playerItem)
                       }
                       currentSong = song; isPlaying = true
                       updateNowPlayingInfo()
@@ -307,7 +275,6 @@ jobs:
 
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
-          import Foundation
           
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
           
@@ -349,8 +316,8 @@ jobs:
               var body: some View {
                   ZStack {
                       VStack(spacing: 0) {
-                          HStack { TextField("Search Google or enter website", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.webSearch).textInputAutocapitalization(.never); Button("Go") { webViewModel.loadUrl(urlString) } }.padding(8).background(Color(uiColor: .secondarySystemBackground))
-                          ScrollView(.horizontal, showsIndicators: false) { HStack { Button("Google") { webViewModel.loadUrl("https://google.com") }.buttonStyle(.borderedProminent).tint(.blue); Button("YouTube") { webViewModel.loadUrl("https://youtube.com") }.buttonStyle(.borderedProminent).tint(.red); Button("SoundCloud") { webViewModel.loadUrl("https://soundcloud.com") }.buttonStyle(.borderedProminent).tint(.orange); Button("Audiomack") { webViewModel.loadUrl("https://audiomack.com") }.buttonStyle(.borderedProminent).tint(.yellow); Button("Spotify Playlists") { webViewModel.loadUrl("https://spotifydown.com") }.buttonStyle(.borderedProminent).tint(.green) }.padding(.horizontal).padding(.bottom, 8) }.background(Color(uiColor: .secondarySystemBackground))
+                          HStack { TextField("Search Google or enter website", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.webSearch).textInputAutocapitalization(.never); Button("Go") { webViewModel.loadUrl(urlString) } }.padding(8).background(Color(UIColor.secondarySystemBackground))
+                          ScrollView(.horizontal, showsIndicators: false) { HStack { Button("Google") { webViewModel.loadUrl("https://google.com") }.buttonStyle(.borderedProminent).tint(.blue); Button("YouTube") { webViewModel.loadUrl("https://youtube.com") }.buttonStyle(.borderedProminent).tint(.red); Button("SoundCloud") { webViewModel.loadUrl("https://soundcloud.com") }.buttonStyle(.borderedProminent).tint(.orange); Button("Audiomack") { webViewModel.loadUrl("https://audiomack.com") }.buttonStyle(.borderedProminent).tint(.yellow); Button("Spotify Playlists") { webViewModel.loadUrl("https://spotifydown.com") }.buttonStyle(.borderedProminent).tint(.green) }.padding(.horizontal).padding(.bottom, 8) }.background(Color(UIColor.secondarySystemBackground))
                           WebViewUI(viewModel: webViewModel, urlString: $urlString)
                           HStack {
                               Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack); Spacer()
@@ -358,7 +325,7 @@ jobs:
                               Button(action: { webViewModel.grabAudio() }) { Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple) }; Spacer()
                               Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text("\(webViewModel.tabs.count)").font(.caption).bold() } }; Spacer()
                               Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
-                          }.padding().background(Color(uiColor: .secondarySystemBackground))
+                          }.padding().background(Color(UIColor.secondarySystemBackground))
                       }
                       if webViewModel.showTabs {
                           Color.black.opacity(0.8).edgesIgnoringSafeArea(.all)
@@ -490,8 +457,6 @@ jobs:
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
           import WebKit
-          import Foundation
-          import Foundation
           
           struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String; var title: String }
           
@@ -639,10 +604,6 @@ jobs:
           import SwiftUI
           import AVFoundation
           import WebKit
-          import Foundation
-          import Foundation
-          import Foundation
-          import Foundation
           
           
           struct WebExtractor { let url: String; let js: String }
@@ -971,7 +932,7 @@ jobs:
               var body: some View {
                   NavigationView {
                       ZStack {
-                          Color(uiColor: .systemGroupedBackground).edgesIgnoringSafeArea(.all)
+                          Color(UIColor.systemGroupedBackground).edgesIgnoringSafeArea(.all)
                           ScrollView {
                               VStack(spacing: 30) {
                                   Image(systemName: "sparkles").resizable().frame(width: 80, height: 80).foregroundColor(.purple).padding(.top, 40)
@@ -980,7 +941,7 @@ jobs:
                                   VStack(spacing: 15) {
                                       Text("Search by Name").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
                                       HStack {
-                                          TextField("e.g. Amr Diab", text: $searchInput).padding().background(Color(uiColor: .secondarySystemGroupedBackground)).cornerRadius(12)
+                                          TextField("e.g. Amr Diab", text: $searchInput).padding().background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
                                           Button(action: { downloader.performMagicSearch(query: searchInput) }) { if downloader.isSearching { ProgressView().padding() } else { Image(systemName: "magnifyingglass").foregroundColor(.white).padding().background(Color.purple).cornerRadius(12) } }.disabled(downloader.isSearching || searchInput.isEmpty)
                                       }
                                   }.padding(.horizontal)
@@ -989,8 +950,8 @@ jobs:
                                   
                                   VStack(spacing: 15) {
                                       Text("Paste Video OR Playlist Link!").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
-                                      TextField("Paste YouTube link...", text: $linkInput).padding().background(Color(uiColor: .secondarySystemGroupedBackground)).cornerRadius(12).textInputAutocapitalization(.never)
-                                      TextField("Save As (Name of Song or Playlist)", text: $nameInput).padding().background(Color(uiColor: .secondarySystemGroupedBackground)).cornerRadius(12)
+                                      TextField("Paste YouTube link...", text: $linkInput).padding().background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(12).textInputAutocapitalization(.never)
+                                      TextField("Save As (Name of Song or Playlist)", text: $nameInput).padding().background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
                                       
                                       Button(action: { downloader.downloadLinkOrPlaylist(urlStr: linkInput, name: nameInput) }) {
                                           Text("Extract MP3").font(.headline).foregroundColor(.white).frame(maxWidth: .infinity).padding().background(Color.blue).cornerRadius(12)
