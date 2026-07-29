@@ -166,7 +166,7 @@ jobs:
               
               func deleteSong(_ song: Song) { try? fileManager.removeItem(at: song.url); loadSongs() }
               func renameSong(song: Song, newName: String) {
-                  let ext = song.url.pathExtension; let newUrl = documentsDirectory.appendingPathComponent("\(newName).\(ext)")
+                  let ext = song.url.pathExtension; let newUrl = documentsDirectory.appendingPathComponent(newName + "." + ext)
                   do { try fileManager.moveItem(at: song.url, to: newUrl); loadSongs()
                       if currentSong?.id == song.id { currentSong?.title = newName; currentSong?.url = newUrl; updateNowPlayingInfo() }
                   } catch {}
@@ -207,7 +207,7 @@ jobs:
                       UIApplication.shared.beginReceivingRemoteControlEvents()
                       
                       audioPlayer?.stop(); avPlayer?.pause()
-                      NotificationCenter.default.removeObserver(self, name: AVPlayerItem.didPlayToEndTimeNotification, object: nil)
+                      NotificationCenter.default.removeObserver(self, name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: nil)
                       
                       do {
                           audioPlayer = try AVAudioPlayer(contentsOf: song.url)
@@ -220,7 +220,7 @@ jobs:
                           avPlayer = AVPlayer(playerItem: playerItem)
                           avPlayer?.play()
                           useAVPlayer = true
-                          NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: AVPlayerItem.didPlayToEndTimeNotification, object: playerItem)
+                          NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: playerItem)
                       }
                       currentSong = song; isPlaying = true
                       updateNowPlayingInfo()
@@ -316,29 +316,29 @@ jobs:
               var body: some View {
                   ZStack {
                       VStack(spacing: 0) {
-                          HStack { TextField("Search Google or enter website", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.webSearch).textInputAutocapitalization(.never); Button("Go") { webViewModel.loadUrl(urlString) } }.padding(8).background(Color(UIColor.secondarySystemBackground))
-                          ScrollView(.horizontal, showsIndicators: false) { HStack { Button("Google") { webViewModel.loadUrl("https://google.com") }.buttonStyle(.borderedProminent).tint(.blue); Button("YouTube") { webViewModel.loadUrl("https://youtube.com") }.buttonStyle(.borderedProminent).tint(.red); Button("SoundCloud") { webViewModel.loadUrl("https://soundcloud.com") }.buttonStyle(.borderedProminent).tint(.orange); Button("Audiomack") { webViewModel.loadUrl("https://audiomack.com") }.buttonStyle(.borderedProminent).tint(.yellow); Button("Spotify Playlists") { webViewModel.loadUrl("https://spotifydown.com") }.buttonStyle(.borderedProminent).tint(.green) }.padding(.horizontal).padding(.bottom, 8) }.background(Color(UIColor.secondarySystemBackground))
+                          HStack { TextField("Search Google or enter website", text: $urlString).textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.webSearch).textInputAutocapitalization(.never); Button("Go") { webViewModel.loadUrl(urlString) } }.padding(8).background(Color(uiColor: UIColor.secondarySystemBackground))
+                          ScrollView(.horizontal, showsIndicators: false) { HStack { Button("Google") { webViewModel.loadUrl("https://google.com") }.buttonStyle(.borderedProminent).tint(.blue); Button("YouTube") { webViewModel.loadUrl("https://youtube.com") }.buttonStyle(.borderedProminent).tint(.red); Button("SoundCloud") { webViewModel.loadUrl("https://soundcloud.com") }.buttonStyle(.borderedProminent).tint(.orange); Button("Audiomack") { webViewModel.loadUrl("https://audiomack.com") }.buttonStyle(.borderedProminent).tint(.yellow); Button("Spotify Playlists") { webViewModel.loadUrl("https://spotifydown.com") }.buttonStyle(.borderedProminent).tint(.green) }.padding(.horizontal).padding(.bottom, 8) }.background(Color(uiColor: UIColor.secondarySystemBackground))
                           WebViewUI(viewModel: webViewModel, urlString: $urlString)
                           HStack {
                               Button(action: { webViewModel.goBack() }) { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack); Spacer()
                               Button(action: { webViewModel.goForward() }) { Image(systemName: "chevron.forward").font(.title2) }.disabled(!webViewModel.canGoForward); Spacer()
                               Button(action: { webViewModel.grabAudio() }) { Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple) }; Spacer()
-                              Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text("\(webViewModel.tabs.count)").font(.caption).bold() } }; Spacer()
+                              Button(action: { webViewModel.showTabs = true }) { ZStack { RoundedRectangle(cornerRadius: 6).stroke(Color.primary, lineWidth: 2).frame(width: 24, height: 24); Text(String(webViewModel.tabs.count)).font(.caption).bold() } }; Spacer()
                               Button(action: { webViewModel.refresh() }) { Image(systemName: "arrow.clockwise").font(.title2) }
-                          }.padding().background(Color(UIColor.secondarySystemBackground))
+                          }.padding().background(Color(uiColor: UIColor.secondarySystemBackground))
                       }
                       if webViewModel.showTabs {
                           Color.black.opacity(0.8).edgesIgnoringSafeArea(.all)
                           VStack {
                               HStack { Text("Tabs").font(.title).bold().foregroundColor(.white); Spacer(); Button("Done") { webViewModel.showTabs = false }.foregroundColor(.blue) }.padding()
-                              ScrollView { VStack(spacing: 15) { ForEach(0..<webViewModel.tabs.count, id: \.self) { index in HStack { VStack(alignment: .leading) { Text("Tab \(index + 1)").font(.headline).foregroundColor(.white); Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer(); Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) } }.padding().background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3)).cornerRadius(10).onTapGesture { webViewModel.currentTabIndex = index; urlString = webViewModel.tabs[index].urlString; webViewModel.showTabs = false } }; Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) { HStack { Image(systemName: "plus"); Text("New Tab") }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10) }.padding(.top, 10) }.padding(.horizontal) }
+                              ScrollView { VStack(spacing: 15) { ForEach(0..<webViewModel.tabs.count, id: \.self) { index in HStack { VStack(alignment: .leading) { Text("Tab " + String(index + 1)).font(.headline).foregroundColor(.white); Text(webViewModel.tabs[index].urlString).font(.caption).foregroundColor(.gray).lineLimit(1) }; Spacer(); Button(action: { webViewModel.closeTab(at: index) }) { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.title) } }.padding().background(webViewModel.currentTabIndex == index ? Color.purple.opacity(0.5) : Color.gray.opacity(0.3)).cornerRadius(10).onTapGesture { webViewModel.currentTabIndex = index; urlString = webViewModel.tabs[index].urlString; webViewModel.showTabs = false } }; Button(action: { webViewModel.addNewTab(); webViewModel.showTabs = false }) { HStack { Image(systemName: "plus"); Text("New Tab") }.font(.headline).foregroundColor(.white).padding().frame(maxWidth: .infinity).background(Color.blue).cornerRadius(10) }.padding(.top, 10) }.padding(.horizontal) }
                           }
                       }
                   }
                   .alert("Grab Audio", isPresented: $webViewModel.showNamePrompt) {
                       TextField("Song Name", text: $webViewModel.customSongName); Button("Download") { webViewModel.confirmDownload(with: webViewModel.customSongName) }; Button("Cancel", role: .cancel) { }
                   } message: { Text("Enter a name to save the audio track.") }
-                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved \(webViewModel.downloadFileName)") }
+                  .alert("Download Complete", isPresented: $webViewModel.showDownloadAlert) { Button("OK", role: .cancel) { musicManager.loadSongs() } } message: { Text("Saved " + webViewModel.downloadFileName) }
                   .alert("Download Error", isPresented: $webViewModel.showBlobError) { Button("OK", role: .cancel) { } } message: { Text("Failed to extract media from this page. Try Magic DL.") }
               }
           }
@@ -367,7 +367,7 @@ jobs:
               
               var body: some View {
                   ZStack {
-                      LinearGradient(gradient: Gradient(colors: [generateColor(for: musicManager.currentSong?.title ?? "Unknown"), Color.black]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
+                      LinearGradient(gradient: Gradient(colors: [generateColor(for: musicManager.currentSong?.title ?? "Unknown"), Color.black] as [Color]), startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
                       VStack(spacing: 30) {
                           HStack { Button(action: { dismiss() }) { Image(systemName: "chevron.down").font(.title2).foregroundColor(.white) }; Spacer(); VStack(spacing: 2) { if let song = musicManager.currentSong, musicManager.isFavorite(song: song) { Text("FROM LIKED SONGS").font(.caption).bold().foregroundColor(.white.opacity(0.6)) } else { Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6)) }; Text("AS Music").font(.subheadline).bold().foregroundColor(.white) }; Spacer(); Button(action: { showTimerOptions = true }) { Image(systemName: "moon.fill").foregroundColor(musicManager.sleepTimerMinutes > 0 ? .purple : .white) } }.padding()
                           ZStack { RoundedRectangle(cornerRadius: 15).fill(generateColor(for: musicManager.currentSong?.title ?? "")).frame(width: 320, height: 320).shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 15); Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit).frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8)) }.padding(.top, 10)
@@ -539,7 +539,7 @@ jobs:
                       return 
                   }
                   let server = servers[attempt]
-                  guard let apiUrl = URL(string: "\(server)/api/json") else { return }
+                  guard let apiUrl = URL(string: server + "/api/json") else { return }
                   var request = URLRequest(url: apiUrl); request.httpMethod = "POST"
                   request.setValue("application/json", forHTTPHeaderField: "Accept"); request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.setValue(server, forHTTPHeaderField: "Origin")
                   let parameters: [String: Any] = ["url": urlStr, "isAudioOnly": true, "aFormat": "mp3", "isNoTTWatermark": true]
@@ -547,13 +547,13 @@ jobs:
                   
                   URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
                       guard let self = self else { return }
-                      if let data = data, let res = try? JSONDecoder().decode(CobaltResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) {
+                      if let data = data, let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let audioUrlStr = dict["url"] as? String, let audioUrl = URL(string: audioUrlStr) {
                           let finalName = name + ".mp3"
                           let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]; let destPath = destDir.appendingPathComponent(finalName)
                           URLSession.shared.downloadTask(with: audioUrl) { localUrl, response, _ in guard let localUrl = localUrl else { return }; try? FileManager.default.moveItem(at: localUrl, to: destPath); try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path); DispatchQueue.main.async { self.downloadFileName = finalName; self.showDownloadAlert = true } }
                   
                       } else {
-                          guard let v10Url = URL(string: "\(server)/") else { return }
+                          guard let v10Url = URL(string: server + "/") else { return }
                           var req10 = request; req10.url = v10Url
                           let params10: [String: Any] = ["url": urlStr, "downloadMode": "audio", "audioFormat": "mp3"]
                           req10.httpBody = try? JSONSerialization.data(withJSONObject: params10)
@@ -729,7 +729,7 @@ jobs:
           struct SCUser: Codable { let username: String? }
           struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
           
-          class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
+          class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDelegate, URLSessionDownloadDelegate {
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""; @Published var downloadProgress: Double = 0.0
               @Published var showSuccess = false; @Published var showError = false; @Published var errorDetails = ""
               @Published var searchResults: [SCTrack] = []; @Published var showSearchResults: Bool = false
@@ -771,7 +771,7 @@ jobs:
               func performMagicSearch(query: String) {
                   guard !query.isEmpty else { return }; isSearching = true; statusMessage = "Searching SoundCloud..."; stopPreview()
                   let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-                  guard let url = URL(string: "https://api-v2.soundcloud.com/search/tracks?q=\(encodedQuery)&client_id=" + scClientId + "&limit=25") else { return }
+                  guard let url = URL(string: "https://api-v2.soundcloud.com/search/tracks?q=" + encodedQuery + "&client_id=" + scClientId + "&limit=25") else { return }
                   var req = URLRequest(url: url)
                   req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
                   URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
@@ -873,7 +873,7 @@ jobs:
                   let server = servers[attempt]
                   DispatchQueue.main.async { self.statusMessage = "Bypassing Security (Server \(attempt + 1))..." }
                   
-                  guard let apiUrl = URL(string: "\(server)/api/json") else { return }
+                  guard let apiUrl = URL(string: server + "/api/json") else { return }
                   var request = URLRequest(url: apiUrl); request.httpMethod = "POST"
                   request.setValue("application/json", forHTTPHeaderField: "Accept"); request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.setValue(server, forHTTPHeaderField: "Origin")
                   let parameters: [String: Any] = ["url": urlStr, "isAudioOnly": true, "aFormat": "mp3", "isNoTTWatermark": true]
@@ -885,7 +885,7 @@ jobs:
                           self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
                           let task = self.downloadSession.downloadTask(with: audioUrl); 
                       } else {
-                          guard let v10Url = URL(string: "\(server)/") else { return }
+                          guard let v10Url = URL(string: server + "/") else { return }
                           var req10 = request; req10.url = v10Url
                           let params10: [String: Any] = ["url": urlStr, "downloadMode": "audio", "audioFormat": "mp3"]
                           req10.httpBody = try? JSONSerialization.data(withJSONObject: params10)
@@ -915,7 +915,7 @@ jobs:
                       return
                   }
                   let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                  let destPath = destDir.appendingPathComponent("\(finalDownloadName).mp3")
+                  let destPath = destDir.appendingPathComponent(finalDownloadName + ".mp3")
                   try? fm.removeItem(at: destPath); try? fm.moveItem(at: location, to: destPath); try? fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
                   DispatchQueue.main.async { 
                       if self.playlistTotal > 0 { self.processNextPlaylistSong() } 
@@ -932,7 +932,7 @@ jobs:
               var body: some View {
                   NavigationView {
                       ZStack {
-                          Color(UIColor.systemGroupedBackground).edgesIgnoringSafeArea(.all)
+                          Color(uiColor: UIColor.systemGroupedBackground).edgesIgnoringSafeArea(.all)
                           ScrollView {
                               VStack(spacing: 30) {
                                   Image(systemName: "sparkles").resizable().frame(width: 80, height: 80).foregroundColor(.purple).padding(.top, 40)
@@ -941,7 +941,7 @@ jobs:
                                   VStack(spacing: 15) {
                                       Text("Search by Name").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
                                       HStack {
-                                          TextField("e.g. Amr Diab", text: $searchInput).padding().background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
+                                          TextField("e.g. Amr Diab", text: $searchInput).padding().background(Color(uiColor: UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
                                           Button(action: { downloader.performMagicSearch(query: searchInput) }) { if downloader.isSearching { ProgressView().padding() } else { Image(systemName: "magnifyingglass").foregroundColor(.white).padding().background(Color.purple).cornerRadius(12) } }.disabled(downloader.isSearching || searchInput.isEmpty)
                                       }
                                   }.padding(.horizontal)
@@ -950,8 +950,8 @@ jobs:
                                   
                                   VStack(spacing: 15) {
                                       Text("Paste Video OR Playlist Link!").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
-                                      TextField("Paste YouTube link...", text: $linkInput).padding().background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(12).textInputAutocapitalization(.never)
-                                      TextField("Save As (Name of Song or Playlist)", text: $nameInput).padding().background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
+                                      TextField("Paste YouTube link...", text: $linkInput).padding().background(Color(uiColor: UIColor.secondarySystemGroupedBackground)).cornerRadius(12).textInputAutocapitalization(.never)
+                                      TextField("Save As (Name of Song or Playlist)", text: $nameInput).padding().background(Color(uiColor: UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
                                       
                                       Button(action: { downloader.downloadLinkOrPlaylist(urlStr: linkInput, name: nameInput) }) {
                                           Text("Extract MP3").font(.headline).foregroundColor(.white).frame(maxWidth: .infinity).padding().background(Color.blue).cornerRadius(12)
