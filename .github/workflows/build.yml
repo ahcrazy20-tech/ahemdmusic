@@ -789,6 +789,7 @@ jobs:
                                   Button("SpotifyDown"){ webViewModel.loadUrl("https://spotifydown.com") } .buttonStyle(.borderedProminent).tint(.green)
                                   Button("Anghami")    { webViewModel.loadUrl("https://play.anghami.com") }.buttonStyle(.borderedProminent).tint(.purple)
                                   Button("YTMP3")      { webViewModel.loadUrl("http://nbike.pl/") }        .buttonStyle(.borderedProminent).tint(.pink)
+                                  Button("CNVMP3")     { webViewModel.loadUrl("https://cnvmp3.com/v55") }  .buttonStyle(.borderedProminent).tint(.teal)
                               }.padding(.horizontal).padding(.bottom, 8)
                           }.background(Color(uiColor: UIColor.secondarySystemBackground))
 
@@ -2052,11 +2053,16 @@ jobs:
               private let workerURLs = [
                   "https://fancy-sea-5d3d.holy-breeze-fec5.workers.dev/?m=i",
               ]
-              // Backup converter: y2jar (used by nbike.pl) — returns direct M4A audio (no MP3 re-encode).
+              // Backup converter #2: y2jar (used by nbike.pl) — returns direct M4A audio (no MP3 re-encode).
               // iOS AVAudioPlayer plays M4A/AAC natively, so we just save as .m4a.
               private let y2jarInfoURL = "https://v2.y2jar.cc/i/"
               private let y2jarStreamTokenURL = "https://capi.y2jar.cc/st/a/"
               private let y2jarDownloadURL = "https://capi.y2jar.cc/s/"
+              // Backup converter #3: cnvmp3.com — cobalt-free PHP backend, returns direct MP3 link.
+              // Flow: POST get_video_data.php {url,token:"1234"} → title;
+              //       POST download_video_ucep.php {url, quality:4 (320k?), title, formatValue:1} → download_link
+              private let cnvmp3GetInfoURL = "https://cnvmp3.com/get_video_data.php"
+              private let cnvmp3ConvertURL  = "https://cnvmp3.com/download_video_ucep.php"
               private let thetaMirrors = ["theta", "ocococ", "cocooo", "cooooo", "occcco", "ccccco", "cococo", "ococco", "ccocco"]
               private func workerStart(task: DownloadTask) {
                   tryWorkerOnMirrors(task: task, mirrors: workerURLs, index: 0)
@@ -2191,7 +2197,7 @@ jobs:
                   DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.3) }
                   // Step 1: get video info (/i/<vid>)
                   guard let infoURL = URL(string: "\(y2jarInfoURL)\(task.vid)") else {
-                      beginMp3Juice(task: task); return
+                      startCnvmp3(task: task); return
                   }
                   var req = URLRequest(url: infoURL, timeoutInterval: 15)
                   req.httpMethod = "GET"
@@ -2203,12 +2209,12 @@ jobs:
                       guard let data = data, err == nil,
                             let info = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any],
                             let _ = info["title"] as? String else {
-                          log.warning("y2jar info failed, falling back to mp3juice")
-                          self.beginMp3Juice(task: task); return
+                          log.warning("y2jar info failed, falling back to cnvmp3")
+                          self.startCnvmp3(task: task); return
                       }
                       // Step 2: get stream token
                       guard let tokenURL = URL(string: "\(self.y2jarStreamTokenURL)\(task.vid)?a=") else {
-                          self.beginMp3Juice(task: task); return
+                          self.startCnvmp3(task: task); return
                       }
                       var tr = URLRequest(url: tokenURL, timeoutInterval: 15)
                       tr.httpMethod = "GET"
@@ -2221,7 +2227,7 @@ jobs:
                           guard let tdata = tdata, terr == nil,
                                 let tj = (try? JSONSerialization.jsonObject(with: tdata)) as? [String:Any],
                                 let token = tj["token"] as? String, token.count > 10 else {
-                              self.beginMp3Juice(task: task); return
+                              self.startCnvmp3(task: task); return
                           }
                           DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.7) }
                           // Step 3: build download URL (M4A), ensure filename ends in .m4a
@@ -2235,10 +2241,77 @@ jobs:
                           }
                           let enc = token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token
                           guard let dlURL = URL(string: "\(self.y2jarDownloadURL)\(task.vid)?token=\(enc)") else {
-                              self.beginMp3Juice(task: task); return
+                              self.startCnvmp3(task: task); return
                           }
                           DispatchQueue.main.async { task.fileName = finalName }
                           self.startMediaDownload(task: task, url: dlURL, finalName: finalName, validate: true)
+                      }.resume()
+                  }.resume()
+              }
+
+              // ---- cnvmp3.com fallback (layer 4) — returns direct MP3 ---------------
+              private func startCnvmp3(task: DownloadTask) {
+                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.4) }
+                  guard let infoURL = URL(string: cnvmp3GetInfoURL),
+                        let convURL = URL(string: cnvmp3ConvertURL) else {
+                      beginMp3Juice(task: task); return
+                  }
+                  let ytURL = "https://www.youtube.com/watch?v=\(task.vid)"
+                  // Step 1: get title
+                  var infoReq = URLRequest(url: infoURL, timeoutInterval: 20)
+                  infoReq.httpMethod = "POST"
+                  infoReq.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
+                  infoReq.setValue("application/json", forHTTPHeaderField: "Accept")
+                  infoReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                  infoReq.setValue("https://cnvmp3.com/v55", forHTTPHeaderField: "Referer")
+                  infoReq.setValue("https://cnvmp3.com", forHTTPHeaderField: "Origin")
+                  let infoBody: [String:Any] = ["url": ytURL, "token": "1234"]
+                  guard let infoBodyData = try? JSONSerialization.data(withJSONObject: infoBody) else {
+                      beginMp3Juice(task: task); return
+                  }
+                  infoReq.httpBody = infoBodyData
+                  URLSession.shared.dataTask(with: infoReq) { [weak self] data, resp, err in
+                      guard let self = self else { return }
+                      var resolvedTitle = task.proposedName
+                      if let data = data, err == nil,
+                         let j = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any],
+                         let t = j["title"] as? String, !t.isEmpty {
+                          resolvedTitle = t
+                      }
+                      DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.6) }
+                      // Step 2: request conversion (returns download_link)
+                      var convReq = URLRequest(url: convURL, timeoutInterval: 90)
+                      convReq.httpMethod = "POST"
+                      convReq.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
+                      convReq.setValue("application/json", forHTTPHeaderField: "Accept")
+                      convReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                      convReq.setValue("https://cnvmp3.com/v55", forHTTPHeaderField: "Referer")
+                      convReq.setValue("https://cnvmp3.com", forHTTPHeaderField: "Origin")
+                      // quality: 4 maps to high-quality MP3 on cnvmp3 (frontend default); formatValue: 1 = audio
+                      let convBody: [String:Any] = ["url": ytURL, "quality": 4, "title": resolvedTitle, "formatValue": 1]
+                      guard let convBodyData = try? JSONSerialization.data(withJSONObject: convBody) else {
+                          self.beginMp3Juice(task: task); return
+                      }
+                      convReq.httpBody = convBodyData
+                      URLSession.shared.dataTask(with: convReq) { [weak self] cdata, _, cerr in
+                          guard let self = self else { return }
+                          guard let cdata = cdata, cerr == nil,
+                                let cj = (try? JSONSerialization.jsonObject(with: cdata)) as? [String:Any],
+                                let dl = cj["download_link"] as? String, !dl.isEmpty,
+                                let dlURL = URL(string: dl) else {
+                              log.warning("cnvmp3 failed, falling back to mp3juice/theta")
+                              self.beginMp3Juice(task: task); return
+                          }
+                          DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.9) }
+                          var finalName = task.proposedName
+                          let fl = finalName.lowercased()
+                          if !["mp3","m4a","wav","webm","mp4","aac","ogg","opus"].contains(where: { fl.hasSuffix("." + $0) }) {
+                              finalName += ".mp3"
+                          }
+                          DispatchQueue.main.async { task.fileName = finalName }
+                          // Override Referer for the CDN download
+                          self.startMediaDownload(task: task, url: dlURL, finalName: finalName, validate: true,
+                                                  referer: "https://cnvmp3.com/v55")
                       }.resume()
                   }.resume()
               }
@@ -2402,11 +2475,12 @@ jobs:
               }
 
               // ---- Actual binary download ------------------------------------------
-              private func startMediaDownload(task: DownloadTask, url: URL, finalName: String, validate: Bool = false) {
+              private func startMediaDownload(task: DownloadTask, url: URL, finalName: String, validate: Bool = false,
+                                              referer: String = "https://mp3juice.sc/") {
                   DispatchQueue.main.async { self.objectWillChange.send(); task.status = .downloading(0); task.fileName = finalName }
                   var req = URLRequest(url: url, timeoutInterval: 300)
                   req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
-                  req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
+                  req.setValue(referer, forHTTPHeaderField: "Referer")
                   req.setValue("bytes=0-", forHTTPHeaderField: "Range")
                   let t = session.downloadTask(with: req)
                   activeURLTask = t
