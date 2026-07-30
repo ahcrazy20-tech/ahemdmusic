@@ -402,7 +402,7 @@ jobs:
               @objc func songFinished() {
                   DispatchQueue.main.async {
                       // repeat one: replay current
-                      if self.repeatMode == .one, let cur = self.currentSong {
+                      if self.repeatMode == .one, let _ = self.currentSong {
                           self.seek(to: 0)
                           if self.useAVPlayer { self.avPlayer?.play() } else { self.audioPlayer?.play() }
                           self.isPlaying = true
@@ -413,7 +413,7 @@ jobs:
               }
               func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
                   DispatchQueue.main.async {
-                      if self.repeatMode == .one, let cur = self.currentSong {
+                      if self.repeatMode == .one, let _ = self.currentSong {
                           self.seek(to: 0)
                           self.audioPlayer?.play()
                           self.isPlaying = true
@@ -1250,7 +1250,7 @@ jobs:
                                       HStack {
                                           Text("Search Results").font(.title2).bold().foregroundColor(.white)
                                           Spacer()
-                                          Button { downloader.showSearchResults = false; downloader.stopPreview() } label: {
+                                          Button { downloader.showSearchResults = false } label: {
                                               Image(systemName: "xmark.circle.fill").font(.title).foregroundColor(.gray)
                                           }
                                       }.padding()
@@ -1750,7 +1750,7 @@ jobs:
                   tryThetaInit(mirrors: thetaMirrors, ts: ts, key: key, retries: 3) { [weak self] convertURL in
                       guard let self = self else { return }
                       guard let convertURL = convertURL else {
-                          self.workerStart(task); return
+                          self.workerStart(task: task); return
                       }
                       DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.3); task.fileName = task.proposedName }
                       let ts2 = Int(Date().timeIntervalSince1970 * 1000)
@@ -2107,7 +2107,7 @@ jobs:
 
               func requestLinkDownload(link: String, name: String) {
                   let s = link.trimmingCharacters(in: .whitespacesAndNewlines)
-                  var vid: String?; var platform = "yt"
+                  var vid: String?; let platform = "yt"
                   if s.lowercased().contains("soundcloud.com") {
                       errorDetails = "For SoundCloud links, please search by artist/track name."
                       showError = true; return
