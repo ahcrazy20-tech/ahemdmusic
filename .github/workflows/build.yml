@@ -111,13 +111,17 @@ jobs:
               override init() {
                   super.init()
                   loadSongs()
+                  setupRemoteCommands()
+              }
+              
+              func setupRemoteCommands() {
                   let cc = MPRemoteCommandCenter.shared()
                   cc.playCommand.addTarget { _ in self.togglePlayPause(); return .success }
                   cc.pauseCommand.addTarget { _ in self.togglePlayPause(); return .success }
                   cc.nextTrackCommand.addTarget { _ in self.playNext(); return .success }
                   cc.previousTrackCommand.addTarget { _ in self.playPrevious(); return .success }
               }
-              
+
               func loadSongs() {
                   let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                   let files = (try? FileManager.default.contentsOfDirectory(at: docs, includingPropertiesForKeys: nil)) ?? []
@@ -127,11 +131,19 @@ jobs:
 
               func playSong(_ song: Song) {
                   audioPlayer?.stop(); avPlayer?.pause()
-                  if song.url.scheme?.hasPrefix("http") == true {
-                      avPlayer = AVPlayer(url: song.url); avPlayer?.play(); useAVPlayer = true
+                  if song.url.absoluteString.hasPrefix("http") {
+                      avPlayer = AVPlayer(url: song.url)
+                      avPlayer?.play()
+                      useAVPlayer = true
                   } else {
-                      do { audioPlayer = try AVAudioPlayer(contentsOf: song.url); audioPlayer?.delegate = self; audioPlayer?.play(); useAVPlayer = false }
-                      catch { avPlayer = AVPlayer(url: song.url); avPlayer?.play(); useAVPlayer = true }
+                      do {
+                          audioPlayer = try AVAudioPlayer(contentsOf: song.url)
+                          audioPlayer?.delegate = self
+                          audioPlayer?.play()
+                          useAVPlayer = false
+                      } catch {
+                          avPlayer = AVPlayer(url: song.url); avPlayer?.play(); useAVPlayer = true
+                      }
                   }
                   currentSong = song; isPlaying = true; startProgressTimer(); updateNowPlaying()
               }
@@ -160,7 +172,7 @@ jobs:
                       DispatchQueue.main.async {
                           self.currentTime = self.useAVPlayer ? (self.avPlayer?.currentTime().seconds ?? 0) : (self.audioPlayer?.currentTime ?? 0)
                           let d = self.useAVPlayer ? (self.avPlayer?.currentItem?.duration.seconds ?? 1) : (self.audioPlayer?.duration ?? 1)
-                          self.duration = (d.isNaN || d.isInfinite) ? 1 : d
+                          self.duration = (d.isNaN || d.isInfinite || d <= 0) ? 1 : d
                       }
                   }
               }
@@ -173,7 +185,7 @@ jobs:
 
               func updateNowPlaying() {
                   var info = [String: Any]()
-                  info[MPMediaItemPropertyTitle] = currentSong?.title ?? "AS Media"
+                  info[MPMediaItemPropertyTitle] = currentSong?.title ?? "Remote Media"
                   info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
                   MPNowPlayingInfoCenter.default().nowPlayingInfo = info
               }
@@ -181,7 +193,104 @@ jobs:
           }
           SWIFT
 
-      - name: Write Master Discovery Engine (Automation Fallback)
+      - name: Write Ad-Blocked Web Hub (Original Logic)
+        run: |
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebHub.swift
+          import SwiftUI
+          import WebKit
+
+          struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String }
+
+          class WebViewModel: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
+              @Published var tabs: [BrowserTab] = []; @Published var currentTabIndex = 0; @Published var showTabs = false; @Published var urlInput = "https://google.com"
+              @Published var isGrabbing = false
+              
+              override init() {
+                  super.init()
+                  addNewTab()
+              }
+              
+              func addNewTab() {
+                  let config = WKWebViewConfiguration()
+                  config.preferences.javaScriptCanOpenWindowsAutomatically = false
+                  config.allowsInlineMediaPlayback = true
+                  let wv = WKWebView(frame: .zero, configuration: config)
+                  wv.navigationDelegate = self; wv.uiDelegate = self; wv.allowsBackForwardNavigationGestures = true
+                  tabs.append(BrowserTab(webView: wv, urlString: "https://google.com"))
+                  currentTabIndex = tabs.count - 1
+                  loadUrl("https://google.com")
+              }
+              
+              func loadUrl(_ s: String) {
+                  var f = s.trimmingCharacters(in: .whitespaces)
+                  if !f.hasPrefix("http") { f = "https://www.google.com/search?q=" + f.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)! }
+                  if let u = URL(string: f) { tabs[currentTabIndex].webView.load(URLRequest(url: u)) }
+              }
+              
+              func grab() {
+                  isGrabbing = true
+                  // THE ORIGINAL LOGIC YOU SHARED
+                  let js = "(function() { var mediaElements = document.querySelectorAll('audio, video, source'); for (var i = 0; i < mediaElements.length; i++) { if (mediaElements[i].src && mediaElements[i].src.startsWith('http')) { return mediaElements[i].src; } } return null; })()"
+                  tabs[currentTabIndex].webView.evaluateJavaScript(js) { res, _ in
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.isGrabbing = false }
+                      if let u = res as? String { SmartDownloaderManager.shared.startDownload(url: u, name: "Web_Grab_\(Int.random(in: 100...999))") }
+                  }
+              }
+              
+              func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+                  let adBlock = "var bad = document.querySelectorAll('iframe, .ad, .popup, banner, .overlay, [id*=\"google_ads\"]'); bad.forEach(el => el.remove());"
+                  webView.evaluateJavaScript(adBlock)
+                  if let url = webView.url?.absoluteString { self.urlInput = url }
+              }
+          }
+
+          struct BrowserMainView: View {
+              @StateObject var vm = WebViewModel()
+              var body: some View {
+                  VStack(spacing: 0) {
+                      HStack {
+                          TextField("URL or Search", text: $vm.urlInput).textFieldStyle(.roundedBorder).textInputAutocapitalization(.never)
+                          Button("Go") { vm.loadUrl(vm.urlInput) }
+                          Button(action: { vm.showTabs = true }) { Image(systemName: "square.on.square").font(.title3).foregroundColor(.purple) }
+                      }.padding(8).background(Color(uiColor: .systemBackground))
+                      
+                      ZStack {
+                          ForEach(vm.tabs.indices, id: \.self) { i in
+                              WebViewContainer(wv: vm.tabs[i].webView).opacity(i == vm.currentTabIndex ? 1 : 0)
+                          }
+                      }
+                      
+                      HStack {
+                          Button(action: { vm.tabs[vm.currentTabIndex].webView.goBack() }) { Image(systemName: "chevron.left").font(.title2) }
+                          Spacer()
+                          Button(action: { vm.grab() }) {
+                              ZStack {
+                                  Circle().fill(vm.isGrabbing ? Color.green : Color.purple).frame(width: 55, height: 55).shadow(radius: 5)
+                                  Image(systemName: vm.isGrabbing ? "checkmark" : "arrow.down.to.line.compact").foregroundColor(.white).font(.title.bold())
+                              }
+                          }
+                          Spacer()
+                          Button(action: { vm.tabs[vm.currentTabIndex].webView.reload() }) { Image(systemName: "arrow.clockwise").font(.title2) }
+                      }.padding().background(Color(uiColor: .secondarySystemBackground))
+                  }
+                  .sheet(isPresented: $vm.showTabs) {
+                      NavigationView {
+                          List(vm.tabs.indices, id: \.self) { i in
+                              Text("Tab \(i+1): \(vm.tabs[i].webView.url?.host ?? "New Tab")").onTapGesture { vm.currentTabIndex = i; vm.showTabs = false }
+                          }.navigationTitle("Tabs").toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Add Tab") { vm.addNewTab(); vm.showTabs = false } } }
+                      }
+                  }
+              }
+          }
+
+          struct WebViewContainer: UIViewRepresentable {
+              let wv: WKWebView
+              func makeUIView(context: Context) -> WKWebView { wv }
+              func updateUIView(_ uiView: WKWebView, context: Context) {}
+          }
+          SWIFT
+
+      - name: Write Smart Downloader (SC + Multi-Server Fallback)
         run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
           import SwiftUI
@@ -198,38 +307,6 @@ jobs:
           struct SCUser: Codable { let username: String? }
           struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
 
-          class MasterDiscovery: NSObject, WKNavigationDelegate {
-              var webView: WKWebView!; var tUrl = ""; var tName = ""
-              override init() {
-                  super.init()
-                  let config = WKWebViewConfiguration()
-                  config.preferences.javaScriptCanOpenWindowsAutomatically = false
-                  webView = WKWebView(frame: .zero, configuration: config)
-                  webView.navigationDelegate = self
-              }
-              func automate(url: String, name: String) {
-                  self.tUrl = url; self.tName = name
-                  // Automate cobalt.tools as it is the strongest bypass
-                  webView.load(URLRequest(url: URL(string: "https://cobalt.tools")!))
-              }
-              func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-                  let js = """
-                  setTimeout(function() {
-                      var input = document.querySelector('input[type="url"], #url-input');
-                      if(input) {
-                          input.value = '\(tUrl)';
-                          input.dispatchEvent(new Event('input', { bubbles: true }));
-                          setTimeout(function() {
-                              var btn = document.querySelector('button[type="submit"], #download-button');
-                              if(btn) btn.click();
-                          }, 500);
-                      }
-                  }, 1500);
-                  """
-                  webView.evaluateJavaScript(js)
-              }
-          }
-
           class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
               static let shared = SmartDownloaderManager()
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""
@@ -239,7 +316,6 @@ jobs:
               private var downloadSession: URLSession!; private var currentServerIdx = 0; private var watchdog: Timer?
               private let servers = ["https://co.wuk.sh", "https://cobalt.api.timeless.top", "https://co.eepy.today", "https://cobalt.q0.is", "https://api.vidiq.org", "https://api.cobalt.tools"]
               private var cUrl = ""; private var cName = ""; private let scId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
-              private let masterEngine = MasterDiscovery()
 
               override init() {
                   super.init()
@@ -264,11 +340,14 @@ jobs:
               private func tryNextServer() {
                   watchdog?.invalidate()
                   if currentServerIdx >= servers.count {
-                      DispatchQueue.main.async { self.statusMessage = "APIs Failed. Using Discovery Engine..." }
-                      masterEngine.automate(url: cUrl, name: cName); return
+                      DispatchQueue.main.async { self.isDownloading = false; self.errorDetails = "Direct APIs failed. Try finding the link in the Web Hub."; self.showError = true }
+                      return
                   }
-                  DispatchQueue.main.async { self.statusMessage = "Bypassing Server \(self.currentServerIdx + 1)..." }
-                  watchdog = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { _ in self.currentServerIdx += 1; self.tryNextServer() }
+                  
+                  DispatchQueue.main.async { self.statusMessage = "Bypassing (Server \(self.currentServerIdx + 1))..." }
+                  watchdog = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { _ in
+                      self.currentServerIdx += 1; self.tryNextServer()
+                  }
 
                   var req = URLRequest(url: URL(string: servers[currentServerIdx] + "/api/json")!)
                   req.httpMethod = "POST"; req.setValue("application/json", forHTTPHeaderField: "Content-Type"); req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -291,90 +370,10 @@ jobs:
               }
 
               func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-                  let safeName = cName.replacingOccurrences(of: "/", with: "-")
-                  let dest = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("\(safeName).mp3")
+                  let dest = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("\(cName.replacingOccurrences(of: \"/\", with: \"-\")).mp3")
                   try? FileManager.default.removeItem(at: dest); try? FileManager.default.moveItem(at: location, to: dest)
                   DispatchQueue.main.async { self.isDownloading = false; self.showSuccess = true; MusicManager.shared.loadSongs() }
               }
-          }
-          SWIFT
-
-      - name: Write Web Hub (Original Grabber Restored)
-        run: |
-          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebHub.swift
-          import SwiftUI
-          import WebKit
-
-          struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String }
-
-          class WebViewModel: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
-              @Published var tabs: [BrowserTab] = []; @Published var currentTabIndex = 0; @Published var showTabs = false; @Published var urlInput = "https://google.com"
-              @Published var grabStatus = false
-              override init() { super.init(); addNewTab() }
-              
-              func addNewTab() {
-                  let config = WKWebViewConfiguration()
-                  config.preferences.javaScriptCanOpenWindowsAutomatically = false
-                  let wv = WKWebView(frame: .zero, configuration: config)
-                  wv.navigationDelegate = self; wv.uiDelegate = self; wv.allowsBackForwardNavigationGestures = true
-                  tabs.append(BrowserTab(webView: wv, urlString: "https://google.com"))
-                  currentTabIndex = tabs.count - 1; loadUrl("https://google.com")
-              }
-              func loadUrl(_ s: String) {
-                  var f = s.trimmingCharacters(in: .whitespaces)
-                  if !f.hasPrefix("http") { f = "https://www.google.com/search?q=" + f.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)! }
-                  if let u = URL(string: f) { tabs[currentTabIndex].webView.load(URLRequest(url: u)) }
-              }
-              func grab() {
-                  self.grabStatus = true
-                  // REVERTED TO ORIGINAL GRABBER LOGIC
-                  let js = "(function() { var mediaElements = document.querySelectorAll('audio, video, source'); for (var i = 0; i < mediaElements.length; i++) { if (mediaElements[i].src && mediaElements[i].src.startsWith('http')) { return mediaElements[i].src; } } return window.location.href; })()"
-                  tabs[currentTabIndex].webView.evaluateJavaScript(js) { res, _ in
-                      DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.grabStatus = false }
-                      if let u = res as? String { SmartDownloaderManager.shared.startDownload(url: u, name: "Web_Grab_\(Int.random(in: 10...99))") }
-                  }
-              }
-              func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-                  let js = "var bad = document.querySelectorAll('iframe, .ad, .popup, banner, .overlay'); bad.forEach(el => el.remove());"
-                  webView.evaluateJavaScript(js)
-              }
-          }
-
-          struct BrowserMainView: View {
-              @StateObject var vm = WebViewModel()
-              var body: some View {
-                  VStack(spacing: 0) {
-                      HStack {
-                          TextField("URL", text: $vm.urlInput).textFieldStyle(.roundedBorder).textInputAutocapitalization(.never)
-                          Button("Go") { vm.loadUrl(vm.urlInput) }
-                          Button(action: { vm.showTabs = true }) { Image(systemName: "square.on.square").foregroundColor(.purple) }
-                      }.padding(8)
-                      ZStack {
-                          ForEach(vm.tabs.indices, id: \.self) { i in
-                              WebViewContainer(wv: vm.tabs[i].webView).opacity(i == vm.currentTabIndex ? 1 : 0)
-                          }
-                      }
-                      HStack {
-                          Button(action: { vm.tabs[vm.currentTabIndex].webView.goBack() }) { Image(systemName: "chevron.left") }
-                          Spacer(); Button(action: { vm.grab() }) { 
-                              ZStack { Circle().fill(vm.grabStatus ? Color.green : Color.purple).frame(width: 55, height: 55).shadow(radius: 4); Image(systemName: vm.grabStatus ? "checkmark" : "arrow.down").foregroundColor(.white).font(.title2.bold()) }
-                          }
-                          Spacer(); Button(action: { vm.tabs[vm.currentTabIndex].webView.reload() }) { Image(systemName: "arrow.clockwise") }
-                      }.padding().background(Color(uiColor: .secondarySystemBackground))
-                  }
-                  .sheet(isPresented: $vm.showTabs) {
-                      VStack {
-                          HStack { Text("Tabs").font(.title).bold(); Spacer(); Button("New Tab") { vm.addNewTab() } }.padding()
-                          List(vm.tabs.indices, id: \.self) { i in Text("Tab \(i+1)").padding().onTapGesture { vm.currentTabIndex = i; vm.showTabs = false } }
-                      }
-                  }
-              }
-          }
-
-          struct WebViewContainer: UIViewRepresentable {
-              let wv: WKWebView
-              func makeUIView(context: Context) -> WKWebView { wv }
-              func updateUIView(_ uiView: WKWebView, context: Context) {}
           }
           SWIFT
 
@@ -414,24 +413,31 @@ jobs:
 
           struct SmartDownloaderView: View {
               @StateObject var dl = SmartDownloaderManager.shared
-              @State private var search = ""; @State private var link = ""; @State private var name = ""
+              @State private var searchInput = ""
               var body: some View {
                   NavigationView {
                       ZStack {
-                          Color.black.ignoresSafeArea(); ScrollView {
-                              VStack(spacing: 20) {
-                                  Image(systemName: "sparkles").resizable().frame(width: 60, height: 60).foregroundColor(.purple).padding(.top)
-                                  VStack(spacing: 15) {
-                                      HStack { TextField("Search music...", text: $search).padding().background(Color.white.opacity(0.1)).cornerRadius(12); Button(action: { dl.performMagicSearch(query: search) }) { Image(systemName: "magnifyingglass").padding().background(Color.purple).cornerRadius(12) } }
-                                      TextField("Paste Link...", text: $link).padding().background(Color.white.opacity(0.1)).cornerRadius(12).textInputAutocapitalization(.never)
-                                      TextField("Name...", text: $name).padding().background(Color.white.opacity(0.1)).cornerRadius(12)
-                                      Button(action: { dl.startDownload(url: link, name: name) }) { 
-                                          Text(dl.isDownloading ? dl.statusMessage : "Download").bold().frame(maxWidth: .infinity).padding().background(Color.blue).cornerRadius(10)
-                                      }.disabled(dl.isDownloading)
-                                      if dl.isDownloading { ProgressView(value: dl.downloadProgress).accentColor(.purple).padding() }
-                                  }.padding().foregroundColor(.white)
-                              }
+                          Color.black.ignoresSafeArea()
+                          VStack(spacing: 25) {
+                              Image(systemName: "sparkles").resizable().frame(width: 60, height: 60).foregroundColor(.purple).padding(.top, 40)
+                              Text("Magic DL").font(.largeTitle).bold().foregroundColor(.white)
+                              
+                              VStack(spacing: 15) {
+                                  HStack {
+                                      TextField("Search songs by name...", text: $searchInput).padding().background(Color.white.opacity(0.1)).cornerRadius(12).foregroundColor(.white)
+                                      Button(action: { dl.performMagicSearch(query: searchInput) }) { Image(systemName: "magnifyingglass").padding().background(Color.purple).cornerRadius(12).foregroundColor(.white) }
+                                  }
+                                  
+                                  if dl.isDownloading {
+                                      VStack(spacing: 8) {
+                                          ProgressView(value: dl.downloadProgress).accentColor(.purple).scaleEffect(x: 1, y: 1.5)
+                                          Text(dl.statusMessage).font(.caption).foregroundColor(.purple)
+                                      }.padding()
+                                  }
+                              }.padding(.horizontal)
+                              Spacer()
                           }
+                          
                           if dl.showSearchResults {
                               Color.black.overlay(VStack(spacing: 0) {
                                   HStack { Text("Results").font(.title).bold(); Spacer(); Button("Close") { dl.showSearchResults = false } }.padding().foregroundColor(.white).background(Color.black)
@@ -454,6 +460,8 @@ jobs:
                           }
                       }.navigationBarHidden(true)
                   }
+                  .alert("Success", isPresented: $dl.showSuccess) { Button("OK") {} } message: { Text("Song saved to Library!") }
+                  .alert("Error", isPresented: $dl.showError) { Button("OK") {} } message: { Text(dl.errorDetails) }
               }
           }
 
