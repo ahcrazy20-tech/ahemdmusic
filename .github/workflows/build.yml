@@ -137,6 +137,7 @@ jobs:
           import AVFoundation
           import MediaPlayer
           import SwiftUI
+          import UIKit
 
           struct Song: Identifiable, Codable, Equatable {
               var id: UUID
@@ -149,6 +150,8 @@ jobs:
               var songIDs: [UUID]
           }
 
+          enum RepeatMode: Int { case off, all, one }
+
           class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
               static let shared = MusicManager()
 
@@ -157,15 +160,20 @@ jobs:
               @Published var currentSong: Song?
               @Published var isPlaying: Bool = false
               @Published var isShuffle: Bool = false
+              @Published var repeatMode: RepeatMode = .off
+              @Published var playbackRate: Float = 1.0
               @Published var sleepTimerMinutes: Int = 0
               @Published var currentTime: TimeInterval = 0.0
               @Published var duration: TimeInterval = 1.0
+              @Published var upNextQueue: [Song] = [] // play-next/play-later queue
 
               var audioPlayer: AVAudioPlayer?
               var avPlayer: AVPlayer?
+              var avPlayerItem: AVPlayerItem?
               var useAVPlayer = false
               var sleepTimer: Timer?
               var progressTimer: Timer?
+              var queueObserver: NSObjectProtocol?
 
               let fileManager = FileManager.default
               var documentsDirectory: URL {
@@ -181,7 +189,7 @@ jobs:
 
               func startProgressTimer() {
                   progressTimer?.invalidate()
-                  progressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                  progressTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
                       guard let self = self else { return }
                       DispatchQueue.main.async {
                           if self.useAVPlayer {
@@ -191,6 +199,8 @@ jobs:
                           } else {
                               self.currentTime = self.audioPlayer?.currentTime ?? 0.0
                               self.duration = self.audioPlayer?.duration ?? 1.0
+                              self.audioPlayer?.enableRate = true
+                              self.audioPlayer?.rate = self.playbackRate
                           }
                       }
                   }
@@ -199,10 +209,25 @@ jobs:
               func seek(to time: TimeInterval) {
                   if useAVPlayer {
                       avPlayer?.seek(to: CMTime(seconds: time, preferredTimescale: 1000))
+                      avPlayer?.rate = playbackRate
                   } else {
                       audioPlayer?.currentTime = time
+                      audioPlayer?.enableRate = true
+                      audioPlayer?.rate = isPlaying ? playbackRate : 0
                   }
                   updateNowPlayingInfo()
+              }
+
+              func setPlaybackRate(_ r: Float) {
+                  playbackRate = r
+                  UserDefaults.standard.set(r, forKey: "asmusic_rate")
+                  if useAVPlayer {
+                      avPlayer?.rate = isPlaying ? r : 0
+                      avPlayerItem?.audioTimePitchAlgorithm = .timeDomain
+                  } else {
+                      audioPlayer?.enableRate = true
+                      audioPlayer?.rate = isPlaying ? r : 0
+                  }
               }
 
               func formatTime(_ t: TimeInterval) -> String {
@@ -214,20 +239,24 @@ jobs:
               func loadSongs() {
                   do {
                       let files = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
-                      let audio = files.filter {
-                          ["mp3","m4a","wav","webm","mp4","aac","ogg"].contains($0.pathExtension.lowercased())
-                      }
+                      let audioExts = ["mp3","m4a","wav","webm","mp4","aac","ogg","opus"]
+                      let audio = files.filter { audioExts.contains($0.pathExtension.lowercased()) }
                       for f in audio {
                           try? fileManager.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: f.path)
                       }
                       DispatchQueue.main.async {
                           self.songs = audio.map { Song(id: UUID(), title: $0.deletingPathExtension().lastPathComponent, url: $0) }
-                              .sorted { $0.title < $1.title }
+                              .sorted { $0.title.lowercased() < $1.title.lowercased() }
                       }
                   } catch {}
               }
 
-              func deleteSong(_ s: Song) { try? fileManager.removeItem(at: s.url); loadSongs() }
+              func deleteSong(_ s: Song) {
+                  try? fileManager.removeItem(at: s.url)
+                  upNextQueue.removeAll { $0.id == s.id }
+                  loadSongs()
+              }
+
               func renameSong(song: Song, newName: String) {
                   let ext = song.url.pathExtension
                   let newUrl = documentsDirectory.appendingPathComponent(newName + "." + ext)
@@ -240,6 +269,18 @@ jobs:
                           updateNowPlayingInfo()
                       }
                   } catch {}
+              }
+
+              func shareSong(_ song: Song) {
+                  guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                        let root = scene.windows.first(where: \.isKeyWindow)?.rootViewController else { return }
+                  let ac = UIActivityViewController(activityItems: [song.url], applicationActivities: nil)
+                  if let pop = ac.popoverPresentationController {
+                      pop.sourceView = root.view
+                      pop.sourceRect = CGRect(x: root.view.bounds.midX, y: root.view.bounds.midY, width: 0, height: 0)
+                      pop.permittedArrowDirections = []
+                  }
+                  root.present(ac, animated: true)
               }
 
               func createPlaylist(name: String) {
@@ -282,6 +323,25 @@ jobs:
                   }
               }
 
+              // ---- Up Next queue ---------------------------------------------------
+              func playNext(_ song: Song) {
+                  if let cur = currentSong, cur.id == song.id { return }
+                  upNextQueue.insert(song, at: 0)
+                  objectWillChange.send()
+              }
+              func playLater(_ song: Song) {
+                  if let cur = currentSong, cur.id == song.id { return }
+                  if !upNextQueue.contains(where: { $0.id == song.id }) {
+                      upNextQueue.append(song)
+                  }
+                  objectWillChange.send()
+              }
+              func toggleRepeat() {
+                  repeatMode = RepeatMode(rawValue: (repeatMode.rawValue + 1) % 3) ?? .off
+                  UserDefaults.standard.set(repeatMode.rawValue, forKey: "asmusic_repeat")
+                  objectWillChange.send()
+              }
+
               func setSleepTimer(minutes: Int) {
                   sleepTimerMinutes = minutes; sleepTimer?.invalidate()
                   if minutes > 0 {
@@ -304,49 +364,113 @@ jobs:
 
                       audioPlayer?.stop(); avPlayer?.pause()
                       NotificationCenter.default.removeObserver(self, name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: nil)
+                      if let o = queueObserver { NotificationCenter.default.removeObserver(o); queueObserver = nil }
 
+                      // Try AVAudioPlayer first (mp3/m4a/wav/aac), fall back to AVPlayer
+                      var started = false
                       do {
-                          audioPlayer = try AVAudioPlayer(contentsOf: song.url)
-                          audioPlayer?.delegate = self
-                          audioPlayer?.prepareToPlay()
-                          audioPlayer?.play()
+                          let ap = try AVAudioPlayer(contentsOf: song.url)
+                          ap.delegate = self
+                          ap.enableRate = true
+                          ap.prepareToPlay()
+                          ap.rate = playbackRate
+                          ap.play()
+                          audioPlayer = ap
                           useAVPlayer = false
+                          started = true
                       } catch {
                           let item = AVPlayerItem(url: song.url)
-                          avPlayer = AVPlayer(playerItem: item)
-                          avPlayer?.play()
+                          item.audioTimePitchAlgorithm = .timeDomain
+                          let p = AVPlayer(playerItem: item)
+                          p.rate = playbackRate
+                          p.play()
+                          avPlayer = p
+                          avPlayerItem = item
                           useAVPlayer = true
                           NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: item)
+                          started = true
                       }
-                      currentSong = song; isPlaying = true
-                      updateNowPlayingInfo(); startProgressTimer()
+                      if started {
+                          currentSong = song; isPlaying = true
+                          updateNowPlayingInfo(); startProgressTimer()
+                          let gen = UIImpactFeedbackGenerator(style: .medium)
+                          gen.impactOccurred()
+                      }
                   } catch {}
               }
 
-              @objc func songFinished() { DispatchQueue.main.async { self.playNext() } }
+              @objc func songFinished() {
+                  DispatchQueue.main.async {
+                      // repeat one: replay current
+                      if self.repeatMode == .one, let cur = self.currentSong {
+                          self.seek(to: 0)
+                          if self.useAVPlayer { self.avPlayer?.play() } else { self.audioPlayer?.play() }
+                          self.isPlaying = true
+                          return
+                      }
+                      self.playNext(autoAdvance: true)
+                  }
+              }
               func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-                  DispatchQueue.main.async { self.playNext() }
+                  DispatchQueue.main.async {
+                      if self.repeatMode == .one, let cur = self.currentSong {
+                          self.seek(to: 0)
+                          self.audioPlayer?.play()
+                          self.isPlaying = true
+                          return
+                      }
+                      self.playNext(autoAdvance: true)
+                  }
               }
 
               func togglePlayPause() {
                   if useAVPlayer {
-                      if isPlaying { avPlayer?.pause() } else { avPlayer?.play() }
+                      if isPlaying { avPlayer?.pause() } else { avPlayer?.play(); avPlayer?.rate = playbackRate }
                   } else {
-                      if isPlaying { audioPlayer?.pause() } else { _ = audioPlayer?.play() }
+                      if isPlaying { audioPlayer?.pause() } else { _ = audioPlayer?.play(); audioPlayer?.rate = playbackRate }
                   }
                   isPlaying.toggle(); updateNowPlayingInfo()
               }
 
-              func playNext() {
-                  guard !songs.isEmpty else { return }
-                  if isShuffle { if let s = songs.randomElement() { playSong(s) } }
-                  else if let c = currentSong, let i = songs.firstIndex(of: c) { playSong(songs[(i+1)%songs.count]) }
+              func playNext() { playNext(autoAdvance: false) }
+              func playNext(autoAdvance: Bool) {
+                  guard !songs.isEmpty || !upNextQueue.isEmpty else {
+                      if repeatMode == .all, let first = songs.first { playSong(first) }
+                      else { isPlaying = false; currentSong = nil }
+                      return
+                  }
+                  // Pull from upNext queue first
+                  if !upNextQueue.isEmpty {
+                      let next = upNextQueue.removeFirst()
+                      playSong(next); return
+                  }
+                  if isShuffle {
+                      if let s = songs.filter({ $0.id != currentSong?.id }).randomElement() ?? songs.randomElement() {
+                          playSong(s)
+                      }
+                      return
+                  }
+                  guard let c = currentSong, let i = songs.firstIndex(of: c) else {
+                      if let first = songs.first { playSong(first) }
+                      return
+                  }
+                  if i + 1 < songs.count {
+                      playSong(songs[i+1])
+                  } else if repeatMode == .all {
+                      if let first = songs.first { playSong(first) }
+                  } else if autoAdvance {
+                      isPlaying = false
+                  }
               }
+
               func playPrevious() {
+                  if currentTime > 3 { seek(to: 0); return }
                   guard !songs.isEmpty else { return }
-                  if isShuffle { if let s = songs.randomElement() { playSong(s) } }
-                  else if let c = currentSong, let i = songs.firstIndex(of: c) {
-                      playSong(songs[(i-1+songs.count)%songs.count])
+                  if isShuffle { if let s = songs.randomElement() { playSong(s) }; return }
+                  if let c = currentSong, let i = songs.firstIndex(of: c), i > 0 {
+                      playSong(songs[i-1])
+                  } else if repeatMode == .all, let last = songs.last {
+                      playSong(last)
                   }
               }
 
@@ -364,6 +488,10 @@ jobs:
                   }
                   c.nextTrackCommand.addTarget { [weak self] _ in self?.playNext(); return .success }
                   c.previousTrackCommand.addTarget { [weak self] _ in self?.playPrevious(); return .success }
+                  c.changePlaybackPositionCommand.addTarget { [weak self] ev in
+                      guard let s = self, let e = ev as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+                      s.seek(to: e.positionTime); return .success
+                  }
               }
 
               func updateNowPlayingInfo() {
@@ -371,7 +499,8 @@ jobs:
                   var info: [String: Any] = [
                       MPMediaItemPropertyTitle: c.title,
                       MPMediaItemPropertyArtist: "AS Music",
-                      MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
+                      MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? playbackRate : 0.0,
+                      MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0
                   ]
                   if useAVPlayer {
                       let d = avPlayer?.currentItem?.duration.seconds ?? 0
@@ -393,6 +522,10 @@ jobs:
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
           import UIKit
+
+          func hideKeyboard() {
+              UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+          }
 
           func generateColor(for title: String) -> Color {
               return Color(hue: Double(abs(title.hashValue) % 100) / 100.0,
@@ -784,10 +917,32 @@ jobs:
                                   }
                               }
                               Spacer()
-                              if let song = musicManager.currentSong {
-                                  Button { musicManager.toggleFavorite(song: song) } label: {
-                                      Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart")
-                                          .font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white)
+                              HStack(spacing: 18) {
+                                  if let song = musicManager.currentSong {
+                                      Button { musicManager.toggleFavorite(song: song) } label: {
+                                          Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart")
+                                              .font(.title).foregroundColor(musicManager.isFavorite(song: song) ? .green : .white)
+                                      }
+                                      Menu {
+                                          Button { musicManager.shareSong(song) } label: {
+                                              Label("Share / Export", systemImage: "square.and.arrow.up")
+                                          }
+                                          Menu("Playback Speed") {
+                                              ForEach([0.75, 1.0, 1.25, 1.5, 2.0] as [Float], id: \.self) { rate in
+                                                  Button { musicManager.setPlaybackRate(rate) } label: {
+                                                      Label(String(format: "%.2gx", rate),
+                                                            systemImage: abs(musicManager.playbackRate - rate) < 0.01 ? "checkmark" : "")
+                                                  }
+                                              }
+                                          }
+                                          if musicManager.sleepTimerMinutes > 0 {
+                                              Button { musicManager.setSleepTimer(minutes: 0) } label: {
+                                                  Label("Cancel Sleep Timer", systemImage: "moon.zzz")
+                                              }
+                                          }
+                                      } label: {
+                                          Image(systemName: "ellipsis.circle").font(.title3).foregroundColor(.white)
+                                      }
                                   }
                               }
                           }.padding(.horizontal, 30)
@@ -823,10 +978,19 @@ jobs:
                               Button { musicManager.playNext() } label: {
                                   Image(systemName: "forward.fill").font(.system(size: 35)).foregroundColor(.white)
                               }
-                              Button { } label: {
-                                  Image(systemName: "repeat").font(.title2).foregroundColor(.white.opacity(0.5))
+                              Button { musicManager.toggleRepeat() } label: {
+                                  ZStack(alignment: .topTrailing) {
+                                      Image(systemName: musicManager.repeatMode == .one ? "repeat.1" : "repeat").font(.title2)
+                                          .foregroundColor(musicManager.repeatMode == .off ? .white.opacity(0.5) : .green)
+                                  }
                               }
                           }.padding(.top, 10)
+                          // Speed pill
+                          HStack {
+                              Text(String(format: "Speed %.2gx", musicManager.playbackRate))
+                                  .font(.caption).foregroundColor(.white.opacity(0.8))
+                          }
+                          .padding(.horizontal, 12).padding(.vertical, 6).background(Color.white.opacity(0.15)).cornerRadius(20)
                           Spacer()
                       }
                   }
@@ -853,36 +1017,74 @@ jobs:
               var body: some View {
                   NavigationView {
                       List {
-                          ForEach(musicManager.songs) { song in
-                              HStack {
-                                  Button { musicManager.playSong(song) } label: {
-                                      HStack {
-                                          generateColor(for: song.title).frame(width: 40, height: 40).cornerRadius(5)
-                                              .overlay(Image(systemName: "music.note").foregroundColor(.white))
-                                          VStack(alignment: .leading) {
-                                              Text(song.title).font(.headline)
-                                              Text("AS Music").font(.caption).foregroundColor(.gray)
-                                          }
-                                          Spacer()
-                                      }.contentShape(Rectangle())
-                                  }.buttonStyle(BorderlessButtonStyle())
-                                  Button { showingOptionsFor = song } label: {
-                                      Image(systemName: "ellipsis").padding()
-                                  }.buttonStyle(BorderlessButtonStyle())
+                          if musicManager.songs.isEmpty {
+                              VStack(spacing: 12) {
+                                  Image(systemName: "sparkles").font(.system(size: 48)).foregroundColor(.purple)
+                                  Text("Your Library is Empty").font(.title2).bold()
+                                  Text("Use Magic DL or Web Hub to download songs")
+                                      .font(.subheadline).foregroundColor(.secondary).multilineTextAlignment(.center)
+                              }.padding(.vertical, 60).frame(maxWidth: .infinity)
+                          }
+                          Section {
+                              if !musicManager.upNextQueue.isEmpty {
+                                  ForEach(musicManager.upNextQueue) { song in
+                                      songRow(song, isQueued: true)
+                                  }
                               }
-                          }.onDelete { indexSet in
-                              indexSet.forEach { musicManager.deleteSong(musicManager.songs[$0]) }
+                          } header: {
+                              if !musicManager.upNextQueue.isEmpty { Text("Up Next") }
+                          }
+                          Section {
+                              ForEach(musicManager.songs) { song in
+                                  songRow(song, isQueued: false)
+                                      .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                          Button(role: .destructive) { musicManager.deleteSong(song) } label: {
+                                              Label("Delete", systemImage: "trash")
+                                          }
+                                          Button { musicManager.toggleFavorite(song: song) } label: {
+                                              Label(musicManager.isFavorite(song: song) ? "Unfav" : "Like",
+                                                    systemImage: musicManager.isFavorite(song: song) ? "heart.slash" : "heart")
+                                          }.tint(.purple)
+                                          Button { musicManager.playNext(song) } label: {
+                                              Label("Play Next", systemImage: "text.insert")
+                                          }.tint(.blue)
+                                      }
+                                      .contextMenu {
+                                          Button { musicManager.playSong(song) } label: { Label("Play Now", systemImage: "play.fill") }
+                                          Button { musicManager.playNext(song) } label: { Label("Play Next", systemImage: "text.insert") }
+                                          Button { musicManager.playLater(song) } label: { Label("Play Later", systemImage: "text.append") }
+                                          Button { musicManager.toggleFavorite(song: song) } label: {
+                                              Label(musicManager.isFavorite(song: song) ? "Remove from Liked" : "Add to Liked",
+                                                    systemImage: musicManager.isFavorite(song: song) ? "heart.slash" : "heart")
+                                          }
+                                          Menu("Add to Playlist") {
+                                              ForEach(musicManager.playlists) { pl in
+                                                  Button(pl.name) { musicManager.addSongToPlaylist(song: song, playlist: pl) }
+                                              }
+                                          }
+                                          Button { musicManager.shareSong(song) } label: { Label("Share", systemImage: "square.and.arrow.up") }
+                                          Button { showingRenameFor = song; newNameInput = song.title } label: { Label("Rename", systemImage: "pencil") }
+                                          Divider()
+                                          Button(role: .destructive) { musicManager.deleteSong(song) } label: { Label("Delete", systemImage: "trash") }
+                                      }
+                              }
                           }
                       }
                       .navigationTitle("Your Library").onAppear { musicManager.loadSongs() }
+                      .refreshable { musicManager.loadSongs() }
                       .confirmationDialog("Options",
                           isPresented: Binding(get: { showingOptionsFor != nil }, set: { if !$0 { showingOptionsFor = nil } }),
                           titleVisibility: .visible) {
                               if let song = showingOptionsFor {
+                                  Button("Play Now") { musicManager.playSong(song) }
+                                  Button("Play Next") { musicManager.playNext(song) }
+                                  Button("Play Later") { musicManager.playLater(song) }
                                   ForEach(musicManager.playlists) { pl in
                                       Button("Add to \(pl.name)") { musicManager.addSongToPlaylist(song: song, playlist: pl) }
                                   }
                                   Button("Rename Song") { showingRenameFor = song; newNameInput = song.title }
+                                  Button("Share") { musicManager.shareSong(song) }
+                                  Button("Delete", role: .destructive) { musicManager.deleteSong(song) }
                               }
                               Button("Cancel", role: .cancel) {}
                       }
@@ -897,6 +1099,28 @@ jobs:
                           Button("Cancel", role: .cancel) { }
                       }
                   }
+              }
+
+              @ViewBuilder
+              private func songRow(_ song: Song, isQueued: Bool) -> some View {
+                  Button { musicManager.playSong(song) } label: {
+                      HStack {
+                          ZStack {
+                              generateColor(for: song.title).frame(width: 40, height: 40).cornerRadius(5)
+                              Image(systemName: isQueued ? "text.insert" : "music.note").foregroundColor(.white)
+                          }
+                          VStack(alignment: .leading) {
+                              Text(song.title).font(.headline).lineLimit(1)
+                              HStack(spacing: 6) {
+                                  Text("AS Music").font(.caption).foregroundColor(.gray)
+                                  if musicManager.isFavorite(song: song) {
+                                      Image(systemName: "heart.fill").font(.caption2).foregroundColor(.pink)
+                                  }
+                              }
+                          }
+                          Spacer()
+                      }.contentShape(Rectangle())
+                  }.buttonStyle(BorderlessButtonStyle())
               }
           }
 
@@ -972,10 +1196,22 @@ jobs:
 
                                   VStack(spacing: 15) {
                                       Text("Search by Name").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
-                                      HStack {
-                                          TextField("e.g. Amr Diab", text: $searchInput)
-                                              .padding().background(Color.gray.opacity(0.2)).cornerRadius(12).foregroundColor(.white)
-                                          Button { downloader.performMagicSearch(query: searchInput) } label: {
+                                      HStack(spacing: 8) {
+                                          HStack {
+                                              TextField("e.g. Amr Diab", text: $searchInput)
+                                                  .foregroundColor(.white)
+                                                  .autocapitalization(.none)
+                                              if !searchInput.isEmpty {
+                                                  Button { searchInput = "" } label: {
+                                                      Image(systemName: "xmark.circle.fill").foregroundColor(.gray)
+                                                  }
+                                              }
+                                          }
+                                          .padding().background(Color.gray.opacity(0.2)).cornerRadius(12)
+                                          Button {
+                                              hideKeyboard()
+                                              downloader.performMagicSearch(query: searchInput)
+                                          } label: {
                                               Image(systemName: "magnifyingglass").padding()
                                                   .background(Color.purple).foregroundColor(.white).cornerRadius(12)
                                           }.disabled(downloader.isSearching || searchInput.isEmpty)
@@ -985,10 +1221,15 @@ jobs:
                                   Text("OR").font(.headline).foregroundColor(.gray)
 
                                   VStack(spacing: 15) {
-                                      Text("Paste Video OR Playlist Link!").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
-                                      TextField("Paste YouTube/SoundCloud link...", text: $linkInput)
-                                          .padding().background(Color.gray.opacity(0.2)).cornerRadius(12).foregroundColor(.white).autocapitalization(.none)
-                                      TextField("Save As (Name of Song or Playlist)", text: $nameInput)
+                                      Text("Paste YouTube Link").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
+                                      HStack(spacing: 8) {
+                                          TextField("Paste YouTube link…", text: $linkInput)
+                                              .padding().background(Color.gray.opacity(0.2)).cornerRadius(12).foregroundColor(.white).autocapitalization(.none)
+                                          Button("Paste") {
+                                              if let s = UIPasteboard.general.string { linkInput = s }
+                                          }.font(.subheadline.bold()).foregroundColor(.purple)
+                                      }
+                                      TextField("Save As (optional)", text: $nameInput)
                                           .padding().background(Color.gray.opacity(0.2)).cornerRadius(12).foregroundColor(.white)
                                       Button {
                                           downloader.requestLinkDownload(link: linkInput, name: nameInput)
@@ -1599,34 +1840,99 @@ jobs:
                               didFinishDownloadingTo location: URL) {
                   guard let task = activeTask else { return }
                   let fm = FileManager.default
+                  // Validate size
                   guard let attrs = try? fm.attributesOfItem(atPath: location.path),
-                        let size = attrs[.size] as? Int64, size > 20_000 else {
-                      fail(task: task, message: "Downloaded file was too small (corrupt).")
+                        let size = attrs[.size] as? Int64, size > 1_000 else {
+                      retryDownload(task, reason: "Downloaded file was too small (corrupt).")
+                      return
+                  }
+                  // Validate magic bytes — real audio starts with ID3 / 0xFF (MPEG frame) / OggS / ftyp (m4a) / RIFF (wav)
+                  let magicValid: Bool = {
+                      guard let fh = FileHandle(forReadingAtPath: location.path) else { return false }
+                      defer { fh.closeFile() }
+                      let head = fh.readData(ofLength: 12)
+                      guard head.count >= 4 else { return false }
+                      return head.starts(with: [0x49,0x44,0x33])         // ID3
+                          || head[0] == 0xFF && (head[1] & 0xE0) == 0xE0 // MPEG sync 0xFFEx
+                          || head.starts(with: [0x4F,0x67,0x67,0x53])    // OggS
+                          || (head.count >= 8 && head[4..<8] == Data([0x66,0x74,0x79,0x70])) // ftyp (m4a/mp4)
+                          || head.starts(with: [0x52,0x49,0x46,0x46])    // RIFF (wav)
+                  }()
+                  if !magicValid {
+                      retryDownload(task, reason: "File was not a valid audio track. Retrying…")
                       return
                   }
                   var finalName = task.fileName.isEmpty ? task.proposedName : task.fileName
                   let audioExts = ["mp3","m4a","wav","webm","mp4","aac","ogg","opus"]
                   let fl = finalName.lowercased()
                   if !audioExts.contains(where: { fl.hasSuffix("." + $0) }) {
-                      // Guess extension from mime
                       if let mimeType = (downloadTask.response as? HTTPURLResponse)?.mimeType {
                           if mimeType.contains("mpeg") || mimeType.contains("mp3") { finalName += ".mp3" }
                           else if mimeType.contains("mp4") || mimeType.contains("m4a") || mimeType.contains("aac") { finalName += ".m4a" }
                           else { finalName += ".mp3" }
                       } else { finalName += ".mp3" }
                   }
+                  // Sanitize filename (emojis/control chars can cause file-system issues)
+                  finalName = sanitizeFilename(finalName)
                   let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
                   let destPath = destDir.appendingPathComponent(finalName)
-                  try? fm.removeItem(at: destPath)
+                  // Ensure unique path (don't overwrite existing songs)
+                  var finalPath = destPath
+                  if fm.fileExists(atPath: destPath.path) {
+                      let stem = (finalName as NSString).deletingPathExtension
+                      let ext = (finalName as NSString).pathExtension
+                      var i = 2
+                      while fm.fileExists(atPath: finalPath.path) {
+                          let candidate = ext.isEmpty ? "\(stem) \(i)" : "\(stem) \(i).\(ext)"
+                          finalPath = destDir.appendingPathComponent(candidate)
+                          i += 1
+                      }
+                  }
+                  try? fm.removeItem(at: finalPath)
                   do {
-                      try fm.moveItem(at: location, to: destPath)
-                      try fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
+                      try fm.moveItem(at: location, to: finalPath)
+                      try fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: finalPath.path)
                   } catch {
                       fail(task: task, message: "Could not save file: \(error.localizedDescription)")
                       return
                   }
-                  DispatchQueue.main.async { task.fileName = finalName }
+                  DispatchQueue.main.async {
+                      task.fileName = finalPath.lastPathComponent
+                      // Success haptic
+                      let gen = UINotificationFeedbackGenerator()
+                      gen.notificationOccurred(.success)
+                  }
                   finish(task: task)
+              }
+
+              private func sanitizeFilename(_ s: String) -> String {
+                  let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|")
+                  var out = s.components(separatedBy: invalid).joined(separator: "-")
+                  out = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                  if out.isEmpty { out = "Track" }
+                  return out
+              }
+
+              private func retryDownload(_ task: DownloadTask, reason: String) {
+                  // Automatic retry up to 2 times per task with a fresh MP3Juice session.
+                  let retryCount = tasks.filter { $0.id == task.id }.count // dummy; use objc associated via status change
+                  // We re-enter queued state after bumping a counter stored in UserDefaults-free way by using task.fileName marker
+                  let marker = "🔄retry:"
+                  let existing = task.fileName.components(separatedBy: marker).last.flatMap(Int.init) ?? 0
+                  if existing >= 2 {
+                      fail(task: task, message: reason)
+                      return
+                  }
+                  DispatchQueue.main.async {
+                      self.objectWillChange.send()
+                      task.status = .queued
+                      task.fileName = task.proposedName + marker + "\(existing+1)"
+                      if self.activeTask?.id == task.id {
+                          self.activeTask = nil
+                          self.pollTimer?.invalidate(); self.pollTimer = nil
+                      }
+                      self.startNext()
+                  }
               }
 
               func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
