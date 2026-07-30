@@ -769,42 +769,15 @@ jobs:
               var playlistQueue: [String] = []
               var playlistTotal = 0
               var playlistName = ""
+              let scClientId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
               
               override init() {
                   super.init()
                   let config = URLSessionConfiguration.default
                   downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
               }
-              
               func togglePreview(track: SCTrack) {
-                  if previewTrackId == track.trackId && isPreviewPlaying { previewPlayer?.pause(); isPreviewPlaying = false } else {
-                      previewPlayer?.stop()
-                      statusMessage = "Loading Preview..."
-                      guard let url = URL(string: track.previewUrl) else { return }
-                      URLSession.shared.downloadTask(with: url) { [weak self] localUrl, _, _ in
-                          guard let self = self, let localUrl = localUrl else { return }
-                          do {
-                              try AVAudioSession.sharedInstance().setCategory(AVAudioSession.Category.playback, mode: AVAudioSession.Mode.default); try AVAudioSession.sharedInstance().setActive(true)
-                              let data = try Data(contentsOf: localUrl)
-                              self.previewPlayer = try AVAudioPlayer(data: data)
-                              self.previewPlayer?.play()
-                              DispatchQueue.main.async { self.previewTrackId = track.trackId; self.isPreviewPlaying = true; self.statusMessage = "" }
-                          } catch {}
-                      }.resume()
-                  }
-              }
-              func stopPreview() { previewPlayer?.stop(); isPreviewPlaying = false }
-              
-              func performMagicSearch(query: String) {
-                  guard !query.isEmpty else { return }; isSearching = true; statusMessage = "Searching SoundCloud..."; stopPreview()
-                  let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-                  guard let url = URL(string: "https://api-v2.soundcloud.com/search/tracks?q=" + encodedQuery + "&client_id=" + scClientId + "&limit=25") else { return }
-                  var req = URLRequest(url: url)
-                  req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-                      guard let self = self, let data = data, let res = try? JSONDecoder().decode(SCResponse.self, from: data) else { DispatchQueue.main.async { self?.isSearching = false; self?.showError = true; self?.errorDetails = "SoundCloud search failed." }; return }
-                      DispatchQueue.main.async { self.isSearching = false; if res.collection.isEmpty { self.showError = true; self.errorDetails = "No songs found." } else { self.searchResults = res.collection; self.showSearchResults = true } }
-                  }.resume()
+                  DispatchQueue.main.async { self.errorDetails = "Previews disabled in SoundCloud mode. Tap Download!"; self.showError = true }
               }
               
               func downloadLinkOrPlaylist(urlStr: String, name: String) {
@@ -910,7 +883,7 @@ jobs:
                       guard let self = self else { return }
                       if let data = data, let res = try? JSONDecoder().decode(CobaltResponse.self, from: data), let audioUrlStr = res.url, let audioUrl = URL(string: audioUrlStr) {
                           self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
-                          let task = self.downloadSession.downloadTask(with: audioUrl); 
+                          let task = self.downloadSession.downloadTask(with: audioUrl); task.resume() 
                       } else {
                           guard let v10Url = URL(string: server + "/") else { return }
                           var req10 = request; req10.url = v10Url
@@ -920,7 +893,7 @@ jobs:
                               guard let self = self else { return }
                               if let data10 = data10, let res10 = try? JSONDecoder().decode(CobaltResponse.self, from: data10), let audioUrlStr10 = res10.url, let audioUrl10 = URL(string: audioUrlStr10) {
                                   self.finalDownloadName = name.isEmpty ? "SmartDownload_\(UUID().uuidString.prefix(4))" : name.replacingOccurrences(of: "/", with: "-")
-                                  let task = self.downloadSession.downloadTask(with: audioUrl10); 
+                                  let task = self.downloadSession.downloadTask(with: audioUrl10); task.resume() 
                               } else {
                                   self.tryDownloadCobalt(urlStr: urlStr, name: name, isPlaylist: isPlaylist, attempt: attempt + 1)
                               }
