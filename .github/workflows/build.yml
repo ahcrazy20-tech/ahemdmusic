@@ -1947,11 +1947,14 @@ jobs:
                   if next.platform == "direct", let u = next.directURL {
                       startMediaDownload(task: next, url: u, finalName: next.proposedName)
                   } else if next.platform == "sc", let u = next.directURL {
-                      // SC direct URL — may serve HTML error page, so we validate
-                      startMediaDownload(task: next, url: u, finalName: next.proposedName, validate: true)
+                      // SoundCloud direct URL: preflight check Content-Type before download (some 404 as HTML)
+                      DispatchQueue.main.async {
+                          self.objectWillChange.send()
+                          next.status = .contacting(0.3)
+                          next.fileName = next.proposedName
+                      }
+                      preflightAndDownloadSC(task: next, url: u)
                   } else {
-                      // YouTube: START WITH WORKER FIRST (fast, reliable, returns dlURL directly)
-                      // Only fall back to theta if worker fails.
                       DispatchQueue.main.async {
                           self.objectWillChange.send()
                           next.status = .contacting(0.3)
@@ -1959,6 +1962,49 @@ jobs:
                       }
                       workerStart(task: next)
                   }
+              }
+
+              // For SoundCloud thetacloud.org/s/ links, we need to verify they really serve audio
+              // (some return text/html error pages). Download first 2KB to check magic bytes,
+              // then issue the full download (or fall through to theta/worker pipeline if not audio).
+              private func preflightAndDownloadSC(task: DownloadTask, url: URL) {
+                  var req = URLRequest(url: url, timeoutInterval: 20)
+                  req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
+                  req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
+                  req.setValue("bytes=0-4095", forHTTPHeaderField: "Range")
+                  URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+                      guard let self = self else { return }
+                      if let err = err {
+                          self.failOrRetry(task: task, message: "SoundCloud link failed: \(err.localizedDescription)")
+                          return
+                      }
+                      let ct = (resp as? HTTPURLResponse)?.mimeType ?? ""
+                      let d = data ?? Data()
+                      if ct.contains("audio") || ct.contains("mpeg") {
+                          // Server says audio, but do full download via startMediaDownload
+                          // (without Range so we get the whole file)
+                          self.startMediaDownload(task: task, url: url, finalName: task.proposedName, validate: true)
+                          return
+                      }
+                      // Magic byte check even if content-type says otherwise
+                      let b = [UInt8](d.prefix(12))
+                      if b.count >= 3 && b[0] == 0x49 && b[1] == 0x44 && b[2] == 0x33 { self.startMediaDownload(task: task, url: url, finalName: task.proposedName, validate: true); return }
+                      if b.count >= 2 && b[0] == 0xFF && (b[1] & 0xE0) == 0xE0 { self.startMediaDownload(task: task, url: url, finalName: task.proposedName, validate: true); return }
+                      // Not audio (probably HTML error page) — try extracting numeric SoundCloud ID from URL and going via worker/theta
+                      // thetacloud.org/s/<id_base64>/<title_base64>/
+                      if let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                          let parts = comps.path.split(separator: "/").map(String.init)
+                          if parts.count >= 2, let idData = Data(base64Encoded: parts[1] + "=="),
+                             let idStr = String(data: idData, encoding: .utf8)?.split(separator: "/").first.map(String.init),
+                             idStr.range(of: #"^\d+$"#, options: .regularExpression) != nil {
+                              // Re-queue as a yt/theta download using the numeric SC id? Theta/worker only do YouTube.
+                              // Mark as failed with clear message
+                              self.failOrRetry(task: task, message: "SoundCloud track unavailable (try another result)")
+                              return
+                          }
+                      }
+                      self.failOrRetry(task: task, message: "SoundCloud track unavailable")
+                  }.resume()
               }
 
               private func finish(task: DownloadTask) {
@@ -2008,16 +2054,12 @@ jobs:
               // ---- Cloudflare Worker (PRIMARY - fast, returns audio/mpeg directly)
               private func workerStart(task: DownloadTask) {
                   let ts = Int(Date().timeIntervalSince1970 * 1000)
-                  guard var comps = URLComponents(string: workerURL) else {
-                      // fall back to theta pipeline
+                  // IMPORTANT: append params to the existing URL string to preserve ?m=i
+                  // (URLComponents.queryItems REPLACES existing query which drops m=i -> error 18)
+                  let urlStr = "\(workerURL)&v=\(task.vid)&f=mp3&_=\(ts)"
+                  guard let u = URL(string: urlStr) else {
                       beginMp3Juice(task: task); return
                   }
-                  comps.queryItems = [
-                      URLQueryItem(name: "v", value: task.vid),
-                      URLQueryItem(name: "f", value: "mp3"),
-                      URLQueryItem(name: "_", value: "\(ts)")
-                  ]
-                  guard let u = comps.url else { beginMp3Juice(task: task); return }
                   DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.5) }
                   jsonGet(u, bearer: nil) { [weak self] result in
                       guard let self = self else { return }
