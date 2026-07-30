@@ -2,8 +2,11 @@ name: Build TrollMusicApp
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -26,8 +29,9 @@ jobs:
           rm -rf TrollMusicApp/*.swift
           rm -rf TrollMusicApp/TrollMusicApp/*.swift
           rm -rf TrollMusicApp/*.xcodeproj
+          rm -rf TrollMusicApp.xcodeproj build Payload TrollMusicApp.ipa
 
-      - name: Create project config
+      - name: Create Project Config
         run: |
           echo 'name: TrollMusicApp' > project.yml
           echo 'options:' >> project.yml
@@ -52,7 +56,7 @@ jobs:
           echo '      GENERATE_INFOPLIST_FILE: "NO"' >> project.yml
           echo '      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon' >> project.yml
           echo '      DEVELOPMENT_ASSET_PATHS: "DummyAssets"' >> project.yml
-          
+
           mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
           mkdir -p TrollMusicApp/TrollMusicApp
@@ -87,14 +91,12 @@ jobs:
           PLIST
           sed -i '' 's/^[ \t]*//' TrollMusicApp/TrollMusicApp/Info.plist
 
-
-
       - name: Write Swift Files
         run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
           import SwiftUI
           import AVFoundation
-          
+
           class AppDelegate: NSObject, UIApplicationDelegate {
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
                   do {
@@ -105,7 +107,7 @@ jobs:
                   return true
               }
           }
-          
+
           @main
           struct TrollMusicAppApp: App {
               @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate: AppDelegate
@@ -115,8 +117,8 @@ jobs:
                   }
               }
           }
-          
-          
+
+
           SWIFT
 
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/MusicManager.swift
@@ -124,10 +126,10 @@ jobs:
           import AVFoundation
           import MediaPlayer
           import SwiftUI
-          
+
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
           struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
-          
+
           class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
               static let shared = MusicManager()
               @Published var songs: [Song] = []
@@ -301,16 +303,16 @@ jobs:
                   MPNowPlayingInfoCenter.default().nowPlayingInfo = info
               }
           }
-          
-          
+
+
           SWIFT
 
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
           import UIKit
-          
+
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
-          
+
           struct VisualizerView: View {
               @State private var isAnimating = false
               var body: some View {
@@ -321,7 +323,7 @@ jobs:
                   }.onAppear { isAnimating = true }
               }
           }
-          
+
           struct MainTabView: View {
               @EnvironmentObject var musicManager: MusicManager
               @State private var showFullPlayer = false
@@ -341,7 +343,7 @@ jobs:
                   }.sheet(isPresented: $showFullPlayer) { FullPlayerView() }
               }
           }
-          
+
           struct BrowserMainView: View {
               @EnvironmentObject var musicManager: MusicManager
               @StateObject var webViewModel = WebViewModel()
@@ -375,7 +377,7 @@ jobs:
                   .alert("Download Error", isPresented: $webViewModel.showBlobError) { Button("OK", role: .cancel) { } } message: { Text("Failed to extract media from this page. Try Magic DL.") }
               }
           }
-          
+
           struct MiniPlayerView: View {
               @EnvironmentObject var musicManager: MusicManager
               @Binding var showFullPlayer: Bool
@@ -391,7 +393,7 @@ jobs:
                   }
               }
           }
-          
+
           struct FullPlayerView: View {
               @EnvironmentObject var musicManager: MusicManager
               @Environment(\.presentationMode) var presentationMode
@@ -424,7 +426,7 @@ jobs:
                   .actionSheet(isPresented: $showTimerOptions) { ActionSheet(title: Text("Sleep Timer"), buttons: [ .default(Text("15 Minutes")) { musicManager.setSleepTimer(minutes: 15) }, .default(Text("30 Minutes")) { musicManager.setSleepTimer(minutes: 30) }, .default(Text("60 Minutes")) { musicManager.setSleepTimer(minutes: 60) }, .destructive(Text("Turn Off Timer")) { musicManager.setSleepTimer(minutes: 0) }, .cancel() ]) }
               }
           }
-          
+
           struct LibraryView: View {
               @EnvironmentObject var musicManager: MusicManager
               @State private var showingOptionsFor: Song?
@@ -458,7 +460,7 @@ jobs:
                   }
               }
           }
-          
+
           struct PlaylistDetailView: View {
               @EnvironmentObject var musicManager: MusicManager
               var playlist: Playlist
@@ -470,7 +472,7 @@ jobs:
                   }.navigationTitle(playlist.name)
               }
           }
-          
+
           struct PlaylistsView: View {
               @EnvironmentObject var musicManager: MusicManager
               @State private var showingNewPlaylist = false
@@ -483,17 +485,17 @@ jobs:
                   }
               }
           }
-          
-          
+
+
           SWIFT
 
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
           import UIKit
           import WebKit
-          
+
           struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String; var title: String }
-          
+
           class WebViewModel: ObservableObject {
               @Published var tabs: [BrowserTab] = []
               @Published var currentTabIndex: Int = 0
@@ -607,7 +609,7 @@ jobs:
                   }
                   
               }
-          
+
           }
           struct WebViewUI: UIViewRepresentable {
               @ObservedObject var viewModel: WebViewModel
@@ -629,8 +631,8 @@ jobs:
                   func downloadDidFinish(_ download: WKDownload) { let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]; let destPath = destDir.appendingPathComponent(parent.viewModel.downloadFileName); try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path); DispatchQueue.main.async { self.parent.viewModel.showDownloadAlert = true; MusicManager.shared.loadSongs() } }
               }
           }
-          
-          
+
+
           SWIFT
 
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
@@ -639,10 +641,10 @@ jobs:
           import SwiftUI
           import AVFoundation
           import WebKit
-          
-          
+
+
           struct WebExtractor { let url: String; let js: String }
-          
+
           class HiddenWebEngine: NSObject, WKNavigationDelegate, WKDownloadDelegate {
               var webView: WKWebView!
               var targetUrl: String = ""
@@ -744,9 +746,9 @@ jobs:
               func downloadDidFinish(_ download: WKDownload) { self.onSuccess?() }
               func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) { self.attempt += 1; self.executeNextAttempt() }
           }
-          
-          
-          
+
+
+
           struct SCResponse: Codable { let collection: [SCTrack] }
           struct SCTrack: Codable, Identifiable {
               let id: Int
@@ -763,7 +765,7 @@ jobs:
           }
           struct SCUser: Codable { let username: String? }
           struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
-          
+
           class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDelegate, URLSessionDownloadDelegate {
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""; @Published var downloadProgress: Double = 0.0
               @Published var showSuccess = false; @Published var showError = false; @Published var errorDetails = ""
@@ -931,7 +933,7 @@ jobs:
                   }
               }
           }
-          
+
           struct SmartDownloaderView: View {
               @StateObject var downloader = SmartDownloaderManager()
               @State private var searchInput = ""
@@ -994,15 +996,49 @@ jobs:
                   }
               }
           }
-          
-          
+
+
           SWIFT
 
+      - name: Fix Missing SmartDownloader Methods
+        run: |
+          cat >> TrollMusicApp/TrollMusicApp/SmartDownloader.swift <<'SWIFT'
+
+          extension SmartDownloaderManager {
+              func stopPreview() {
+                  previewPlayer?.stop()
+                  previewPlayer = nil
+                  DispatchQueue.main.async {
+                      self.previewTrackId = nil
+                      self.isPreviewPlaying = false
+                  }
+              }
+
+              func performMagicSearch(query: String) {
+                  let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !cleanQuery.isEmpty else { return }
+
+                  stopPreview()
+                  DispatchQueue.main.async {
+                      self.isSearching = true
+                      self.searchResults = []
+                      self.showSearchResults = false
+                  }
+
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                      self.isSearching = false
+                      self.errorDetails = "Search is not configured yet."
+                      self.showError = true
+                  }
+              }
+          }
+
+          SWIFT
 
       - name: Generate Icon
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset
-          
+
           echo 'import AppKit' > make_icon.swift
           echo 'let size = CGSize(width: 1024, height: 1024)' >> make_icon.swift
           echo 'let img = NSImage(size: size)' >> make_icon.swift
@@ -1021,40 +1057,43 @@ jobs:
           echo 'let png = rep.representation(using: .png, properties: [:])!' >> make_icon.swift
           echo 'let u = URL(fileURLWithPath: "TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/icon-1024.png")' >> make_icon.swift
           echo 'try! png.write(to: u)' >> make_icon.swift
-          
+
           swift make_icon.swift
-          
+
           echo '{ "images": [ { "filename": "icon-1024.png", "idiom": "universal", "platform": "ios", "size": "1024x1024" } ], "info": { "author": "xcode", "version": 1 } }' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
           echo '{ "info": { "version": 1, "author": "xcode" } }' > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
 
-      - name: Install xcodegen
+      - name: Install XcodeGen
         run: brew install xcodegen
 
       - name: Generate Project
-        run: |
-          mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
-          xcodegen generate
+        run: xcodegen generate --spec project.yml
 
       - name: Build and Archive
         run: |
           xcodebuild archive \
             -project TrollMusicApp.xcodeproj \
             -scheme TrollMusicApp \
-            -archivePath build/TrollMusicApp.xcarchive \
             -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$PWD/build/TrollMusicApp.xcarchive" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             DEVELOPMENT_ASSET_PATHS=""
 
-      - name: Package IPA (TrollStore format)
+      - name: Package IPA
         run: |
           mkdir -p Payload
-          cp -r build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app Payload/
-          zip -r TrollMusicApp.ipa Payload
-          
+          cp -R "build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app" Payload/
+          /usr/bin/zip -r TrollMusicApp.ipa Payload
+          test -f TrollMusicApp.ipa
+
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: TrollMusicApp-IPA
           path: TrollMusicApp.ipa
+          if-no-files-found: error
+          retention-days: 14
