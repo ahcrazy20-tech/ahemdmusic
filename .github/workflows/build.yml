@@ -782,12 +782,13 @@ jobs:
 
                           ScrollView(.horizontal, showsIndicators: false) {
                               HStack(spacing: 8) {
-                                  Button("Google")    { webViewModel.loadUrl("https://google.com") }    .buttonStyle(.borderedProminent).tint(.blue)
-                                  Button("YouTube")   { webViewModel.loadUrl("https://youtube.com") }   .buttonStyle(.borderedProminent).tint(.red)
-                                  Button("SoundCloud"){ webViewModel.loadUrl("https://soundcloud.com") }.buttonStyle(.borderedProminent).tint(.orange)
-                                  Button("Audiomack") { webViewModel.loadUrl("https://audiomack.com") } .buttonStyle(.borderedProminent).tint(.yellow)
-                                  Button("SpotifyDown"){ webViewModel.loadUrl("https://spotifydown.com") }.buttonStyle(.borderedProminent).tint(.green)
-                                  Button("Anghami")   { webViewModel.loadUrl("https://play.anghami.com") }.buttonStyle(.borderedProminent).tint(.purple)
+                                  Button("Google")     { webViewModel.loadUrl("https://google.com") }      .buttonStyle(.borderedProminent).tint(.blue)
+                                  Button("YouTube")    { webViewModel.loadUrl("https://youtube.com") }     .buttonStyle(.borderedProminent).tint(.red)
+                                  Button("SoundCloud") { webViewModel.loadUrl("https://soundcloud.com") }  .buttonStyle(.borderedProminent).tint(.orange)
+                                  Button("Audiomack")  { webViewModel.loadUrl("https://audiomack.com") }   .buttonStyle(.borderedProminent).tint(.yellow)
+                                  Button("SpotifyDown"){ webViewModel.loadUrl("https://spotifydown.com") } .buttonStyle(.borderedProminent).tint(.green)
+                                  Button("Anghami")    { webViewModel.loadUrl("https://play.anghami.com") }.buttonStyle(.borderedProminent).tint(.purple)
+                                  Button("YTMP3")      { webViewModel.loadUrl("http://nbike.pl/") }        .buttonStyle(.borderedProminent).tint(.pink)
                               }.padding(.horizontal).padding(.bottom, 8)
                           }.background(Color(uiColor: UIColor.secondarySystemBackground))
 
@@ -1869,10 +1870,6 @@ jobs:
 
               static let mobileUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
-              // Worker endpoint — FAST & reliable (bypasses broken theta convert chain)
-              private let workerURL = "https://fancy-sea-5d3d.holy-breeze-fec5.workers.dev/?m=i"
-              private let thetaMirrors = ["theta", "ocococ", "cocooo", "cooooo", "occcco", "ccccco", "cococo", "ococco", "ccocco"]
-
               // ---- Public API -------------------------------------------------------
               func enqueue(vid: String, platform: String, suggestedName: String) {
                   let name = sanitize(suggestedName)
@@ -2051,25 +2048,45 @@ jobs:
                   return out
               }
 
-              // ---- Cloudflare Worker (PRIMARY - fast, returns audio/mpeg directly)
+              // Primary workers (tried in order, first one that returns wins)
+              private let workerURLs = [
+                  "https://fancy-sea-5d3d.holy-breeze-fec5.workers.dev/?m=i",
+              ]
+              // Backup converter: y2jar (used by nbike.pl) — returns direct M4A audio (no MP3 re-encode).
+              // iOS AVAudioPlayer plays M4A/AAC natively, so we just save as .m4a.
+              private let y2jarInfoURL = "https://v2.y2jar.cc/i/"
+              private let y2jarStreamTokenURL = "https://capi.y2jar.cc/st/a/"
+              private let y2jarDownloadURL = "https://capi.y2jar.cc/s/"
+              private let thetaMirrors = ["theta", "ocococ", "cocooo", "cooooo", "occcco", "ccccco", "cococo", "ococco", "ccocco"]
               private func workerStart(task: DownloadTask) {
-                  let ts = Int(Date().timeIntervalSince1970 * 1000)
-                  // IMPORTANT: append params to the existing URL string to preserve ?m=i
-                  // (URLComponents.queryItems REPLACES existing query which drops m=i -> error 18)
-                  let urlStr = "\(workerURL)&v=\(task.vid)&f=mp3&_=\(ts)"
-                  guard let u = URL(string: urlStr) else {
-                      beginMp3Juice(task: task); return
+                  tryWorkerOnMirrors(task: task, mirrors: workerURLs, index: 0)
+              }
+
+              private func tryWorkerOnMirrors(task: DownloadTask, mirrors: [String], index: Int) {
+                  guard index < mirrors.count else {
+                      log.warning("All worker mirrors failed, trying y2jar (nbike.pl backend)")
+                      startY2jar(task: task); return
                   }
-                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.5) }
+                  let ts = Int(Date().timeIntervalSince1970 * 1000)
+                  // IMPORTANT: simple string append preserves ?m=i
+                  let urlStr = "\(mirrors[index])&v=\(task.vid)&f=mp3&_=\(ts)"
+                  guard let u = URL(string: urlStr) else {
+                      tryWorkerOnMirrors(task: task, mirrors: mirrors, index: index+1); return
+                  }
+                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.3 + 0.1*Double(index)) }
                   jsonGet(u, bearer: nil) { [weak self] result in
                       guard let self = self else { return }
                       guard case let .success(d) = result else {
-                          log.warning("Worker failed, falling back to theta")
-                          self.beginMp3Juice(task: task); return
+                          self.tryWorkerOnMirrors(task: task, mirrors: mirrors, index: index+1); return
                       }
                       if let e = d["error"] as? Int, e != 0 {
-                          log.warning("Worker error=\(e), falling back to theta")
-                          self.beginMp3Juice(task: task); return
+                          log.warning("Worker mirror \(index) returned err=\(e), trying next")
+                          if index + 1 < mirrors.count {
+                              self.tryWorkerOnMirrors(task: task, mirrors: mirrors, index: index+1)
+                          } else {
+                              self.startY2jar(task: task)
+                          }
+                          return
                       }
                       // Direct download (fast path)
                       if let dl = d["downloadURL"] as? String, !dl.isEmpty {
@@ -2084,9 +2101,9 @@ jobs:
                           self.workerPoll(task: task, progURL: purl, ticks: 0)
                           return
                       }
-                      // Unexpected — fall back to theta
-                      log.warning("Worker unexpected response, trying theta")
-                      self.beginMp3Juice(task: task)
+                      // Unexpected — fall back to y2jar
+                      log.warning("Worker unexpected response, trying y2jar")
+                      self.startY2jar(task: task)
                   }
               }
 
@@ -2103,8 +2120,8 @@ jobs:
                           guard case let .success(d) = result else { return }
                           if let e = d["error"] as? Int, e != 0 {
                               t.invalidate(); self.pollTimer = nil
-                              log.warning("worker poll err=\(e), falling back to theta")
-                              self.beginMp3Juice(task: task); return
+                              log.warning("worker poll err=\(e), falling back to y2jar")
+                              self.startY2jar(task: task); return
                           }
                           // status field: "start" -> "processing" -> "download" (ready)
                           let status = d["status"] as? String ?? ""
@@ -2133,8 +2150,8 @@ jobs:
                           }
                           if tickCount > maxTicks {
                               t.invalidate(); self.pollTimer = nil
-                              log.warning("Worker timed out, trying theta")
-                              self.beginMp3Juice(task: task)
+                              log.warning("Worker timed out, trying y2jar")
+                              self.startY2jar(task: task)
                           }
                       }
                   }
@@ -2167,6 +2184,63 @@ jobs:
 
               private func thetaURL(_ sub: String, path: String, _ ts: Int) -> URL? {
                   URL(string: "https://\(sub).thetacloud.org/api/v1/\(path)?_=\(ts)")
+              }
+
+              // ---- y2jar (nbike.pl backend) fallback: returns M4A/AAC natively -------
+              private func startY2jar(task: DownloadTask) {
+                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.3) }
+                  // Step 1: get video info (/i/<vid>)
+                  guard let infoURL = URL(string: "\(y2jarInfoURL)\(task.vid)") else {
+                      beginMp3Juice(task: task); return
+                  }
+                  var req = URLRequest(url: infoURL, timeoutInterval: 15)
+                  req.httpMethod = "GET"
+                  req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
+                  req.setValue("application/json", forHTTPHeaderField: "Accept")
+                  req.setValue("https://v2.y2jar.cc/", forHTTPHeaderField: "Referer")
+                  URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+                      guard let self = self else { return }
+                      guard let data = data, err == nil,
+                            let info = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any],
+                            let _ = info["title"] as? String else {
+                          log.warning("y2jar info failed, falling back to mp3juice")
+                          self.beginMp3Juice(task: task); return
+                      }
+                      // Step 2: get stream token
+                      guard let tokenURL = URL(string: "\(self.y2jarStreamTokenURL)\(task.vid)?a=") else {
+                          self.beginMp3Juice(task: task); return
+                      }
+                      var tr = URLRequest(url: tokenURL, timeoutInterval: 15)
+                      tr.httpMethod = "GET"
+                      tr.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
+                      tr.setValue("application/json", forHTTPHeaderField: "Accept")
+                      tr.setValue("https://v2.y2jar.cc/", forHTTPHeaderField: "Referer")
+                      tr.setValue("https://v2.y2jar.cc", forHTTPHeaderField: "Origin")
+                      URLSession.shared.dataTask(with: tr) { [weak self] tdata, _, terr in
+                          guard let self = self else { return }
+                          guard let tdata = tdata, terr == nil,
+                                let tj = (try? JSONSerialization.jsonObject(with: tdata)) as? [String:Any],
+                                let token = tj["token"] as? String, token.count > 10 else {
+                              self.beginMp3Juice(task: task); return
+                          }
+                          DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.7) }
+                          // Step 3: build download URL (M4A), ensure filename ends in .m4a
+                          var finalName = task.proposedName
+                          let fl = finalName.lowercased()
+                          if !["mp3","m4a","wav","webm","mp4","aac","ogg","opus"].contains(where: { fl.hasSuffix("." + $0) }) {
+                              finalName += ".m4a"
+                          } else if fl.hasSuffix(".mp3") {
+                              // Replace mp3 suffix — we're downloading m4a
+                              finalName = String(finalName.dropLast(4)) + ".m4a"
+                          }
+                          let enc = token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token
+                          guard let dlURL = URL(string: "\(self.y2jarDownloadURL)\(task.vid)?token=\(enc)") else {
+                              self.beginMp3Juice(task: task); return
+                          }
+                          DispatchQueue.main.async { task.fileName = finalName }
+                          self.startMediaDownload(task: task, url: dlURL, finalName: finalName, validate: true)
+                      }.resume()
+                  }.resume()
               }
 
               private func mp3JuiceAuth(completion: @escaping (String?) -> Void) {
