@@ -753,7 +753,6 @@ jobs:
                   let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                   let destPath = destDir.appendingPathComponent(finalName)
 
-                  // Try v10 endpoint
                   if let apiUrl = URL(string: server + "/") {
                       var req = URLRequest(url: apiUrl); req.httpMethod = "POST"
                       req.timeoutInterval = 15
@@ -762,7 +761,7 @@ jobs:
                       req.setValue(server, forHTTPHeaderField: "Origin")
                       let params: [String: Any] = ["url": urlStr, "downloadMode": "audio", "audioFormat": "mp3"]
                       req.httpBody = try? JSONSerialization.data(withJSONObject: params)
-                      URLSession.shared.downloadTask(with: req) { [weak self] data, resp, _ in
+                      URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
                           guard let self = self, let data = data else { self?.tryDownloadCobalt(urlStr: urlStr, name: name, attempt: attempt+1); return }
                           if let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any],
                              let u = dict["url"] as? String, let audioUrl = URL(string: u) {
@@ -1756,7 +1755,6 @@ jobs:
           }
 
           SWIFT
-
       - name: Generate Icon
         run: |
           mkdir -p TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset
@@ -1790,19 +1788,7 @@ jobs:
 
       - name: Build and Archive
         run: |
-          xcodebuild archive \
-            -project TrollMusicApp.xcodeproj \
-            -scheme TrollMusicApp \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination "generic/platform=iOS" \
-            -archivePath "$PWD/build/TrollMusicApp.xcarchive" \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE="" \
-            DEVELOPMENT_ASSET_PATHS=""
+          xcodebuild archive             -project TrollMusicApp.xcodeproj             -scheme TrollMusicApp             -configuration Release             -sdk iphoneos             -destination "generic/platform=iOS"             -archivePath "$PWD/build/TrollMusicApp.xcarchive"             CODE_SIGN_IDENTITY=""             CODE_SIGNING_REQUIRED=NO             CODE_SIGNING_ALLOWED=NO             DEVELOPMENT_TEAM=""             PROVISIONING_PROFILE=""             DEVELOPMENT_ASSET_PATHS=""
 
       - name: Package IPA
         run: |
