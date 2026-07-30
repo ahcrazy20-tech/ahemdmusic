@@ -329,8 +329,11 @@ jobs:
               }
 
               func togglePlayPause() {
-                  if useAVPlayer { isPlaying ? avPlayer?.pause() : avPlayer?.play() }
-                  else { isPlaying ? audioPlayer?.pause() : audioPlayer?.play() }
+                  if useAVPlayer {
+                      if isPlaying { avPlayer?.pause() } else { avPlayer?.play() }
+                  } else {
+                      if isPlaying { audioPlayer?.pause() } else { _ = audioPlayer?.play() }
+                  }
                   isPlaying.toggle(); updateNowPlayingInfo()
               }
 
@@ -1300,9 +1303,6 @@ jobs:
               private var activeTask: DownloadTask?
               private var activeURLTask: URLSessionDownloadTask?
               private var cobaltAttempt = 0
-              private var hiddenEngine: HiddenWebEngine?
-              private var resolutionRedirect: String?    // set when a search URL is resolved to a watch URL
-              private var resolutionSema = DispatchGroup()
 
               override private init() {
                   super.init()
@@ -1488,7 +1488,7 @@ jobs:
 
               private func cobaltRequest(server: String, path: String, v10: Bool,
                                          url: URL, completion: @escaping (URL?) -> Void) {
-                  guard var comps = URLComponents(string: server + path) else { completion(nil); return }
+                  guard let comps = URLComponents(string: server + path) else { completion(nil); return }
                   guard let reqUrl = comps.url else { completion(nil); return }
                   var req = URLRequest(url: reqUrl, timeoutInterval: 12)
                   req.httpMethod = "POST"
@@ -1621,77 +1621,65 @@ jobs:
               // ---- SoundCloud direct fallback (uses dynamic client_id) -------------
               private var scClientId: String?
               private func tryDirectSoundCloud(task: DownloadTask, permalink: URL, name: String) {
-                  func go() {
-                      guard let cid = scClientId else { fail(task: task, message: "SoundCloud fallback failed."); return }
-                      // /resolve endpoint
-                      guard var comps = URLComponents(string: "https://api-v2.soundcloud.com/resolve") else {
-                          fail(task: task, message: "SC resolve failed"); return
-                      }
+                  let resolve: (String) -> Void = { [weak self] cid in
+                      guard let self = self else { return }
+                      var comps = URLComponents(string: "https://api-v2.soundcloud.com/resolve")
+                          ?? URLComponents()
+                      comps.scheme = "https"
+                      comps.host = "api-v2.soundcloud.com"
+                      comps.path = "/resolve"
                       comps.queryItems = [URLQueryItem(name: "url", value: permalink.absoluteString),
                                           URLQueryItem(name: "client_id", value: cid)]
-                      guard let u = comps.url else { fail(task: task, message: "SC resolve failed"); return }
+                      guard let u = comps.url else { self.fail(task: task, message: "SC resolve failed"); return }
                       DispatchQueue.main.async { task.status = .contacting(1) }
                       URLSession.shared.dataTask(with: u) { [weak self] data, _, _ in
-                          guard let self = self, let data = data,
+                          guard let self = self else { return }
+                          guard let data = data,
                                 let d = try? JSONSerialization.jsonObject(with: data) as? [String:Any],
                                 let stream = d["stream_url"] as? String,
                                 let streamUrl = URL(string: stream + "?client_id=\(cid)") else {
-                              self?.fail(task: task, message: "SoundCloud stream extraction failed.")
+                              self.fail(task: task, message: "SoundCloud stream extraction failed.")
                               return
                           }
                           self.startMediaDownload(task: task, url: streamUrl, name: name)
                       }.resume()
                   }
-                  if scClientId != nil { go(); return }
-                  // Bootstrap
-                  guard let home = URL(string: "https://soundcloud.com/") else { fail(task: task, message: "SC bootstrap fail"); return }
-                  URLSession.shared.dataTask(with: home) { [weak self] data, _, _ in
-                      guard let self = self, let data = data,
-                            let html = String(data: data, encoding: .utf8) else {
-                          self?.fail(task: task, message: "SC bootstrap fail"); return
+                  let bootstrapAndResolve: () -> Void = { [weak self] in
+                      guard let self = self else { return }
+                      guard let home = URL(string: "https://soundcloud.com/") else {
+                          self.fail(task: task, message: "SC bootstrap fail"); return
                       }
-                      let scriptPattern = #"https://a-v2\.sndcdn\.com/assets/[A-Za-z0-9_-]+\.js"#
-                      guard let r = html.range(of: scriptPattern, options: .regularExpression),
-                            let scriptUrl = URL(string: String(html[r])) else {
-                          self?.fail(task: task, message: "SC bootstrap fail"); return
-                      }
-                      URLSession.shared.dataTask(with: scriptUrl) { [weak self] jsData, _, _ in
-                          guard let self = self, let jsData = jsData,
-                                let js = String(data: jsData, encoding: .utf8) else {
-                              self?.fail(task: task, message: "SC bootstrap fail"); return
+                      URLSession.shared.dataTask(with: home) { [weak self] data, _, _ in
+                          guard let self = self else { return }
+                          guard let data = data,
+                                let html = String(data: data, encoding: .utf8) else {
+                              self.fail(task: task, message: "SC bootstrap fail"); return
                           }
-                          let cidPattern = #"client_id[:=]\s*["']([a-zA-Z0-9]{32})["']"#
-                          guard let m = js.range(of: cidPattern, options: .regularExpression) else {
-                              self?.fail(task: task, message: "SC client_id not found"); return
+                          let scriptPattern = #"https://a-v2\.sndcdn\.com/assets/[A-Za-z0-9_-]+\.js"#
+                          guard let r = html.range(of: scriptPattern, options: .regularExpression),
+                                let scriptUrl = URL(string: String(html[r])) else {
+                              self.fail(task: task, message: "SC bootstrap fail"); return
                           }
-                          let cidStr = String(js[m])
-                          let cid = cidStr.replacingOccurrences(of: #"client_id[:=]\s*['"]"#, with: "", options: .regularExpression)
-                                          .replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "\"", with: "")
-                          self.scClientId = cid
-                          go()
+                          URLSession.shared.dataTask(with: scriptUrl) { [weak self] jsData, _, _ in
+                              guard let self = self else { return }
+                              guard let jsData = jsData,
+                                    let js = String(data: jsData, encoding: .utf8) else {
+                                  self.fail(task: task, message: "SC bootstrap fail"); return
+                              }
+                              let cidPattern = #"client_id[:=]\s*["']([a-zA-Z0-9]{32})["']"#
+                              guard let m = js.range(of: cidPattern, options: .regularExpression) else {
+                                  self.fail(task: task, message: "SC client_id not found"); return
+                              }
+                              var cid = String(js[m])
+                              cid = cid.replacingOccurrences(of: #"client_id[:=]\s*['"]"#, with: "", options: .regularExpression)
+                              cid = cid.trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+                              self.scClientId = cid
+                              resolve(cid)
+                          }.resume()
                       }.resume()
-                  }.resume()
-              }
-          }
-
-          // ---------------------------------------------------------------------------
-          // MARK: - Hidden web engine (not used in main flow anymore; kept for
-          // possible future "deep fallback" that is OFF by default because it hung).
-          // ---------------------------------------------------------------------------
-          struct WebExtractor { let url: String; let js: String }
-          class HiddenWebEngine: NSObject, WKNavigationDelegate, WKDownloadDelegate {
-              var webView: WKWebView!
-              var onSuccess: (() -> Void)?
-              var onFailure: ((String) -> Void)?
-              override init() {
-                  super.init()
-                  let config = WKWebViewConfiguration()
-                  config.allowsInlineMediaPlayback = true
-                  let prefs = WKWebpagePreferences()
-                  prefs.allowsContentJavaScript = true
-                  config.defaultWebpagePreferences = prefs
-                  webView = WKWebView(frame: .zero, configuration: config)
-                  webView.navigationDelegate = self
+                  }
+                  if let cid = scClientId { resolve(cid); return }
+                  bootstrapAndResolve()
               }
           }
 
@@ -1872,8 +1860,8 @@ jobs:
               }
 
               private func soundCloudSearch(query: String, completion: @escaping ([SearchResult], String?) -> Void) {
-                  fetchSC { [weak self] cid in
-                      guard let self = self, let cid = cid,
+                  fetchSC { cid in
+                      guard let cid = cid,
                             let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                             let url = URL(string: "https://api-v2.soundcloud.com/search/tracks?q=\(encoded)&client_id=\(cid)&limit=20") else {
                           completion([], "SoundCloud unavailable"); return
