@@ -594,7 +594,7 @@ jobs:
                   func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) { if navigationResponse.canShowMIMEType == false { decisionHandler(WKNavigationResponsePolicy.download); return }; if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm") || mime.contains("zip") || mime.contains("octet-stream") { decisionHandler(WKNavigationResponsePolicy.download); return }; decisionHandler(WKNavigationResponsePolicy.allow) }
                   func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
                   func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = self }
-                  func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL) -> Void) { let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]; let cleanName = suggestedFilename.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggestedFilename; let destPath = destDir.appendingPathComponent(cleanName); try? fm.removeItem(at: destPath); DispatchQueue.main.async { self.parent.viewModel.downloadFileName = cleanName }; completionHandler(destPath) }
+                  func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) { let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]; let cleanName = suggestedFilename.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggestedFilename; let destPath = destDir.appendingPathComponent(cleanName); try? fm.removeItem(at: destPath); DispatchQueue.main.async { self.parent.viewModel.downloadFileName = cleanName }; completionHandler(destPath) }
                   func downloadDidFinish(_ download: WKDownload) { let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]; let destPath = destDir.appendingPathComponent(parent.viewModel.downloadFileName); try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path); DispatchQueue.main.async { self.parent.viewModel.showDownloadAlert = true; MusicManager.shared.loadSongs() } }
               }
           }
@@ -702,7 +702,7 @@ jobs:
               func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { if navigationAction.shouldPerformDownload { decisionHandler(WKNavigationActionPolicy.download); return }; decisionHandler(WKNavigationActionPolicy.allow) }
               func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
               
-              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL) -> Void) {
+              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) {
                   self.isDownloadStarted = true
                   let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
                   let cleanName = self.targetName.isEmpty ? suggestedFilename : self.targetName.replacingOccurrences(of: "/", with: "-") + ".mp3"
@@ -909,7 +909,7 @@ jobs:
               var body: some View {
                   NavigationView {
                       ZStack {
-                          Color(uiColor: UIColor.systemGroupedBackground).edgesIgnoringSafeArea(.all)
+                          Color.black.edgesIgnoringSafeArea(.all)
                           ScrollView {
                               VStack(spacing: 30) {
                                   Image(systemName: "sparkles").resizable().frame(width: 80, height: 80).foregroundColor(.purple).padding(.top, 40)
@@ -918,8 +918,8 @@ jobs:
                                   VStack(spacing: 15) {
                                       Text("Search by Name").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
                                       HStack {
-                                          TextField("e.g. Amr Diab", text: $searchInput).padding().background(Color(uiColor: UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
-                                          Button(action: { downloader.performMagicSearch(query: searchInput) }) { if downloader.isSearching { ProgressView().padding() } else { Image(systemName: "magnifyingglass").foregroundColor(.white).padding().background(Color.purple).cornerRadius(12) } }.disabled(downloader.isSearching || searchInput.isEmpty)
+                                          TextField("e.g. Amr Diab", text: $searchInput).padding().background(Color.gray.opacity(0.2)).cornerRadius(12)
+                                          Button(action: { downloader.performMagicSearch(query: searchInput) }) { Image(systemName: "magnifyingglass").padding().background(Color.purple).foregroundColor(.white).cornerRadius(12) }.disabled(downloader.isSearching || searchInput.isEmpty)
                                       }
                                   }.padding(.horizontal)
                                   
@@ -927,12 +927,10 @@ jobs:
                                   
                                   VStack(spacing: 15) {
                                       Text("Paste Video OR Playlist Link!").font(.headline).foregroundColor(.gray).frame(maxWidth: .infinity, alignment: .leading)
-                                      TextField("Paste YouTube link...", text: $linkInput).padding().background(Color(uiColor: UIColor.secondarySystemGroupedBackground)).cornerRadius(12).textInputAutocapitalization(.never)
-                                      TextField("Save As (Name of Song or Playlist)", text: $nameInput).padding().background(Color(uiColor: UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
+                                      TextField("Paste YouTube link...", text: $linkInput).padding().background(Color.gray.opacity(0.2)).cornerRadius(12)
+                                      TextField("Save As (Name of Song or Playlist)", text: $nameInput).padding().background(Color.gray.opacity(0.2)).cornerRadius(12)
                                       
-                                      Button(action: { downloader.downloadLinkOrPlaylist(urlStr: linkInput, name: nameInput) }) {
-                                          Text("Extract MP3").font(.headline).foregroundColor(.white).frame(maxWidth: .infinity).padding().background(Color.blue).cornerRadius(12)
-                                      }.disabled(downloader.isDownloading || linkInput.isEmpty)
+                                      Button(action: { downloader.downloadLinkOrPlaylist(urlStr: linkInput, name: nameInput) }) { Text("Extract MP3").font(.headline).foregroundColor(.white).frame(maxWidth: .infinity).padding().background(Color.blue).cornerRadius(12) }.disabled(downloader.isDownloading || linkInput.isEmpty)
                                   }.padding(.horizontal)
                                   
                                   if downloader.isDownloading { VStack(spacing: 10) { ProgressView(value: downloader.downloadProgress).progressViewStyle(LinearProgressViewStyle(tint: .purple)).scaleEffect(x: 1, y: 2, anchor: .center); Text(downloader.statusMessage).font(.headline).foregroundColor(.purple) }.padding() }
