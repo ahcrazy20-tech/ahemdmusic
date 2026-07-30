@@ -1053,7 +1053,7 @@ jobs:
                       .alert("Save As", isPresented: $downloader.showNamePrompt) {
                           TextField("Song name", text: $downloader.nameInput)
                           Button("Download") { downloader.confirmNamedDownload() }
-                          Button("Cancel", role: .cancel) { }
+                          Button("Cancel", role: .cancel) { downloader.cancelNamePrompt() }
                       } message: {
                           Text("Edit the name before saving to your Library.")
                       }
@@ -1639,25 +1639,8 @@ jobs:
 
           // ---------------------------------------------------------------------------
           // MARK: - Search models & SmartDownloaderManager
+          // (We decode manually with JSONSerialization to be tolerant of type surprises)
           // ---------------------------------------------------------------------------
-          struct MJSearchResponse: Codable {
-              let count: Int?
-              let ytCount: Int?
-              let scCount: Int?
-              let yt: [MJYTResult]?
-              let sc: [MJSCResult]?
-          }
-          struct MJYTResult: Codable {
-              let duration: String?
-              let id: String?
-              let title: String?
-          }
-          struct MJSCResult: Codable {
-              let duration: String?
-              let id: String?         // numeric SC track id
-              let id_base64: String?
-              let title: String?
-          }
 
           class SmartDownloaderManager: NSObject, ObservableObject {
               @Published var isSearching = false
@@ -1672,6 +1655,7 @@ jobs:
 
               @Published var pendingNameVid: String? = nil
               @Published var pendingNamePlatform: String = "yt"
+              @Published var pendingNameDirectURL: URL? = nil
               @Published var pendingNameSuggestion: String = ""
               @Published var showNamePrompt: Bool = false
               @Published var nameInput: String = ""
@@ -1700,21 +1684,31 @@ jobs:
                       .replacingOccurrences(of: "/", with: "-")
                   pendingNameVid = result.extId
                   pendingNamePlatform = result.platform
+                  pendingNameDirectURL = result.previewURL
                   pendingNameSuggestion = name
                   nameInput = name
                   showNamePrompt = true
               }
               func confirmNamedDownload() {
-                  guard let vid = pendingNameVid else { return }
                   showNamePrompt = false
-                  DownloadCenter.shared.enqueue(vid: vid, platform: pendingNamePlatform, suggestedName: nameInput)
-                  pendingNameVid = nil
+                  if let u = pendingNameDirectURL {
+                      DownloadCenter.shared.enqueueDirect(url: u, suggestedName: nameInput)
+                  } else if let vid = pendingNameVid {
+                      DownloadCenter.shared.enqueue(vid: vid, platform: pendingNamePlatform, suggestedName: nameInput)
+                  }
+                  pendingNameVid = nil; pendingNameDirectURL = nil
+              }
+              func cancelNamePrompt() {
+                  showNamePrompt = false; pendingNameVid = nil; pendingNameDirectURL = nil
               }
               func requestLinkDownload(link: String, name: String) {
                   let s = link.trimmingCharacters(in: .whitespacesAndNewlines)
-                  // Detect platform & extract ID
                   var vid: String?; var platform = "yt"
-                  // YouTube patterns
+                  if s.lowercased().contains("soundcloud.com") {
+                      // We don't have a numeric id for pasted SC links; fall through to error
+                      errorDetails = "For SoundCloud links, please search by artist/track name in Magic DL."
+                      showError = true; return
+                  }
                   if let r = s.range(of: #"(?:youtu\.be/|youtube\.com/(?:embed/|live/|shorts/)|[?&]v=)([a-zA-Z0-9-_]{11})"#,
                                      options: .regularExpression) {
                       let match = String(s[r])
@@ -1722,26 +1716,20 @@ jobs:
                           vid = String(match[v])
                       }
                   }
-                  // SoundCloud patterns: treat SC links as sc platform (use URL path as id, since MJ supports URL-based sc via numeric id)
-                  if s.lowercased().contains("soundcloud.com") {
-                      platform = "sc"
-                      // MP3Juice sc search returns numeric id; for direct links we just hand the URL off as yt and let MJ search
-                      vid = s
-                  }
-                  if vid == nil {
-                      // Fall back: treat arbitrary link as a search query for MP3Juice by searching the URL
+                  guard let id = vid else {
                       errorDetails = "Could not parse that link. Try searching by name instead."
                       showError = true; return
                   }
-                  let suggested = name.isEmpty ? link : name
-                  pendingNameVid = vid
+                  let suggested = name.isEmpty ? s : name
+                  pendingNameVid = id
                   pendingNamePlatform = platform
+                  pendingNameDirectURL = nil
                   pendingNameSuggestion = suggested
                   nameInput = suggested
                   showNamePrompt = true
               }
 
-              // ---- Search via MP3Juice (YouTube + SoundCloud in one call) ----------
+              // ---- Search via MP3Juice --------------------------------------------
               func performMagicSearch(query: String) {
                   let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
                   guard !clean.isEmpty else { return }
@@ -1754,68 +1742,85 @@ jobs:
                   }
                   guard let encQ = clean.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                         let b64 = encQ.data(using: .utf8)?.base64EncodedString(),
-                        let url = URL(string: "https://mp3juice.sc/api/v1/search?y=y&q=\(b64)&_=\(Int(Date().timeIntervalSince1970*1000))") else {
-                      DispatchQueue.main.async {
-                          self.isSearching = false
-                          self.errorDetails = "Bad query"; self.showError = true
-                      }
+                        let b64enc = b64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+                      DispatchQueue.main.async { self.isSearching = false; self.errorDetails = "Bad query"; self.showError = true }
                       return
                   }
-                  var req = URLRequest(url: url, timeoutInterval: 20)
-                  req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
-                  req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
-                  URLSession.shared.dataTask(with: req) { [weak self] data, _, err in
+                  let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+                  // Fetch both YouTube (y=y) and SoundCloud (y=s) in parallel
+                  let group = DispatchGroup()
+                  let collectQ = DispatchQueue(label: "com.asmusic.collect")
+                  var collected = [SearchResult]()
+                  var lastErr: String?
+
+                  func fetchOne(scope: String) {
+                      group.enter()
+                      let plat = (scope == "s") ? "sc" : "yt"
+                      let us = "https://mp3juice.sc/api/v1/search?y=\(scope)&q=\(b64enc)&_=\(Int(Date().timeIntervalSince1970*1000))"
+                      guard let url = URL(string: us) else { group.leave(); return }
+                      var req = URLRequest(url: url, timeoutInterval: 20)
+                      req.setValue(ua, forHTTPHeaderField: "User-Agent")
+                      req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
+                      URLSession.shared.dataTask(with: req) { data, _, err in
+                          defer { group.leave() }
+                          if let err = err { lastErr = err.localizedDescription; return }
+                          guard let data = data,
+                                let j = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any] else { return }
+                          let source: SearchResultSource = (scope == "s") ? .mp3juice_sc : .mp3juice_yt
+                          let key = (scope == "s") ? "sc" : "yt"
+                          for item in (j[key] as? [[String:Any]] ?? []) {
+                              let idRaw = item["id"]
+                              let idStr: String
+                              if let s = idRaw as? String { idStr = s }
+                              else if let n = idRaw as? NSNumber { idStr = n.stringValue }
+                              else { continue }
+                              guard let title = item["title"] as? String else { continue }
+                              let durStr = item["duration"] as? String
+                              let dur = durStr.flatMap { Self.parseDuration($0) }
+                              var artist = (scope == "s") ? "SoundCloud" : "YouTube"
+                              var ttl = title
+                              if let r = title.range(of: " - ") {
+                                  artist = String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+                                  ttl = String(title[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+                              }
+                              // Direct download URL for SoundCloud (b64 id + b64 title)
+                              var directURL: URL? = nil
+                              if scope == "s",
+                                 let ib = item["id_base64"] as? String,
+                                 let tb = item["title_base64"] as? String,
+                                 let ibenc = ib.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+                                 let tbenc = tb.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+                                 let u = URL(string: "https://thetacloud.org/s/\(ibenc)/\(tbenc)/") {
+                                  directURL = u
+                              }
+                              collectQ.sync {
+                                  collected.append(SearchResult(source: source, title: ttl, artist: artist,
+                                                                duration: dur, artworkURL: nil,
+                                                                previewURL: directURL,
+                                                                platform: plat, extId: idStr))
+                              }
+                          }
+                      }.resume()
+                  }
+
+                  fetchOne(scope: "y")
+                  fetchOne(scope: "s")
+
+                  group.notify(queue: .main) { [weak self] in
                       guard let self = self else { return }
-                      DispatchQueue.main.async { self.isSearching = false }
-                      guard let data = data, err == nil else {
-                          DispatchQueue.main.async { self.errorDetails = "Network error"; self.showError = true }
-                          return
+                      self.isSearching = false
+                      if collected.isEmpty {
+                          self.errorDetails = lastErr ?? "No results found."
+                          self.showError = true
+                      } else {
+                          // dedupe by artist+title
+                          var seen = Set<String>()
+                          self.searchResults = collected.filter {
+                              seen.insert("\($0.artist.lowercased())|\($0.title.lowercased())").inserted
+                          }
+                          self.showSearchResults = true
                       }
-                      do {
-                          let resp = try JSONDecoder().decode(MJSearchResponse.self, from: data)
-                          var out = [SearchResult]()
-                          for yt in resp.yt ?? [] {
-                              guard let id = yt.id, let title = yt.title else { continue }
-                              let dur = yt.duration.flatMap { Self.parseDuration($0) }
-                              let artist = "YouTube"
-                              // split "Artist - Title" if possible
-                              var art = artist; var ttl = title
-                              if let r = title.range(of: " - ") {
-                                  art = String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
-                                  ttl = String(title[r.upperBound...]).trimmingCharacters(in: .whitespaces)
-                              }
-                              out.append(SearchResult(source: .mp3juice_yt, title: ttl, artist: art,
-                                                      duration: dur, artworkURL: nil, previewURL: nil,
-                                                      platform: "yt", extId: id))
-                          }
-                          for sc in resp.sc ?? [] {
-                              guard let id = sc.id, let title = sc.title else { continue }
-                              let dur = sc.duration.flatMap { Self.parseDuration($0) }
-                              let artist = "SoundCloud"
-                              var art = artist; var ttl = title
-                              if let r = title.range(of: " - ") {
-                                  art = String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
-                                  ttl = String(title[r.upperBound...]).trimmingCharacters(in: .whitespaces)
-                              }
-                              out.append(SearchResult(source: .mp3juice_sc, title: ttl, artist: art,
-                                                      duration: dur, artworkURL: nil, previewURL: nil,
-                                                      platform: "sc", extId: id))
-                          }
-                          DispatchQueue.main.async {
-                              self.searchResults = out
-                              if out.isEmpty {
-                                  self.errorDetails = "No results found."; self.showError = true
-                              } else {
-                                  self.showSearchResults = true
-                              }
-                          }
-                      } catch {
-                          DispatchQueue.main.async {
-                              self.errorDetails = "Could not parse results: \(error.localizedDescription)"
-                              self.showError = true
-                          }
-                      }
-                  }.resume()
+                  }
               }
 
               static func parseDuration(_ s: String) -> TimeInterval? {
