@@ -1701,15 +1701,22 @@ jobs:
 
               // ---- MP3Juice.sc pipeline --------------------------------------------
               private let workerURL = "https://fancy-sea-5d3d.holy-breeze-fec5.workers.dev/?m=i"
+              // Multiple theta auth/init subdomains (mirrors)
+              private let thetaMirrors = ["theta", "ocococ", "cocooo", "cooooo", "occcco", "ccccco"]
 
               private func beginMp3Juice(task: DownloadTask) {
                   mp3JuiceAuth { [weak self] key in
                       guard let self = self else { return }
-                      guard let key = key else {
-                          self.failOrRetry(task: task, message: "MP3Juice unavailable"); return
+                      if let key = key {
+                          self.mp3JuiceInit(task: task, key: key)
+                      } else {
+                          self.workerStart(task: task)
                       }
-                      self.mp3JuiceInit(task: task, key: key)
                   }
+              }
+
+              private func thetaURL(_ sub: String, path: String, _ ts: Int) -> URL? {
+                  URL(string: "https://\(sub).thetacloud.org/api/v1/\(path)?_=\(ts)")
               }
 
               private func mp3JuiceAuth(completion: @escaping (String?) -> Void) {
@@ -1717,34 +1724,64 @@ jobs:
                       completion(k); return
                   }
                   let ts = Int(Date().timeIntervalSince1970 * 1000)
-                  guard let url = URL(string: "https://theta.thetacloud.org/api/v1/auth?_=\(ts)") else { completion(nil); return }
-                  jsonGet(url, bearer: nil) { [weak self] result in
-                      guard case let .success(d) = result, let key = d["key"] as? String else {
-                          // Try worker auth too? Actually auth is on theta.
-                          completion(nil); return
+                  // Try multiple mirrors until one gives a key
+                  tryThetaAuth(mirrors: thetaMirrors, ts: ts, completion: completion)
+              }
+
+              private func tryThetaAuth(mirrors: [String], ts: Int, completion: @escaping (String?) -> Void) {
+                  var remaining = Array(mirrors)
+                  func attempt() {
+                      guard let mirror = remaining.first else { completion(nil); return }
+                      remaining.removeFirst()
+                      guard let url = thetaURL(mirror, path: "auth", ts) else { attempt(); return }
+                      jsonGet(url, bearer: nil) { [weak self] result in
+                          if case let .success(d) = result, let key = d["key"] as? String, !key.isEmpty {
+                              self?.mp3juiceKey = key; self?.mp3juiceKeyDate = Date()
+                              completion(key); return
+                          }
+                          attempt()
                       }
-                      self?.mp3juiceKey = key; self?.mp3juiceKeyDate = Date()
-                      completion(key)
                   }
+                  attempt()
               }
 
               private func mp3JuiceInit(task: DownloadTask, key: String) {
                   let ts = Int(Date().timeIntervalSince1970 * 1000)
-                  guard let url = URL(string: "https://theta.thetacloud.org/api/v1/init?_=\(ts)") else {
-                      failOrRetry(task: task, message: "Bad init URL"); return
-                  }
-                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.3); task.fileName = task.proposedName }
-                  jsonGet(url, bearer: key) { [weak self] result in
+                  tryThetaInit(mirrors: thetaMirrors, ts: ts, key: key, retries: 3) { [weak self] convertURL in
                       guard let self = self else { return }
-                      guard case let .success(d) = result,
-                            let convertURL = d["convertURL"] as? String else {
-                          // Worker fallback when theta init fails
-                          self.workerStart(task: task); return
+                      guard let convertURL = convertURL else {
+                          self.workerStart(task); return
                       }
+                      DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.3); task.fileName = task.proposedName }
                       let ts2 = Int(Date().timeIntervalSince1970 * 1000)
                       let full = convertURL + "&v=\(task.vid)&f=mp3&_=\(ts2)"
                       self.mp3JuiceConvert(task: task, key: key, url: full, hops: 0)
                   }
+              }
+
+              private func tryThetaInit(mirrors: [String], ts: Int, key: String, retries: Int,
+                                        completion: @escaping (String?) -> Void) {
+                  var rem = Array(mirrors)
+                  func attempt(retryCount: Int) {
+                      guard let mirror = rem.first else {
+                          if retryCount > 0 {
+                              DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
+                                  self.tryThetaInit(mirrors: mirrors, ts: Int(Date().timeIntervalSince1970*1000),
+                                                    key: key, retries: retryCount-1, completion: completion)
+                              }
+                          } else { completion(nil) }
+                          return
+                      }
+                      rem.removeFirst()
+                      guard let url = thetaURL(mirror, path: "init", ts) else { attempt(retryCount: retryCount); return }
+                      jsonGet(url, bearer: key) { result in
+                          if case let .success(d) = result, let cu = d["convertURL"] as? String, !cu.isEmpty {
+                              completion(cu); return
+                          }
+                          attempt(retryCount: retryCount)
+                      }
+                  }
+                  attempt(retryCount: retries)
               }
 
               private func mp3JuiceConvert(task: DownloadTask, key: String?, url: String, hops: Int) {
