@@ -576,6 +576,7 @@ jobs:
                           }.background(Color(uiColor: UIColor.secondarySystemBackground))
 
                           WebViewUI(viewModel: webViewModel, urlString: $urlString)
+                              .id(webViewModel.currentTabIndex)
 
                           HStack {
                               Button { webViewModel.goBack() } label: { Image(systemName: "chevron.backward").font(.title2) }.disabled(!webViewModel.canGoBack)
@@ -1034,21 +1035,20 @@ jobs:
               var title: String
           }
 
-          class WebViewModel: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+          class WebViewModel: NSObject, ObservableObject {
               @Published var tabs: [BrowserTab] = []
-              @Published var currentTabIndex: Int = 0
+              @Published var currentTabIndex: Int = 0 {
+                  didSet { refreshNavState() }
+              }
               @Published var showTabs: Bool = false
               @Published var canGoBack: Bool = false
               @Published var canGoForward: Bool = false
 
-              // Name prompt before download
+              // Name prompt before handing download to DownloadCenter
               @Published var showNamePrompt: Bool = false
               @Published var customSongName: String = ""
               private var pendingDownloadURL: URL?
-              private var pendingMIMEDownload: WKDownload?
-              private var pendingMIMESuggestedName: String?
 
-              // Keep the download delegates wired on every webview we create
               override init() {
                   super.init()
                   addNewTab()
@@ -1056,17 +1056,22 @@ jobs:
 
               var currentWebView: WKWebView { tabs[currentTabIndex].webView }
 
-              func addNewTab() {
+              private func makeWebView() -> WKWebView {
                   let prefs = WKWebpagePreferences()
                   prefs.allowsContentJavaScript = true
                   let config = WKWebViewConfiguration()
                   config.defaultWebpagePreferences = prefs
                   config.allowsInlineMediaPlayback = true
-                  let newWebView = WKWebView(frame: .zero, configuration: config)
-                  newWebView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-                  newWebView.navigationDelegate = self
-                  newWebView.uiDelegate = self
-                  tabs.append(BrowserTab(webView: newWebView, urlString: "https://google.com", title: "New Tab"))
+                  let wv = WKWebView(frame: .zero, configuration: config)
+                  wv.configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+                  wv.navigationDelegate = self
+                  wv.uiDelegate = self
+                  return wv
+              }
+
+              func addNewTab() {
+                  let wv = makeWebView()
+                  tabs.append(BrowserTab(webView: wv, urlString: "https://google.com", title: "New Tab"))
                   currentTabIndex = tabs.count - 1
                   loadUrl("https://google.com")
               }
@@ -1074,38 +1079,36 @@ jobs:
                   tabs.remove(at: index)
                   if tabs.isEmpty { addNewTab() }
                   else if currentTabIndex >= tabs.count { currentTabIndex = tabs.count - 1 }
+                  else { refreshNavState() }
               }
               func goBack()    { currentWebView.goBack() }
               func goForward() { currentWebView.goForward() }
               func refresh()   { currentWebView.reload() }
 
               func loadUrl(_ urlString: String) {
-                  var finalStr = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-                  if finalStr.isEmpty { return }
-                  if !finalStr.contains(".") || finalStr.contains(" ") {
-                      if let encoded = finalStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
-                          finalStr = "https://www.google.com/search?q=\(encoded)"
+                  var s = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+                  if s.isEmpty { return }
+                  if !s.contains(".") || s.contains(" ") {
+                      if let enc = s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                          s = "https://www.google.com/search?q=\(enc)"
                       }
-                  } else if !finalStr.hasPrefix("http") {
-                      finalStr = "https://" + finalStr
+                  } else if !s.hasPrefix("http") {
+                      s = "https://" + s
                   }
-                  if let url = URL(string: finalStr) { currentWebView.load(URLRequest(url: url)) }
+                  if let u = URL(string: s) { currentWebView.load(URLRequest(url: u)) }
               }
 
-              // ---- Grab audio from current page -----------------------------------
               func grabAudio() {
-                  let js = "(function() { var me = document.querySelectorAll('audio, video, source'); for (var i=0;i<me.length;i++){ if(me[i].src && me[i].src.startsWith('http')) return me[i].src; } return null; })()"
+                  let js = "(function(){var m=document.querySelectorAll('audio,video,source');for(var i=0;i<m.length;i++){if(m[i].src&&m[i].src.startsWith('http'))return m[i].src;}return null;})()"
                   currentWebView.evaluateJavaScript(js) { [weak self] result, _ in
                       guard let self = self else { return }
-                      if let s = result as? String, let u = URL(string: s) {
-                          self.pendingDownloadURL = u
-                          self.customSongName = self.suggestedName(for: u)
-                      } else if let u = self.currentWebView.url {
-                          self.pendingDownloadURL = u
-                          self.customSongName = "Web_Audio"
-                      } else {
-                          return
-                      }
+                      let u: URL? = {
+                          if let s = result as? String, let uu = URL(string: s) { return uu }
+                          return self.currentWebView.url
+                      }()
+                      guard let u = u else { return }
+                      self.pendingDownloadURL = u
+                      self.customSongName = self.suggestedName(for: u)
                       self.showNamePrompt = true
                   }
               }
@@ -1120,98 +1123,113 @@ jobs:
               }
 
               private func suggestedName(for url: URL) -> String {
-                  let host = url.host ?? "web"
                   let base = url.deletingPathExtension().lastPathComponent
-                  if base.isEmpty || base == "/" { return host }
-                  return base
+                  return base.isEmpty ? (url.host ?? "Track") : base
               }
 
-              // ---- WKNavigationDelegate ------------------------------------------
-              func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                           for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+              private func refreshNavState() {
+                  guard tabs.indices.contains(currentTabIndex) else { return }
+                  let wv = tabs[currentTabIndex].webView
+                  canGoBack = wv.canGoBack
+                  canGoForward = wv.canGoForward
+                  tabs[currentTabIndex].urlString = wv.url?.absoluteString ?? tabs[currentTabIndex].urlString
+              }
+          }
+
+          // MARK: - WKNavigationDelegate / WKUIDelegate / WKDownloadDelegate
+          extension WebViewModel: WKNavigationDelegate, WKUIDelegate {
+              func webView(_ webView: WKWebView,
+                           createWebViewWith configuration: WKWebViewConfiguration,
+                           for navigationAction: WKNavigationAction,
+                           windowFeatures: WKWindowFeatures) -> WKWebView? {
+                  // Pop-ups → load in current webView
                   if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
                   return nil
               }
               func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-                  let hideAds = "document.querySelectorAll('.ad,.ads,.popup,iframe').forEach(e=>e.remove());"
-                  webView.evaluateJavaScript(hideAds, completionHandler: nil)
+                  let hide = "document.querySelectorAll('.ad,.ads,.popup,iframe').forEach(e=>e.remove());"
+                  webView.evaluateJavaScript(hide, completionHandler: nil)
+                  if webView === currentWebView { refreshNavState() }
               }
               func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-                  canGoBack = webView.canGoBack
-                  canGoForward = webView.canGoForward
-                  if let u = webView.url?.absoluteString {
-                      if !u.contains(" ") { tabs[currentTabIndex].urlString = u }
-                  }
+                  if webView === currentWebView { refreshNavState() }
               }
-              func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+              func webView(_ webView: WKWebView,
+                           decidePolicyFor navigationAction: WKNavigationAction,
                            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
                   if navigationAction.shouldPerformDownload { decisionHandler(.download); return }
                   decisionHandler(.allow)
               }
-              func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+              func webView(_ webView: WKWebView,
+                           decidePolicyFor navigationResponse: WKNavigationResponse,
                            decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
                   if navigationResponse.canShowMIMEType == false { decisionHandler(.download); return }
                   if let mime = navigationResponse.response.mimeType?.lowercased(),
-                     mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm")
-                      || mime.contains("zip") || mime.contains("octet-stream") {
+                     mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4")
+                      || mime.contains("webm") || mime.contains("zip") || mime.contains("octet-stream") {
                       decisionHandler(.download); return
                   }
                   decisionHandler(.allow)
               }
-              func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
-                  // Trigger name prompt first — defer the download until user confirms
-                  pendingMIMEDownload = download
+              func webView(_ webView: WKWebView,
+                           navigationAction: WKNavigationAction,
+                           didBecome download: WKDownload) {
                   download.delegate = self
-                  // We need to ask for a name BEFORE deciding the destination, so we cancel
-                  // this download and instead enqueue the URL in DownloadCenter which shows
-                  // the banner + retry.
-                  // But WKDownload destination is decided synchronously, so instead we
-                  // immediately prompt and use a temp destination, then move.
-                  if let resp = download.originalRequest?.url {
-                      pendingDownloadURL = resp
-                      customSongName = (download.originalRequest?.url?.lastPathComponent ?? "download").removingPercentEncoding ?? "download"
-                      showNamePrompt = true
+                  // Show name prompt; for action-initiated downloads we don't have a response yet.
+                  DispatchQueue.main.async {
+                      self.pendingDownloadURL = webView.url
+                      self.customSongName = webView.url?.lastPathComponent ?? "download"
+                      self.showNamePrompt = true
                   }
               }
-              func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+              func webView(_ webView: WKWebView,
+                           navigationResponse: WKNavigationResponse,
+                           didBecome download: WKDownload) {
                   download.delegate = self
-                  // For response-driven downloads we have the suggested filename
-                  if let resp = navigationResponse.response as? HTTPURLResponse {
-                      pendingMIMESuggestedName = resp.suggestedFilename ?? "download"
-                      pendingDownloadURL = resp.url
-                      customSongName = pendingMIMESuggestedName ?? "download"
-                      showNamePrompt = true
+                  DispatchQueue.main.async {
+                      self.pendingDownloadURL = navigationResponse.response.url
+                      let suggested = (navigationResponse.response as? HTTPURLResponse)?.suggestedFilename
+                          ?? navigationResponse.response.url?.lastPathComponent ?? "download"
+                      self.customSongName = suggested.removingPercentEncoding ?? suggested
+                      self.showNamePrompt = true
                   }
               }
+          }
 
-              // ---- WKDownloadDelegate: route through DownloadCenter by saving to a temp name,
-              // then DownloadCenter will do its own download for the prompt path. We actually
-              // just let WKDownload write to a temp destination with the confirmed name, then
-              // move it into Documents. To keep it simple we call DownloadCenter which does its
-              // own network download using the URL (same effect for our use case).
-              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse,
-                            suggestedFilename: String, completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) {
-                  // Use a temp path now; DownloadCenter will handle the final named file via
-                  // the enqueue call we trigger on confirm. If the user hasn't confirmed yet,
-                  // we show the prompt, but the API requires a destination synchronously so
-                  // we give a temp path.
+          extension WebViewModel: WKDownloadDelegate {
+              func download(_ download: WKDownload,
+                            decideDestinationUsing response: URLResponse,
+                            suggestedFilename: String,
+                            completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) {
+                  // Write to a throwaway temp location; actual save goes through DownloadCenter
+                  // when the user confirms the name. We still have to give WKDownload a dest.
                   let tmp = FileManager.default.temporaryDirectory
                       .appendingPathComponent("wkdl_\(UUID().uuidString)_\(suggestedFilename)")
                   completionHandler(tmp)
               }
               func downloadDidFinish(_ download: WKDownload) {
-                  // Refresh library
+                  // Handled by DownloadCenter enqueue path; just refresh library
                   MusicManager.shared.loadSongs()
+              }
+              func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+                  // ignore; DownloadCenter will be used for retries
               }
           }
 
           struct WebViewUI: UIViewRepresentable {
               @ObservedObject var viewModel: WebViewModel
               @Binding var urlString: String
-              func makeUIView(context: Context) -> WKWebView { viewModel.currentWebView }
+
+              func makeUIView(context: Context) -> WKWebView {
+                  viewModel.currentWebView
+              }
               func updateUIView(_ uiView: WKWebView, context: Context) {
-                  uiView.navigationDelegate = viewModel
-                  uiView.uiDelegate = viewModel
+                  // If the current tab's webView has changed, re-point our UIView to it.
+                  if uiView !== viewModel.currentWebView {
+                      // We can't swap the UIView out; instead, add the new webView as a subview
+                      // and remove the old one. Simpler: always return currentWebView and rely on
+                      // SwiftUI's .id() modifier to force recreation (see caller).
+                  }
               }
           }
 
