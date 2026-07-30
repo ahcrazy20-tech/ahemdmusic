@@ -94,12 +94,10 @@ jobs:
           import SwiftUI
 
           struct Song: Identifiable, Codable, Equatable { var id: UUID; var title: String; var url: URL }
-          struct Playlist: Identifiable, Codable { var id: UUID; var name: String; var songIDs: [UUID] }
 
           class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
               static let shared = MusicManager()
               @Published var songs: [Song] = []
-              @Published var playlists: [Playlist] = []
               @Published var currentSong: Song?
               @Published var isPlaying: Bool = false
               @Published var currentTime: TimeInterval = 0.0
@@ -112,7 +110,7 @@ jobs:
               
               override init() {
                   super.init()
-                  loadSongs(); loadPlaylists()
+                  loadSongs()
                   let cc = MPRemoteCommandCenter.shared()
                   cc.playCommand.addTarget { _ in self.togglePlayPause(); return .success }
                   cc.pauseCommand.addTarget { _ in self.togglePlayPause(); return .success }
@@ -127,12 +125,6 @@ jobs:
                   DispatchQueue.main.async { self.songs = audio.map { Song(id: UUID(), title: $0.deletingPathExtension().lastPathComponent, url: $0) }.sorted { $0.title < $1.title } }
               }
 
-              func loadPlaylists() {
-                  if let data = UserDefaults.standard.data(forKey: "savedPlaylists"), let decoded = try? JSONDecoder().decode([Playlist].self, from: data) { playlists = decoded }
-                  if playlists.isEmpty { playlists = [Playlist(id: UUID(), name: "Liked Songs", songIDs: [])]; savePlaylists() }
-              }
-              func savePlaylists() { if let encoded = try? JSONEncoder().encode(playlists) { UserDefaults.standard.set(encoded, forKey: "savedPlaylists") } }
-
               func playSong(_ song: Song) {
                   audioPlayer?.stop(); avPlayer?.pause()
                   if song.url.scheme?.hasPrefix("http") == true {
@@ -145,8 +137,11 @@ jobs:
               }
               
               func togglePlayPause() {
-                  if isPlaying { if useAVPlayer { avPlayer?.pause() } else { audioPlayer?.pause() } } 
-                  else { if useAVPlayer { avPlayer?.play() } else { audioPlayer?.play() } }
+                  if isPlaying {
+                      if useAVPlayer { avPlayer?.pause() } else { audioPlayer?.pause() }
+                  } else {
+                      if useAVPlayer { avPlayer?.play() } else { audioPlayer?.play() }
+                  }
                   isPlaying.toggle(); updateNowPlaying()
               }
 
@@ -186,7 +181,7 @@ jobs:
           }
           SWIFT
 
-      - name: Write Ad-Blocked Smart Discovery
+      - name: Write Master Discovery Engine (Automation Fallback)
         run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
           import SwiftUI
@@ -203,7 +198,7 @@ jobs:
           struct SCUser: Codable { let username: String? }
           struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
 
-          class HiddenIntelligence: NSObject, WKNavigationDelegate {
+          class MasterDiscovery: NSObject, WKNavigationDelegate {
               var webView: WKWebView!; var tUrl = ""; var tName = ""
               override init() {
                   super.init()
@@ -212,18 +207,26 @@ jobs:
                   webView = WKWebView(frame: .zero, configuration: config)
                   webView.navigationDelegate = self
               }
-              func solve(url: String, name: String) {
+              func automate(url: String, name: String) {
                   self.tUrl = url; self.tName = name
-                  let juiceUrl = "https://www.mp3juices.site/search.php?q=\(name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
-                  webView.load(URLRequest(url: URL(string: juiceUrl)!))
+                  // Automate cobalt.tools as it is the strongest bypass
+                  webView.load(URLRequest(url: URL(string: "https://cobalt.tools")!))
               }
               func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-                  let adBlock = "var bad = document.querySelectorAll('iframe, .ad, .popup, banner, .overlay'); bad.forEach(el => el.remove());"
-                  webView.evaluateJavaScript(adBlock)
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                      let js = "var link = document.querySelector('a[href*=\".mp3\"], .download-btn'); if(link) window.location.href = link.href;"
-                      webView.evaluateJavaScript(js)
-                  }
+                  let js = """
+                  setTimeout(function() {
+                      var input = document.querySelector('input[type="url"], #url-input');
+                      if(input) {
+                          input.value = '\(tUrl)';
+                          input.dispatchEvent(new Event('input', { bubbles: true }));
+                          setTimeout(function() {
+                              var btn = document.querySelector('button[type="submit"], #download-button');
+                              if(btn) btn.click();
+                          }, 500);
+                      }
+                  }, 1500);
+                  """
+                  webView.evaluateJavaScript(js)
               }
           }
 
@@ -236,7 +239,7 @@ jobs:
               private var downloadSession: URLSession!; private var currentServerIdx = 0; private var watchdog: Timer?
               private let servers = ["https://co.wuk.sh", "https://cobalt.api.timeless.top", "https://co.eepy.today", "https://cobalt.q0.is", "https://api.vidiq.org", "https://api.cobalt.tools"]
               private var cUrl = ""; private var cName = ""; private let scId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
-              private let intelligence = HiddenIntelligence()
+              private let masterEngine = MasterDiscovery()
 
               override init() {
                   super.init()
@@ -261,8 +264,8 @@ jobs:
               private func tryNextServer() {
                   watchdog?.invalidate()
                   if currentServerIdx >= servers.count {
-                      DispatchQueue.main.async { self.statusMessage = "Using Intelligence Scraper..." }
-                      intelligence.solve(url: cUrl, name: cName); return
+                      DispatchQueue.main.async { self.statusMessage = "APIs Failed. Using Discovery Engine..." }
+                      masterEngine.automate(url: cUrl, name: cName); return
                   }
                   DispatchQueue.main.async { self.statusMessage = "Bypassing Server \(self.currentServerIdx + 1)..." }
                   watchdog = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { _ in self.currentServerIdx += 1; self.tryNextServer() }
@@ -296,7 +299,7 @@ jobs:
           }
           SWIFT
 
-      - name: Write Ad-Blocked Web Hub
+      - name: Write Web Hub (Original Grabber Restored)
         run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebHub.swift
           import SwiftUI
@@ -324,7 +327,8 @@ jobs:
               }
               func grab() {
                   self.grabStatus = true
-                  let js = "(function() { var m = document.querySelector('video, audio, source'); if(m) return m.src || m.currentSrc; return null; })()"
+                  // REVERTED TO ORIGINAL GRABBER LOGIC
+                  let js = "(function() { var mediaElements = document.querySelectorAll('audio, video, source'); for (var i = 0; i < mediaElements.length; i++) { if (mediaElements[i].src && mediaElements[i].src.startsWith('http')) { return mediaElements[i].src; } } return window.location.href; })()"
                   tabs[currentTabIndex].webView.evaluateJavaScript(js) { res, _ in
                       DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.grabStatus = false }
                       if let u = res as? String { SmartDownloaderManager.shared.startDownload(url: u, name: "Web_Grab_\(Int.random(in: 10...99))") }
@@ -374,7 +378,7 @@ jobs:
           }
           SWIFT
 
-      - name: Write Main UI Logic
+      - name: Write Main UI Logic (Fixed Layout)
         run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
@@ -422,7 +426,7 @@ jobs:
                                       TextField("Paste Link...", text: $link).padding().background(Color.white.opacity(0.1)).cornerRadius(12).textInputAutocapitalization(.never)
                                       TextField("Name...", text: $name).padding().background(Color.white.opacity(0.1)).cornerRadius(12)
                                       Button(action: { dl.startDownload(url: link, name: name) }) { 
-                                          Text(dl.isDownloading ? dl.statusMessage : "Download").bold().frame(maxWidth: .infinity).padding().background(Color.blue).cornerRadius(12)
+                                          Text(dl.isDownloading ? dl.statusMessage : "Download").bold().frame(maxWidth: .infinity).padding().background(Color.blue).cornerRadius(10)
                                       }.disabled(dl.isDownloading)
                                       if dl.isDownloading { ProgressView(value: dl.downloadProgress).accentColor(.purple).padding() }
                                   }.padding().foregroundColor(.white)
@@ -438,7 +442,7 @@ jobs:
                                                   VStack(alignment: .leading, spacing: 4) { 
                                                       Text(track.title ?? "Unknown").foregroundColor(.white).font(.system(size: 16, weight: .bold)).lineLimit(1)
                                                       Text("\(track.user?.username ?? "Artist") • \(track.durationFormatted)").font(.caption).foregroundColor(.gray) 
-                                                  }.layoutPriority(1)
+                                                  }.fixedSize(horizontal: false, vertical: true)
                                                   Spacer()
                                                   Button(action: { if let u = track.permalink_url, let url = URL(string: u) { MusicManager.shared.playSong(Song(id: UUID(), title: track.title ?? "Preview", url: url)) } }) { Image(systemName: "play.circle.fill").font(.title2).foregroundColor(.blue) }
                                                   Button(action: { dl.showSearchResults = false; dl.startDownload(url: track.permalink_url ?? "", name: track.title ?? "Song") }) { Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(.purple) }
@@ -470,9 +474,7 @@ jobs:
               @EnvironmentObject var mm: MusicManager
               var body: some View {
                   NavigationView {
-                      List(mm.playlists) { p in
-                          NavigationLink(p.name) { List(mm.songs.filter { p.songIDs.contains($0.id) }) { s in Text(s.title) }.navigationTitle(p.name) }
-                      }.navigationTitle("Playlists")
+                      List { Text("Liked Songs").font(.headline) }.navigationTitle("Playlists")
                   }
               }
           }
