@@ -338,7 +338,6 @@ jobs:
                       
                       if musicManager.currentSong != nil { 
                           MiniPlayerView(showFullPlayer: $showFullPlayer)
-                              .padding(.bottom, 50) 
                       }
                   }.sheet(isPresented: $showFullPlayer) { FullPlayerView() }
               }
@@ -389,7 +388,14 @@ jobs:
                           VStack(alignment: .leading) { Text(musicManager.currentSong?.title ?? "").font(.system(size: 16, weight: .semibold)).lineLimit(1); Text("AS Music").font(.caption).foregroundColor(.gray) }
                           Spacer()
                           Button(action: { musicManager.togglePlayPause() }) { Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill").font(.title2).foregroundColor(.primary) }.padding(.trailing)
-                      }.padding(.horizontal).padding(.vertical, 8).background(.ultraThinMaterial).onTapGesture { showFullPlayer = true }
+                      }
+                      .padding(.horizontal)
+                      .padding(.vertical, 8)
+                      .background(.ultraThinMaterial)
+                      .onTapGesture { showFullPlayer = true }
+                      
+                      // This ensures the player sits above the Tab Bar properly
+                      Color.clear.frame(height: 50)
                   }
               }
           }
@@ -1017,19 +1023,45 @@ jobs:
               func performMagicSearch(query: String) {
                   let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
                   guard !cleanQuery.isEmpty else { return }
+                  guard let encoded = cleanQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
 
                   stopPreview()
                   DispatchQueue.main.async {
                       self.isSearching = true
+                      self.statusMessage = "Searching SoundCloud..."
                       self.searchResults = []
-                      self.showSearchResults = false
                   }
 
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                      self.isSearching = false
-                      self.errorDetails = "Search is not configured yet."
-                      self.showError = true
+                  let urlStr = "https://api-v2.soundcloud.com/search/tracks?q=\(encoded)&client_id=\(scClientId)&limit=25"
+                  guard let url = URL(string: urlStr) else { 
+                      DispatchQueue.main.async { self.isSearching = false }
+                      return 
                   }
+
+                  URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+                      guard let self = self else { return }
+                      DispatchQueue.main.async { self.isSearching = false }
+
+                      if let data = data {
+                          do {
+                              let result = try JSONDecoder().decode(SCResponse.self, from: data)
+                              DispatchQueue.main.async {
+                                  self.searchResults = result.collection
+                                  self.showSearchResults = true
+                              }
+                          } catch {
+                              DispatchQueue.main.async {
+                                  self.errorDetails = "Failed to parse search results."
+                                  self.showError = true
+                              }
+                          }
+                      } else {
+                          DispatchQueue.main.async {
+                              self.errorDetails = error?.localizedDescription ?? "Network Error"
+                              self.showError = true
+                          }
+                      }
+                  }.resume()
               }
           }
 
