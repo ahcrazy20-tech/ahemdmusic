@@ -276,6 +276,7 @@ jobs:
 
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
+          import UIKit
           
           func generateColor(for title: String) -> Color { return Color(hue: Double(abs(title.hashValue) % 100) / 100.0, saturation: 0.8, brightness: 0.7) }
           
@@ -457,6 +458,7 @@ jobs:
 
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
+          import UIKit
           import WebKit
           
           struct BrowserTab: Identifiable { let id = UUID(); var webView: WKWebView; var urlString: String; var title: String }
@@ -592,7 +594,7 @@ jobs:
                   func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) { if navigationResponse.canShowMIMEType == false { decisionHandler(WKNavigationResponsePolicy.download); return }; if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm") || mime.contains("zip") || mime.contains("octet-stream") { decisionHandler(WKNavigationResponsePolicy.download); return }; decisionHandler(WKNavigationResponsePolicy.allow) }
                   func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
                   func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = self }
-                  func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) { let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]; let cleanName = suggestedFilename.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggestedFilename; let destPath = destDir.appendingPathComponent(cleanName); try? fm.removeItem(at: destPath); DispatchQueue.main.async { self.parent.viewModel.downloadFileName = cleanName }; completionHandler(destPath) }
+                  func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL) -> Void) { let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]; let cleanName = suggestedFilename.removingPercentEncoding?.replacingOccurrences(of: "+", with: " ") ?? suggestedFilename; let destPath = destDir.appendingPathComponent(cleanName); try? fm.removeItem(at: destPath); DispatchQueue.main.async { self.parent.viewModel.downloadFileName = cleanName }; completionHandler(destPath) }
                   func downloadDidFinish(_ download: WKDownload) { let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]; let destPath = destDir.appendingPathComponent(parent.viewModel.downloadFileName); try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path); DispatchQueue.main.async { self.parent.viewModel.showDownloadAlert = true; MusicManager.shared.loadSongs() } }
               }
           }
@@ -602,6 +604,7 @@ jobs:
 
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/SmartDownloader.swift
           import Foundation
+          import UIKit
           import SwiftUI
           import AVFoundation
           import WebKit
@@ -699,7 +702,7 @@ jobs:
               func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { if navigationAction.shouldPerformDownload { decisionHandler(WKNavigationActionPolicy.download); return }; decisionHandler(WKNavigationActionPolicy.allow) }
               func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
               
-              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL) -> Void) {
                   self.isDownloadStarted = true
                   let fm = FileManager.default; let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
                   let cleanName = self.targetName.isEmpty ? suggestedFilename : self.targetName.replacingOccurrences(of: "/", with: "-") + ".mp3"
