@@ -1041,7 +1041,7 @@ jobs:
               func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
                   let js = extractors[attempt].js.replacingOccurrences(of: "$$URL$$", with: self.targetUrl)
                   webView.evaluateJavaScript(js) { _, err in
-                      if let err = err { self.log.warning("JS eval error: \(err.localizedDescription)") }
+                      if let err = err { log.warning("JS eval error: \(err.localizedDescription)") }
                   }
                   DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
                       guard let self = self else { return }
@@ -1262,8 +1262,7 @@ jobs:
               // MARK: - Source adapters
               // -----------------------------------------------------------------------
               private func soundCloudSearch(query: String, completion: @escaping ([SearchResult], String?) -> Void) {
-                  fetchSoundCloudClientId { [weak self] clientId in
-                      guard let self = self else { return }
+                  fetchSoundCloudClientId { clientId in
                       guard let cid = clientId,
                             let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                             let url = URL(string: "https://api-v2.soundcloud.com/search/tracks?q=\(encoded)&client_id=\(cid)&limit=25&link_partitioning=1") else {
@@ -1658,21 +1657,21 @@ jobs:
                   req.httpBody = try? JSONSerialization.data(withJSONObject: params)
                   URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
                       guard let self = self, let data = data else { completion(nil); return }
-                      if let err = err { self.log.warning("v7 \(server) error: \(err.localizedDescription)"); completion(nil); return }
+                      if let err = err { log.warning("v7 \(server) error: \(err.localizedDescription)"); completion(nil); return }
                       if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
-                          self.log.warning("v7 \(server) HTTP \(http.statusCode)"); completion(nil); return
+                          log.warning("v7 \(server) HTTP \(http.statusCode)"); completion(nil); return
                       }
                       do {
                           let res = try JSONDecoder().decode(CobaltResponse.self, from: data)
                           if res.status == "error" {
-                              self.log.warning("v7 error: \(res.text ?? "?")"); completion(nil); return
+                              log.warning("v7 error: \(res.text ?? "?")"); completion(nil); return
                           }
                           if let u = res.url, let url = URL(string: u) { completion(url); return }
                           if let picker = res.picker?.first(where: { $0.type == "audio" }),
                              let u = picker.url, let url = URL(string: u) { completion(url); return }
                           completion(nil)
                       } catch {
-                          self.log.warning("v7 parse: \(error.localizedDescription)")
+                          log.warning("v7 parse: \(error.localizedDescription)")
                           completion(nil)
                       }
                   }.resume()
@@ -1690,21 +1689,21 @@ jobs:
                   req.httpBody = try? JSONSerialization.data(withJSONObject: params)
                   URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
                       guard let self = self, let data = data else { completion(nil); return }
-                      if let err = err { self.log.warning("v10 \(server) error: \(err.localizedDescription)"); completion(nil); return }
+                      if let err = err { log.warning("v10 \(server) error: \(err.localizedDescription)"); completion(nil); return }
                       if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
-                          self.log.warning("v10 \(server) HTTP \(http.statusCode)"); completion(nil); return
+                          log.warning("v10 \(server) HTTP \(http.statusCode)"); completion(nil); return
                       }
                       do {
                           let res = try JSONDecoder().decode(CobaltResponse.self, from: data)
                           if res.status == "error" {
-                              self.log.warning("v10 error: \(res.text ?? "?")"); completion(nil); return
+                              log.warning("v10 error: \(res.text ?? "?")"); completion(nil); return
                           }
                           if let u = res.url, let url = URL(string: u) { completion(url); return }
                           if let picker = res.picker?.first(where: { $0.type == "audio" }),
                              let u = picker.url, let url = URL(string: u) { completion(url); return }
                           completion(nil)
                       } catch {
-                          self.log.warning("v10 parse: \(error.localizedDescription)")
+                          log.warning("v10 parse: \(error.localizedDescription)")
                           completion(nil)
                       }
                   }.resume()
