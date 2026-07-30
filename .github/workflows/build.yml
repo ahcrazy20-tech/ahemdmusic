@@ -79,6 +79,7 @@ jobs:
               init() {
                   try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
                   try? AVAudioSession.sharedInstance().setActive(true)
+                  UIApplication.shared.beginReceivingRemoteControlEvents()
               }
               var body: some Scene {
                   WindowGroup { MainTabView().environmentObject(MusicManager.shared) }
@@ -131,7 +132,6 @@ jobs:
                   if let data = UserDefaults.standard.data(forKey: "savedPlaylists"), let decoded = try? JSONDecoder().decode([Playlist].self, from: data) { playlists = decoded }
                   if playlists.isEmpty { playlists = [Playlist(id: UUID(), name: "Liked Songs", songIDs: [])]; savePlaylists() }
               }
-              
               func savePlaylists() { if let encoded = try? JSONEncoder().encode(playlists) { UserDefaults.standard.set(encoded, forKey: "savedPlaylists") } }
 
               func playSong(_ song: Song) {
@@ -145,7 +145,11 @@ jobs:
               }
               
               func togglePlayPause() {
-                  if isPlaying { useAVPlayer ? avPlayer?.pause() : audioPlayer?.pause() } else { useAVPlayer ? avPlayer?.play() : audioPlayer?.play() }
+                  if isPlaying {
+                      if useAVPlayer { avPlayer?.pause() } else { audioPlayer?.pause() }
+                  } else {
+                      if useAVPlayer { avPlayer?.play() } else { audioPlayer?.play() }
+                  }
                   isPlaying.toggle(); updateNowPlaying()
               }
 
@@ -153,7 +157,6 @@ jobs:
                   guard !songs.isEmpty, let current = currentSong, let idx = songs.firstIndex(of: current) else { return }
                   playSong(songs[(idx + 1) % songs.count])
               }
-              
               func playPrevious() {
                   guard !songs.isEmpty, let current = currentSong, let idx = songs.firstIndex(of: current) else { return }
                   playSong(songs[(idx - 1 + songs.count) % songs.count])
@@ -171,7 +174,6 @@ jobs:
               }
 
               func seek(to: TimeInterval) { if useAVPlayer { avPlayer?.seek(to: CMTime(seconds: to, preferredTimescale: 1000)) } else { audioPlayer?.currentTime = to } }
-              
               func formatTime(_ t: TimeInterval) -> String { 
                   if t.isNaN || t.isInfinite { return "0:00" }
                   let m = Int(t)/60; let s = Int(t)%60; return String(format: "%d:%02d", m, s) 
@@ -209,22 +211,6 @@ jobs:
           struct SCUser: Codable { let username: String? }
           struct CobaltResponse: Codable { var status: String?; var url: String?; var text: String? }
 
-          class HiddenWebEngine: NSObject, WKNavigationDelegate {
-              var webView: WKWebView!; var tUrl = ""; var tName = ""
-              override init() {
-                  super.init()
-                  webView = WKWebView(); webView.navigationDelegate = self
-              }
-              func forceExtract(url: String, name: String) {
-                  self.tUrl = url; self.tName = name
-                  webView.load(URLRequest(url: URL(string: "https://y2mate.nu/en-OOTt/")!))
-              }
-              func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-                  let js = "document.getElementById('video').value = '\(tUrl)'; document.querySelector('button[type=\"submit\"]').click();"
-                  webView.evaluateJavaScript(js)
-              }
-          }
-
           class SmartDownloaderManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
               static let shared = SmartDownloaderManager()
               @Published var isDownloading = false; @Published var isSearching = false; @Published var statusMessage = ""
@@ -234,7 +220,6 @@ jobs:
               private var downloadSession: URLSession!; private var currentServerIdx = 0; private var watchdog: Timer?
               private let servers = ["https://co.wuk.sh", "https://cobalt.api.timeless.top", "https://co.eepy.today", "https://cobalt.q0.is", "https://api.vidiq.org", "https://api.cobalt.tools"]
               private var cUrl = ""; private var cName = ""; private let scId = "X2iyLRaFdot6PHiU6l7tTR8wRSTY0sFp"
-              private let hiddenEngine = HiddenWebEngine()
 
               override init() {
                   super.init()
@@ -243,7 +228,7 @@ jobs:
 
               func performMagicSearch(query: String) {
                   isSearching = true; searchResults = []
-                  let url = URL(string: "https://api-v2.soundcloud.com/search/tracks?q=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")&client_id=\(scId)&limit=20")!
+                  let url = URL(string: "https://api-v2.soundcloud.com/search/tracks?q=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")&client_id=\(scId)&limit=25")!
                   URLSession.shared.dataTask(with: url) { data, _, _ in
                       DispatchQueue.main.async { self.isSearching = false }
                       if let data = data, let res = try? JSONDecoder().decode(SCResponse.self, from: data) {
@@ -259,11 +244,14 @@ jobs:
               private func tryNextServer() {
                   watchdog?.invalidate()
                   if currentServerIdx >= servers.count {
-                      DispatchQueue.main.async { self.statusMessage = "Deep Fallback Engine..." }
-                      hiddenEngine.forceExtract(url: cUrl, name: cName); return
+                      DispatchQueue.main.async { self.isDownloading = false; self.errorDetails = "All download attempts failed."; self.showError = true }
+                      return
                   }
+                  
                   DispatchQueue.main.async { self.statusMessage = "Bypassing (Server \(self.currentServerIdx + 1))..." }
-                  watchdog = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { _ in self.currentServerIdx += 1; self.tryNextServer() }
+                  watchdog = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { _ in
+                      self.currentServerIdx += 1; self.tryNextServer()
+                  }
 
                   var req = URLRequest(url: URL(string: servers[currentServerIdx] + "/api/json")!)
                   req.httpMethod = "POST"; req.setValue("application/json", forHTTPHeaderField: "Content-Type"); req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -324,7 +312,7 @@ jobs:
               var body: some View {
                   VStack(spacing: 0) {
                       HStack {
-                          TextField("URL", text: $vm.urlInput).textFieldStyle(.roundedBorder)
+                          TextField("Search or URL", text: $vm.urlInput).textFieldStyle(.roundedBorder)
                           Button("Go") { vm.loadUrl(vm.urlInput) }
                           Button(action: { vm.showTabs = true }) { Image(systemName: "square.on.square") }
                       }.padding(8)
@@ -405,8 +393,9 @@ jobs:
                                           Text(dl.isDownloading ? dl.statusMessage : "Download").bold().frame(maxWidth: .infinity).padding().background(Color.blue).cornerRadius(12)
                                       }.disabled(dl.isDownloading)
                                       if dl.isDownloading { ProgressView(value: dl.downloadProgress).accentColor(.purple) }
-                                  }.padding().foregroundColor(.white)
-                              }
+                              }.padding().foregroundColor(.white)
+                              Spacer()
+                          }
                           }
                           if dl.showSearchResults {
                               Color.black.overlay(VStack {
