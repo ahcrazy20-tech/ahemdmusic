@@ -31,31 +31,45 @@ jobs:
           rm -rf TrollMusicApp/*.xcodeproj
           rm -rf TrollMusicApp.xcodeproj build Payload TrollMusicApp.ipa
 
-      - name: Create Project Config
+      - name: Create Project Config (Signing Disabled)
         run: |
-          echo 'name: TrollMusicApp' > project.yml
-          echo 'options:' >> project.yml
-          echo '  bundleIdPrefix: com.ahmedsoliman' >> project.yml
-          echo 'targets:' >> project.yml
-          echo '  TrollMusicApp:' >> project.yml
-          echo '    type: application' >> project.yml
-          echo '    platform: iOS' >> project.yml
-          echo '    deploymentTarget: "16.0"' >> project.yml
-          echo '    sources:' >> project.yml
-          echo '      - path: TrollMusicApp/TrollMusicApp' >> project.yml
-          echo '        excludes:' >> project.yml
-          echo '          - "Preview Content"' >> project.yml
-          echo '    info:' >> project.yml
-          echo '      path: TrollMusicApp/TrollMusicApp/Info.plist' >> project.yml
-          echo '      properties:' >> project.yml
-          echo '        UILaunchScreen: {}' >> project.yml
-          echo '        UIBackgroundModes: [audio]' >> project.yml
-          echo '        NSAppTransportSecurity:' >> project.yml
-          echo '          NSAllowsArbitraryLoads: true' >> project.yml
-          echo '    settings:' >> project.yml
-          echo '      GENERATE_INFOPLIST_FILE: "NO"' >> project.yml
-          echo '      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon' >> project.yml
-          echo '      DEVELOPMENT_ASSET_PATHS: "DummyAssets"' >> project.yml
+          cat << 'YAML' > project.yml
+          name: TrollMusicApp
+          options:
+            bundleIdPrefix: com.ahmedsoliman
+            deploymentTarget:
+              iOS: "16.0"
+          settings:
+            CODE_SIGNING_ALLOWED: NO
+            CODE_SIGNING_REQUIRED: NO
+            CODE_SIGN_IDENTITY: ""
+            DEVELOPMENT_TEAM: ""
+            PROVISIONING_PROFILE: ""
+          targets:
+            TrollMusicApp:
+              type: application
+              platform: iOS
+              deploymentTarget: "16.0"
+              sources:
+                - path: TrollMusicApp/TrollMusicApp
+                  excludes:
+                    - "Preview Content"
+              info:
+                path: TrollMusicApp/TrollMusicApp/Info.plist
+                properties:
+                  UILaunchScreen: {}
+                  UIBackgroundModes: [audio]
+                  NSAppTransportSecurity:
+                    NSAllowsArbitraryLoads: true
+              settings:
+                GENERATE_INFOPLIST_FILE: NO
+                ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+                DEVELOPMENT_ASSET_PATHS: "DummyAssets"
+                CODE_SIGNING_ALLOWED: NO
+                CODE_SIGNING_REQUIRED: NO
+                CODE_SIGN_IDENTITY: ""
+                DEVELOPMENT_TEAM: ""
+          YAML
 
           mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
           mkdir -p DummyAssets
@@ -521,23 +535,11 @@ jobs:
               func loadUrl(_ urlString: String) { var finalStr = urlString.trimmingCharacters(in: .whitespacesAndNewlines); if finalStr.isEmpty { return }; if !finalStr.contains(".") || finalStr.contains(" ") { if let encoded = finalStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) { finalStr = "https://www.google.com/search?q=\(encoded)" } } else { if !finalStr.hasPrefix("http") { finalStr = "https://" + finalStr } }; if let url = URL(string: finalStr) { currentWebView.load(URLRequest(url: url)) } }
               
               func grabAudio() {
-                  // Deep scan for media sources
-                  let js = """
-                  (function() {
-                      var mediaElements = document.querySelectorAll('audio, video, source');
-                      for (var i = 0; i < mediaElements.length; i++) {
-                          if (mediaElements[i].src && mediaElements[i].src.startsWith('http')) { return mediaElements[i].src; }
-                      }
-                      // Check for HLS players
-                      if (window.player && window.player.src) { return window.player.src; }
-                      return null;
-                  })()
-                  """
+                  let js = "(function() { var mediaElements = document.querySelectorAll('audio, video, source'); for (var i = 0; i < mediaElements.length; i++) { if (mediaElements[i].src && mediaElements[i].src.startsWith('http')) { return mediaElements[i].src; } } return null; })()"
                   currentWebView.evaluateJavaScript(js) { result, error in
                       if let mediaUrlString = result as? String, let url = URL(string: mediaUrlString) { 
                           self.capturedUrl = url; self.customSongName = "Web_Audio"; self.showNamePrompt = true 
                       } else {
-                          // Fallback: If no direct source, pass the page URL to the downloader engine
                           self.capturedUrl = self.currentWebView.url; self.customSongName = "Web_Page_Grab"; self.showNamePrompt = true
                       }
                   }
@@ -623,8 +625,6 @@ jobs:
                   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { let hideAdsScript = "var badEls = document.querySelectorAll('.ad, .ads, .popup, iframe'); badEls.forEach(el => el.remove());"; webView.evaluateJavaScript(hideAdsScript, completionHandler: { _, _ in }) }
                   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { parent.viewModel.canGoBack = webView.canGoBack; parent.viewModel.canGoForward = webView.canGoForward; if let currentURL = webView.url?.absoluteString { if !parent.urlString.contains(" ") { parent.urlString = currentURL }; parent.viewModel.tabs[parent.viewModel.currentTabIndex].urlString = currentURL } }
                   func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { if navigationAction.shouldPerformDownload { decisionHandler(WKNavigationActionPolicy.download); return }; decisionHandler(WKNavigationActionPolicy.allow) }
-                  
-                  // THE SECRET WEAPON: Intercepts media streams automatically
                   func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) { 
                       if navigationResponse.canShowMIMEType == false { decisionHandler(WKNavigationResponsePolicy.download); return }
                       if let mime = navigationResponse.response.mimeType?.lowercased(), mime.contains("audio") || mime.contains("mpeg") || mime.contains("mp4") || mime.contains("webm") || mime.contains("zip") || mime.contains("octet-stream") { 
@@ -793,7 +793,6 @@ jobs:
                   }
               }
 
-              // IMPLEMENTED MAGIC SEARCH
               func performMagicSearch(query: String) {
                   let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
                   guard !cleanQuery.isEmpty else { return }
@@ -1082,3 +1081,30 @@ jobs:
       - name: Build and Archive
         run: |
           xcodebuild archive \
+            -project TrollMusicApp.xcodeproj \
+            -scheme TrollMusicApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$PWD/build/TrollMusicApp.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE="" \
+            DEVELOPMENT_ASSET_PATHS=""
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R "build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app" Payload/
+          /usr/bin/zip -r TrollMusicApp.ipa Payload
+          test -f TrollMusicApp.ipa
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollMusicApp-IPA
+          path: TrollMusicApp.ipa
+          if-no-files-found: error
+          retention-days: 14
