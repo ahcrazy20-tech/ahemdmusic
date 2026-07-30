@@ -1515,7 +1515,7 @@ jobs:
           // MARK: - Normalised search result model
           // ---------------------------------------------------------------------------
           enum SearchResultSource: String, Codable {
-              case mp3juice_yt, mp3juice_sc, youtube, itunes, deezer, soundcloud
+              case mp3juice_yt, mp3juice_sc
           }
 
           struct SearchResult: Identifiable, Equatable {
@@ -1524,11 +1524,9 @@ jobs:
               let title: String
               let artist: String
               let duration: TimeInterval?
-              let artworkURL: URL?
-              let previewURL: URL?
-              /// MP3Juice video/track id (11-char YT id, or SoundCloud numeric id string)
               let platform: String    // "yt" or "sc"
               let extId: String
+              let directURL: URL?     // if non-nil, download directly (SC tracks)
               static func == (lhs: SearchResult, rhs: SearchResult) -> Bool { lhs.id == rhs.id }
 
               var durationFormatted: String {
@@ -1552,13 +1550,16 @@ jobs:
 
           class DownloadTask: ObservableObject, Identifiable {
               let id = UUID()
-              let vid: String     // platform id (YT 11-char or SC numeric)
+              let vid: String
               let platform: String
               let proposedName: String
+              var directURL: URL?
               @Published var status: DownloadTaskStatus = .queued
               @Published var fileName: String = ""
-              init(vid: String, platform: String, proposedName: String) {
+              var autoRetries: Int = 0
+              init(vid: String, platform: String, proposedName: String, directURL: URL? = nil) {
                   self.vid = vid; self.platform = platform; self.proposedName = proposedName
+                  self.directURL = directURL
               }
           }
 
@@ -1571,42 +1572,31 @@ jobs:
               private var session: URLSession!
               private var activeTask: DownloadTask?
               private var activeURLTask: URLSessionDownloadTask?
+              private var pollTimer: Timer?
               private var mp3juiceKey: String?
               private var mp3juiceKeyDate: Date?
-              private var pollTimer: Timer?
-              private var convertRetries = 0
 
               override private init() {
                   super.init()
                   let config = URLSessionConfiguration.default
-                  config.timeoutIntervalForRequest = 25
-                  config.timeoutIntervalForResource = 180
+                  config.timeoutIntervalForRequest = 30
+                  config.timeoutIntervalForResource = 240
                   session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
               }
 
               // ---- Public API -------------------------------------------------------
-              func enqueue(vid: String, platform: String, suggestedName: String, then: (() -> Void)? = nil) {
-                  var name = suggestedName
-                      .replacingOccurrences(of: "/", with: "-")
-                      .trimmingCharacters(in: .whitespacesAndNewlines)
-                  if name.isEmpty { name = "Track" }
+              func enqueue(vid: String, platform: String, suggestedName: String) {
+                  let name = sanitize(suggestedName)
                   let task = DownloadTask(vid: vid, platform: platform, proposedName: name)
-                  DispatchQueue.main.async {
-                      self.objectWillChange.send()
-                      self.tasks.insert(task, at: 0)
-                      self.showBanner = true
-                      if self.activeTask == nil { self.startNext() }
-                      then?()
-                  }
+                  schedule(task)
               }
               func enqueueDirect(url: URL, suggestedName: String) {
-                  // For Web Hub "Grab Audio" / MIME: we still use the direct strategy, so create
-                  // a pseudo-task and fall back to a direct downloader path.
-                  var name = suggestedName
-                      .replacingOccurrences(of: "/", with: "-")
-                      .trimmingCharacters(in: .whitespacesAndNewlines)
-                  if name.isEmpty { name = url.lastPathComponent }
-                  let task = DownloadTask(vid: url.absoluteString, platform: "direct", proposedName: name)
+                  let name = sanitize(suggestedName)
+                  let task = DownloadTask(vid: url.absoluteString, platform: "direct",
+                                          proposedName: name, directURL: url)
+                  schedule(task)
+              }
+              private func schedule(_ task: DownloadTask) {
                   DispatchQueue.main.async {
                       self.objectWillChange.send()
                       self.tasks.insert(task, at: 0)
@@ -1619,10 +1609,22 @@ jobs:
                   DispatchQueue.main.async {
                       self.objectWillChange.send()
                       task.status = .queued
+                      task.fileName = ""
+                      task.autoRetries = 0
                       if self.activeTask == nil { self.startNext() }
+                      else if self.activeTask?.id == task.id {
+                          self.activeTask = nil; self.pollTimer?.invalidate(); self.pollTimer = nil
+                          self.startNext()
+                      }
                   }
               }
-
+              func remove(_ task: DownloadTask) {
+                  DispatchQueue.main.async {
+                      self.objectWillChange.send()
+                      self.tasks.removeAll { $0.id == task.id }
+                      if self.tasks.isEmpty { self.showBanner = false }
+                  }
+              }
               func clearCompleted() {
                   DispatchQueue.main.async {
                       self.objectWillChange.send()
@@ -1634,15 +1636,6 @@ jobs:
                       if self.tasks.isEmpty { self.showBanner = false }
                   }
               }
-              func remove(_ task: DownloadTask) {
-                  DispatchQueue.main.async {
-                      self.objectWillChange.send()
-                      self.tasks.removeAll { $0.id == task.id }
-                      if self.tasks.isEmpty { self.showBanner = false }
-                  }
-              }
-
-              func dismiss() { DispatchQueue.main.async { self.showBanner = false } }
 
               // ---- Queue driver ----------------------------------------------------
               private func startNext() {
@@ -1650,8 +1643,12 @@ jobs:
                       if case .queued = $0.status { return true }; return false
                   }) else { activeTask = nil; pollTimer?.invalidate(); pollTimer = nil; return }
                   activeTask = next
-                  if next.platform == "direct" {
-                      downloadDirect(task: next, url: URL(string: next.vid)!)
+                  if next.platform == "direct", let u = next.directURL {
+                      startMediaDownload(task: next, url: u, finalName: next.proposedName)
+                  } else if next.platform == "sc", let u = next.directURL {
+                      startMediaDownload(task: next, url: u, finalName: next.proposedName)
+                  } else if next.platform == "yt" {
+                      beginMp3Juice(task: next)
                   } else {
                       beginMp3Juice(task: next)
                   }
@@ -1660,12 +1657,30 @@ jobs:
               private func finish(task: DownloadTask) {
                   DispatchQueue.main.async {
                       task.status = .done
+                      UINotificationFeedbackGenerator().notificationOccurred(.success)
                       MusicManager.shared.loadSongs()
                       self.activeTask = nil
+                      self.pollTimer?.invalidate(); self.pollTimer = nil
                       self.startNext()
                   }
               }
-              private func fail(task: DownloadTask, message: String) {
+              private func failOrRetry(task: DownloadTask, message: String) {
+                  if task.autoRetries < 2 {
+                      task.autoRetries += 1
+                      log.warning("Retrying (\(task.autoRetries)): \(message)")
+                      DispatchQueue.main.async {
+                          self.objectWillChange.send()
+                          task.status = .queued
+                          task.fileName = ""
+                          self.pollTimer?.invalidate(); self.pollTimer = nil
+                          if self.activeTask?.id == task.id { self.activeTask = nil }
+                          // small delay
+                          DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+                              DispatchQueue.main.async { self.startNext() }
+                          }
+                      }
+                      return
+                  }
                   DispatchQueue.main.async {
                       task.status = .failed(message)
                       log.error("Download failed: \(message, privacy: .public)")
@@ -1675,156 +1690,254 @@ jobs:
                   }
               }
 
-              // ---- Direct download (Web Hub) ---------------------------------------
-              private func downloadDirect(task: DownloadTask, url: URL) {
-                  DispatchQueue.main.async { self.objectWillChange.send(); task.fileName = task.proposedName; task.status = .downloading(0) }
-                  var req = URLRequest(url: url, timeoutInterval: 60)
-                  req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-                  let t = session.downloadTask(with: req)
-                  activeURLTask = t; t.resume()
+              private func sanitize(_ s: String) -> String {
+                  var out = s.replacingOccurrences(of: "/", with: "-")
+                  let invalid = CharacterSet(charactersIn: "\\:*?\"<>|")
+                  out = out.components(separatedBy: invalid).joined(separator: "-")
+                  out = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                  if out.isEmpty { out = "Track" }
+                  return out
               }
 
               // ---- MP3Juice.sc pipeline --------------------------------------------
+              private let workerURL = "https://fancy-sea-5d3d.holy-breeze-fec5.workers.dev/?m=i"
+
               private func beginMp3Juice(task: DownloadTask) {
-                  convertRetries = 0
                   mp3JuiceAuth { [weak self] key in
                       guard let self = self else { return }
                       guard let key = key else {
-                          self.fail(task: task, message: "MP3Juice unavailable"); return
+                          self.failOrRetry(task: task, message: "MP3Juice unavailable"); return
                       }
-                      self.mp3JuiceInitThenConvert(task: task, key: key)
+                      self.mp3JuiceInit(task: task, key: key)
                   }
               }
 
               private func mp3JuiceAuth(completion: @escaping (String?) -> Void) {
-                  // Cached key
                   if let k = mp3juiceKey, let d = mp3juiceKeyDate, Date().timeIntervalSince(d) < 600 {
                       completion(k); return
                   }
                   let ts = Int(Date().timeIntervalSince1970 * 1000)
-                  guard let url = URL(string: "https://theta.thetacloud.org/api/v1/auth?_=\(ts)") else {
-                      completion(nil); return
-                  }
-                  var req = URLRequest(url: url, timeoutInterval: 15)
-                  req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
-                  req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
-                  req.setValue("https://mp3juice.sc", forHTTPHeaderField: "Origin")
-                  URLSession.shared.dataTask(with: req) { [weak self] data, _, err in
-                      guard let self = self, let data = data, err == nil,
-                            let j = try? JSONSerialization.jsonObject(with: data) as? [String:Any],
-                            let key = j["key"] as? String else { completion(nil); return }
-                      self.mp3juiceKey = key; self.mp3juiceKeyDate = Date()
+                  guard let url = URL(string: "https://theta.thetacloud.org/api/v1/auth?_=\(ts)") else { completion(nil); return }
+                  jsonGet(url, bearer: nil) { [weak self] result in
+                      guard case let .success(d) = result, let key = d["key"] as? String else {
+                          // Try worker auth too? Actually auth is on theta.
+                          completion(nil); return
+                      }
+                      self?.mp3juiceKey = key; self?.mp3juiceKeyDate = Date()
                       completion(key)
-                  }.resume()
+                  }
               }
 
-              private func mp3JuiceInitThenConvert(task: DownloadTask, key: String) {
+              private func mp3JuiceInit(task: DownloadTask, key: String) {
                   let ts = Int(Date().timeIntervalSince1970 * 1000)
                   guard let url = URL(string: "https://theta.thetacloud.org/api/v1/init?_=\(ts)") else {
-                      fail(task: task, message: "Bad init URL"); return }
-                  var req = URLRequest(url: url, timeoutInterval: 15)
-                  req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
-                  req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
-                  req.setValue("https://mp3juice.sc", forHTTPHeaderField: "Origin")
-                  req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.3); task.fileName = task.proposedName }
-                  URLSession.shared.dataTask(with: req) { [weak self] data, _, err in
-                      guard let self = self, let data = data, err == nil,
-                            let j = try? JSONSerialization.jsonObject(with: data) as? [String:Any],
-                            var convertURL = j["convertURL"] as? String else {
-                          self?.fail(task: task, message: "MP3Juice init failed"); return
-                      }
-                      convertURL = convertURL + "&v=\(task.vid)&f=mp3&_=\(ts)"
-                      self.mp3JuiceConvert(task: task, key: key, url: convertURL, hops: 0)
-                  }.resume()
-              }
-
-              private func mp3JuiceConvert(task: DownloadTask, key: String, url: String, hops: Int) {
-                  guard hops < 15 else { fail(task: task, message: "Too many convert redirects"); return }
-                  guard let u = URL(string: url) else { fail(task: task, message: "Bad convert URL"); return }
-                  var req = URLRequest(url: u, timeoutInterval: 30)
-                  req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
-                  req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
-                  req.setValue("https://mp3juice.sc", forHTTPHeaderField: "Origin")
-                  req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(Double(hops+1)/10.0) }
-                  URLSession.shared.dataTask(with: req) { [weak self] data, _, err in
-                      guard let self = self, let data = data, err == nil,
-                            let j = try? JSONSerialization.jsonObject(with: data) as? [String:Any] else {
-                          // Retry once on network failure
-                          if self?.convertRetries ?? 0 < 2 {
-                              self?.convertRetries += 1
-                              DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
-                                  self?.mp3JuiceInitThenConvert(task: task, key: key)
-                              }
-                          } else {
-                              self?.fail(task: task, message: "Convert network error")
-                          }
-                          return
-                      }
-                      if let e = j["error"] as? Int, e != 0 {
-                          self.fail(task: task, message: "Convert error \(e)"); return
-                      }
-                      if let dl = j["downloadURL"] as? String, !dl.isEmpty {
-                          self.startMediaDownload(task: task, url: dl)
-                          return
-                      }
-                      if let redir = j["redirect"] as? Int, redir == 1,
-                         let next = j["redirectURL"] as? String {
-                          self.mp3JuiceConvert(task: task, key: key, url: next, hops: hops+1)
-                          return
-                      }
-                      if let prog = j["progressURL"] as? String, !prog.isEmpty {
-                          self.pollProgress(task: task, key: key, url: prog)
-                          return
-                      }
-                      self.fail(task: task, message: "Unexpected convert response")
-                  }.resume()
-              }
-
-              private func pollProgress(task: DownloadTask, key: String, url: String) {
-                  pollTimer?.invalidate()
-                  var ticks = 0
-                  pollTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] t in
-                      guard let self = self else { t.invalidate(); return }
-                      ticks += 1
-                      guard ticks < 90 else { t.invalidate(); self.fail(task: task, message: "Convert timed out"); return }
-                      guard let u = URL(string: url) else { t.invalidate(); self.fail(task: task, message: "Bad progress URL"); return }
-                      var req = URLRequest(url: u, timeoutInterval: 10)
-                      req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
-                      req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
-                      req.setValue("https://mp3juice.sc", forHTTPHeaderField: "Origin")
-                      req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-                      URLSession.shared.dataTask(with: req) { data, _, _ in
-                          guard let data = data,
-                                let j = try? JSONSerialization.jsonObject(with: data) as? [String:Any] else { return }
-                          if let dl = j["downloadURL"] as? String, !dl.isEmpty {
-                              DispatchQueue.main.async { t.invalidate(); self.pollTimer = nil }
-                              self.startMediaDownload(task: task, url: dl)
-                              return
-                          }
-                          if let e = j["error"] as? Int, e != 0 {
-                              DispatchQueue.main.async { t.invalidate(); self.pollTimer = nil }
-                              self.fail(task: task, message: "Convert error \(e)")
-                              return
-                          }
-                          if let p = j["progress"] as? Double {
-                              DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(p) }
-                          }
-                      }.resume()
+                      failOrRetry(task: task, message: "Bad init URL"); return
                   }
-                  // Make sure the timer runs on a runloop
+                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.3); task.fileName = task.proposedName }
+                  jsonGet(url, bearer: key) { [weak self] result in
+                      guard let self = self else { return }
+                      guard case let .success(d) = result,
+                            let convertURL = d["convertURL"] as? String else {
+                          // Worker fallback when theta init fails
+                          self.workerStart(task: task); return
+                      }
+                      let ts2 = Int(Date().timeIntervalSince1970 * 1000)
+                      let full = convertURL + "&v=\(task.vid)&f=mp3&_=\(ts2)"
+                      self.mp3JuiceConvert(task: task, key: key, url: full, hops: 0)
+                  }
+              }
+
+              private func mp3JuiceConvert(task: DownloadTask, key: String?, url: String, hops: Int) {
+                  guard hops < 15 else { failOrRetry(task: task, message: "Too many server redirects"); return }
+                  guard let u = URL(string: url) else { failOrRetry(task: task, message: "Bad URL"); return }
+                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.1) }
+                  jsonGet(u, bearer: key) { [weak self] result in
+                      guard let self = self else { return }
+                      guard case let .success(d) = result else {
+                          self.failOrRetry(task: task, message: "Convert network error"); return
+                      }
+                      if let e = d["error"] as? Int, e != 0 {
+                          log.warning("mp3juice convert error \(e), falling back to worker")
+                          self.workerStart(task: task); return
+                      }
+                      // Redirect chain (adds 'o' to cococo... subdomain hops)
+                      if let redir = d["redirect"] as? Int, redir == 1, let next = d["redirectURL"] as? String {
+                          self.mp3JuiceConvert(task: task, key: key, url: next, hops: hops + 1)
+                          return
+                      }
+                      // Progress URL means we need to poll
+                      if let prog = d["progressURL"] as? String, !prog.isEmpty {
+                          // Prefer to use progressURL — downloadURL may be returned early but serve JSON
+                          self.pollConvertProgress(task: task, key: key, progURL: prog, ticks: 0)
+                          return
+                      }
+                      // Fallback: try downloadURL directly (only if no progress URL)
+                      if let dl = d["downloadURL"] as? String, !dl.isEmpty, let du = URL(string: dl) {
+                          self.startMediaDownload(task: task, url: du, finalName: task.proposedName, validate: true)
+                          return
+                      }
+                      self.failOrRetry(task: task, message: "Unexpected server response")
+                  }
+              }
+
+              private func pollConvertProgress(task: DownloadTask, key: String?, progURL: String, ticks: Int) {
+                  pollTimer?.invalidate()
+                  if ticks > 120 { failOrRetry(task: task, message: "Conversion timed out"); return }
+                  var tickCount = ticks
+                  pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] t in
+                      guard let self = self else { t.invalidate(); return }
+                      tickCount += 1
+                      guard let u = URL(string: progURL) else { t.invalidate(); self.failOrRetry(task: task, message: "Bad progress URL"); return }
+                      self.jsonGet(u, bearer: key) { [weak self] result in
+                          guard let self = self else { return }
+                          guard case let .success(d) = result else { return }
+                          if let e = d["error"] as? Int, e != 0 {
+                              t.invalidate(); self.pollTimer = nil
+                              log.warning("progress err=\(e), fallback to worker")
+                              self.workerStart(task: task)
+                              return
+                          }
+                          let prog = (d["progress"] as? NSNumber)?.doubleValue ?? 0
+                          DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(min(0.95, prog)) }
+                          // The downloadURL becomes a real MP3 URL only when progress >= ~0.99 OR
+                          // when the response stops returning "progress" and serves audio/mpeg.
+                          if prog >= 0.99, let dl = d["downloadURL"] as? String, let du = URL(string: dl) {
+                              t.invalidate(); self.pollTimer = nil
+                              // Give the server a moment to finalize
+                              DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                                  self.startMediaDownload(task: task, url: du, finalName: task.proposedName, validate: true)
+                              }
+                              return
+                          }
+                          if tickCount > 120 {
+                              t.invalidate(); self.pollTimer = nil
+                              self.workerStart(task: task)
+                          }
+                      }
+                  }
                   RunLoop.main.add(pollTimer!, forMode: .common)
               }
 
-              private func startMediaDownload(task: DownloadTask, url: String) {
-                  guard let u = URL(string: url) else { fail(task: task, message: "Bad download URL"); return }
-                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .downloading(0) }
-                  var req = URLRequest(url: u, timeoutInterval: 120)
-                  req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
+              // ---- Cloudflare Worker fallback (handles error 6 / geo-block) --------
+              private func workerStart(task: DownloadTask) {
+                  let ts = Int(Date().timeIntervalSince1970 * 1000)
+                  guard var comps = URLComponents(string: workerURL) else {
+                      failOrRetry(task: task, message: "Worker unavailable"); return
+                  }
+                  comps.queryItems = [
+                      URLQueryItem(name: "v", value: task.vid),
+                      URLQueryItem(name: "f", value: "mp3"),
+                      URLQueryItem(name: "_", value: "\(ts)")
+                  ]
+                  guard let u = comps.url else { failOrRetry(task: task, message: "Bad worker URL"); return }
+                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.2) }
+                  jsonGet(u, bearer: nil) { [weak self] result in
+                      guard let self = self else { return }
+                      guard case let .success(d) = result else {
+                          self.failOrRetry(task: task, message: "All servers failed"); return
+                      }
+                      if let e = d["error"] as? Int, e != 0 {
+                          self.failOrRetry(task: task, message: "Convert error \(e)"); return
+                      }
+                      if let purl = d["progressURL"] as? String, !purl.isEmpty {
+                          self.workerPoll(task: task, progURL: purl, ticks: 0)
+                          return
+                      }
+                      if let dl = d["downloadURL"] as? String, let du = URL(string: self.decodeWorkerURL(dl)) {
+                          self.startMediaDownload(task: task, url: du, finalName: task.proposedName, validate: true)
+                          return
+                      }
+                      self.failOrRetry(task: task, message: "Unexpected worker response")
+                  }
+              }
+
+              private func workerPoll(task: DownloadTask, progURL: String, ticks: Int) {
+                  pollTimer?.invalidate()
+                  var tickCount = ticks
+                  pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] t in
+                      guard let self = self else { t.invalidate(); return }
+                      tickCount += 1
+                      guard let u = URL(string: progURL) else { t.invalidate(); self.failOrRetry(task: task, message: "Bad worker URL"); return }
+                      self.jsonGet(u, bearer: nil) { [weak self] result in
+                          guard let self = self else { return }
+                          guard case let .success(d) = result else { return }
+                          if let e = d["error"] as? Int, e != 0 {
+                              t.invalidate(); self.pollTimer = nil
+                              self.failOrRetry(task: task, message: "Convert error \(e)"); return
+                          }
+                          let prog = (d["progress"] as? NSNumber)?.doubleValue ?? 0
+                          DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(min(0.95, prog)) }
+                          if prog >= 0.99, let dl = d["downloadURL"] as? String {
+                              t.invalidate(); self.pollTimer = nil
+                              DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                                  let decoded = self.decodeWorkerURL(dl)
+                                  if let du = URL(string: decoded) {
+                                      self.startMediaDownload(task: task, url: du, finalName: task.proposedName, validate: true)
+                                  } else {
+                                      self.failOrRetry(task: task, message: "Bad final URL")
+                                  }
+                              }
+                              return
+                          }
+                          if tickCount > 120 {
+                              t.invalidate(); self.pollTimer = nil
+                              self.failOrRetry(task: task, message: "Conversion timed out")
+                          }
+                      }
+                  }
+                  RunLoop.main.add(pollTimer!, forMode: .common)
+              }
+
+              private func decodeWorkerURL(_ s: String) -> String {
+                  // Worker URLs are like https://...workers.dev/?m=d&u=<base64>
+                  if s.contains("m=d&u=") || s.contains("m=p&u=") {
+                      guard let comps = URLComponents(string: s),
+                            let u = comps.queryItems?.first(where: { $0.name == "u" })?.value else { return s }
+                      let pad = u + String(repeating: "=", count: (4 - u.count % 4) % 4)
+                      if let data = Data(base64Encoded: pad), let dec = String(data: data, encoding: .utf8) {
+                          return dec
+                      }
+                  }
+                  return s
+              }
+
+              // ---- Generic JSON GET helper -----------------------------------------
+              private func jsonGet(_ url: URL, bearer: String?, completion: @escaping (Result<[String:Any],Error>) -> Void) {
+                  var req = URLRequest(url: url, timeoutInterval: 25)
+                  req.httpMethod = "GET"
+                  req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
                   req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
+                  req.setValue("https://mp3juice.sc", forHTTPHeaderField: "Origin")
+                  req.setValue("application/json,*/*", forHTTPHeaderField: "Accept")
+                  if let b = bearer { req.setValue("Bearer \(b)", forHTTPHeaderField: "Authorization") }
+                  URLSession.shared.dataTask(with: req) { data, resp, err in
+                      if let err = err { completion(.failure(err)); return }
+                      guard let data = data else {
+                          completion(.failure(NSError(domain: "DownloadCenter", code: -1, userInfo: [NSLocalizedDescriptionKey:"No data"])))
+                          return
+                      }
+                      do {
+                          if let d = try JSONSerialization.jsonObject(with: data) as? [String:Any] {
+                              completion(.success(d))
+                          } else {
+                              completion(.failure(NSError(domain:"DownloadCenter",code:-2,userInfo:[NSLocalizedDescriptionKey:"Not JSON"])))
+                          }
+                      } catch {
+                          completion(.failure(error))
+                      }
+                  }.resume()
+              }
+
+              // ---- Actual binary download ------------------------------------------
+              private func startMediaDownload(task: DownloadTask, url: URL, finalName: String, validate: Bool = false) {
+                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .downloading(0); task.fileName = finalName }
+                  var req = URLRequest(url: url, timeoutInterval: 120)
+                  req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+                  req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
+                  req.setValue("bytes=0-", forHTTPHeaderField: "Range")
                   let t = session.downloadTask(with: req)
-                  activeURLTask = t; t.resume()
+                  activeURLTask = t
+                  t.resume()
               }
 
               // ---- URLSessionDownloadDelegate --------------------------------------
@@ -1840,220 +1953,162 @@ jobs:
                               didFinishDownloadingTo location: URL) {
                   guard let task = activeTask else { return }
                   let fm = FileManager.default
-                  // Validate size
+
+                  // 1) size check
                   guard let attrs = try? fm.attributesOfItem(atPath: location.path),
                         let size = attrs[.size] as? Int64, size > 1_000 else {
-                      retryDownload(task, reason: "Downloaded file was too small (corrupt).")
-                      return
+                      failOrRetry(task: task, message: "Downloaded file was too small (corrupt)."); return
                   }
-                  // Validate magic bytes — real audio starts with ID3 / 0xFF (MPEG frame) / OggS / ftyp (m4a) / RIFF (wav)
-                  let magicValid: Bool = {
-                      guard let fh = FileHandle(forReadingAtPath: location.path) else { return false }
+
+                  // 2) magic-byte validation
+                  let head: Data = {
+                      guard let fh = FileHandle(forReadingAtPath: location.path) else { return Data() }
                       defer { fh.closeFile() }
-                      let head = fh.readData(ofLength: 12)
-                      guard head.count >= 4 else { return false }
-                      return head.starts(with: [0x49,0x44,0x33])         // ID3
-                          || head[0] == 0xFF && (head[1] & 0xE0) == 0xE0 // MPEG sync 0xFFEx
-                          || head.starts(with: [0x4F,0x67,0x67,0x53])    // OggS
-                          || (head.count >= 8 && head[4..<8] == Data([0x66,0x74,0x79,0x70])) // ftyp (m4a/mp4)
-                          || head.starts(with: [0x52,0x49,0x46,0x46])    // RIFF (wav)
+                      return fh.readData(ofLength: 12)
                   }()
-                  if !magicValid {
-                      retryDownload(task, reason: "File was not a valid audio track. Retrying…")
-                      return
+                  let validAudio: Bool = {
+                      guard head.count >= 4 else { return false }
+                      let b = [UInt8](head)
+                      if b[0] == 0x49 && b[1] == 0x44 && b[2] == 0x33 { return true }      // ID3
+                      if b[0] == 0xFF && (b[1] & 0xE0) == 0xE0 { return true }              // MPEG sync
+                      if b[0] == 0x4F && b[1] == 0x67 && b[2] == 0x67 && b[3] == 0x53 { return true } // OggS
+                      if head.count >= 8 && b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70 { return true } // ftyp
+                      if b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 { return true } // RIFF
+                      return false
+                  }()
+                  if !validAudio {
+                      // If first bytes look like JSON, server is still returning "progress" JSON
+                      if head.prefix(1) == Data([0x7B]) {
+                          // It's serving JSON {"progress":N,"error":N} — retry after delay
+                          failOrRetry(task: task, message: "Server not ready, retrying…"); return
+                      }
+                      failOrRetry(task: task, message: "File was not a valid audio track."); return
                   }
+
+                  // 3) Build filename
                   var finalName = task.fileName.isEmpty ? task.proposedName : task.fileName
                   let audioExts = ["mp3","m4a","wav","webm","mp4","aac","ogg","opus"]
                   let fl = finalName.lowercased()
                   if !audioExts.contains(where: { fl.hasSuffix("." + $0) }) {
-                      if let mimeType = (downloadTask.response as? HTTPURLResponse)?.mimeType {
-                          if mimeType.contains("mpeg") || mimeType.contains("mp3") { finalName += ".mp3" }
-                          else if mimeType.contains("mp4") || mimeType.contains("m4a") || mimeType.contains("aac") { finalName += ".m4a" }
+                      if let mt = (downloadTask.response as? HTTPURLResponse)?.mimeType {
+                          if mt.contains("mpeg") || mt.contains("mp3") { finalName += ".mp3" }
+                          else if mt.contains("mp4") || mt.contains("m4a") || mt.contains("aac") { finalName += ".m4a" }
+                          else if mt.contains("ogg") || mt.contains("opus") { finalName += ".opus" }
                           else { finalName += ".mp3" }
                       } else { finalName += ".mp3" }
                   }
-                  // Sanitize filename (emojis/control chars can cause file-system issues)
-                  finalName = sanitizeFilename(finalName)
+                  finalName = sanitize(finalName)
                   let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                  let destPath = destDir.appendingPathComponent(finalName)
-                  // Ensure unique path (don't overwrite existing songs)
-                  var finalPath = destPath
+                  var destPath = destDir.appendingPathComponent(finalName)
                   if fm.fileExists(atPath: destPath.path) {
                       let stem = (finalName as NSString).deletingPathExtension
                       let ext = (finalName as NSString).pathExtension
                       var i = 2
-                      while fm.fileExists(atPath: finalPath.path) {
-                          let candidate = ext.isEmpty ? "\(stem) \(i)" : "\(stem) \(i).\(ext)"
-                          finalPath = destDir.appendingPathComponent(candidate)
-                          i += 1
+                      while fm.fileExists(atPath: destPath.path) {
+                          let cand = ext.isEmpty ? "\(stem) \(i)" : "\(stem) \(i).\(ext)"
+                          destPath = destDir.appendingPathComponent(cand); i += 1
                       }
                   }
-                  try? fm.removeItem(at: finalPath)
+                  try? fm.removeItem(at: destPath)
                   do {
-                      try fm.moveItem(at: location, to: finalPath)
-                      try fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: finalPath.path)
+                      try fm.moveItem(at: location, to: destPath)
+                      try fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
                   } catch {
-                      fail(task: task, message: "Could not save file: \(error.localizedDescription)")
-                      return
+                      failOrRetry(task: task, message: "Could not save: \(error.localizedDescription)"); return
                   }
-                  DispatchQueue.main.async {
-                      task.fileName = finalPath.lastPathComponent
-                      // Success haptic
-                      let gen = UINotificationFeedbackGenerator()
-                      gen.notificationOccurred(.success)
-                  }
+                  DispatchQueue.main.async { task.fileName = destPath.lastPathComponent }
                   finish(task: task)
-              }
-
-              private func sanitizeFilename(_ s: String) -> String {
-                  let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|")
-                  var out = s.components(separatedBy: invalid).joined(separator: "-")
-                  out = out.trimmingCharacters(in: .whitespacesAndNewlines)
-                  if out.isEmpty { out = "Track" }
-                  return out
-              }
-
-              private func retryDownload(_ task: DownloadTask, reason: String) {
-                  // Automatic retry up to 2 times per task with a fresh MP3Juice session.
-                  let retryCount = tasks.filter { $0.id == task.id }.count // dummy; use objc associated via status change
-                  // We re-enter queued state after bumping a counter stored in UserDefaults-free way by using task.fileName marker
-                  let marker = "🔄retry:"
-                  let existing = task.fileName.components(separatedBy: marker).last.flatMap(Int.init) ?? 0
-                  if existing >= 2 {
-                      fail(task: task, message: reason)
-                      return
-                  }
-                  DispatchQueue.main.async {
-                      self.objectWillChange.send()
-                      task.status = .queued
-                      task.fileName = task.proposedName + marker + "\(existing+1)"
-                      if self.activeTask?.id == task.id {
-                          self.activeTask = nil
-                          self.pollTimer?.invalidate(); self.pollTimer = nil
-                      }
-                      self.startNext()
-                  }
               }
 
               func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
                   guard let err = error, let active = activeTask else { return }
                   if case .done = active.status { return }
                   if case .failed = active.status { return }
-                  fail(task: active, message: err.localizedDescription)
+                  failOrRetry(task: active, message: err.localizedDescription)
               }
           }
 
           // ---------------------------------------------------------------------------
-          // MARK: - Search models & SmartDownloaderManager
-          // (We decode manually with JSONSerialization to be tolerant of type surprises)
+          // MARK: - SmartDownloaderManager
           // ---------------------------------------------------------------------------
-
           class SmartDownloaderManager: NSObject, ObservableObject {
               @Published var isSearching = false
               @Published var statusMessage = ""
-              @Published var showSuccess = false
               @Published var showError = false
               @Published var errorDetails = ""
               @Published var searchResults: [SearchResult] = []
               @Published var showSearchResults = false
-              @Published var previewTrackId: UUID? = nil
-              @Published var isPreviewPlaying = false
 
               @Published var pendingNameVid: String? = nil
               @Published var pendingNamePlatform: String = "yt"
-              @Published var pendingNameDirectURL: URL? = nil
+              @Published var pendingNameURL: URL? = nil
               @Published var pendingNameSuggestion: String = ""
               @Published var showNamePrompt: Bool = false
               @Published var nameInput: String = ""
 
-              var previewPlayer: AVPlayer?
-
-              // ---- Preview ---------------------------------------------------------
-              func togglePreview(for result: SearchResult) {
-                  if previewTrackId == result.id { stopPreview(); return }
-                  guard let url = result.previewURL else {
-                      statusMessage = "No preview for this source"; return
-                  }
-                  previewPlayer?.pause()
-                  previewPlayer = AVPlayer(url: url)
-                  previewPlayer?.play()
-                  DispatchQueue.main.async { self.previewTrackId = result.id; self.isPreviewPlaying = true }
-              }
-              func stopPreview() {
-                  previewPlayer?.pause(); previewPlayer = nil
-                  DispatchQueue.main.async { self.previewTrackId = nil; self.isPreviewPlaying = false }
-              }
-
-              // ---- Name prompt entry points ---------------------------------------
+              // ---- Name prompt -----------------------------------------------------
               func requestDownload(result: SearchResult) {
-                  let name = "\(result.artist) - \(result.title)"
-                      .replacingOccurrences(of: "/", with: "-")
+                  let name = "\(result.artist) - \(result.title)".replacingOccurrences(of:"/",with:"-")
                   pendingNameVid = result.extId
                   pendingNamePlatform = result.platform
-                  pendingNameDirectURL = result.previewURL
+                  pendingNameURL = result.directURL
                   pendingNameSuggestion = name
                   nameInput = name
                   showNamePrompt = true
               }
               func confirmNamedDownload() {
                   showNamePrompt = false
-                  if let u = pendingNameDirectURL {
+                  hideKeyboard()
+                  if let u = pendingNameURL {
                       DownloadCenter.shared.enqueueDirect(url: u, suggestedName: nameInput)
                   } else if let vid = pendingNameVid {
                       DownloadCenter.shared.enqueue(vid: vid, platform: pendingNamePlatform, suggestedName: nameInput)
                   }
-                  pendingNameVid = nil; pendingNameDirectURL = nil
+                  pendingNameVid = nil; pendingNameURL = nil
               }
-              func cancelNamePrompt() {
-                  showNamePrompt = false; pendingNameVid = nil; pendingNameDirectURL = nil
-              }
+              func cancelNamePrompt() { showNamePrompt = false; pendingNameVid = nil; pendingNameURL = nil }
+
               func requestLinkDownload(link: String, name: String) {
                   let s = link.trimmingCharacters(in: .whitespacesAndNewlines)
                   var vid: String?; var platform = "yt"
                   if s.lowercased().contains("soundcloud.com") {
-                      // We don't have a numeric id for pasted SC links; fall through to error
-                      errorDetails = "For SoundCloud links, please search by artist/track name in Magic DL."
+                      errorDetails = "For SoundCloud links, please search by artist/track name."
                       showError = true; return
                   }
                   if let r = s.range(of: #"(?:youtu\.be/|youtube\.com/(?:embed/|live/|shorts/)|[?&]v=)([a-zA-Z0-9-_]{11})"#,
                                      options: .regularExpression) {
-                      let match = String(s[r])
-                      if let v = match.range(of: #"[a-zA-Z0-9-_]{11}"#, options: .regularExpression) {
-                          vid = String(match[v])
+                      let m = String(s[r])
+                      if let v = m.range(of: #"[a-zA-Z0-9-_]{11}"#, options: .regularExpression) {
+                          vid = String(m[v])
                       }
                   }
                   guard let id = vid else {
-                      errorDetails = "Could not parse that link. Try searching by name instead."
+                      errorDetails = "Could not parse YouTube link. Try searching by name instead."
                       showError = true; return
                   }
                   let suggested = name.isEmpty ? s : name
-                  pendingNameVid = id
-                  pendingNamePlatform = platform
-                  pendingNameDirectURL = nil
-                  pendingNameSuggestion = suggested
-                  nameInput = suggested
-                  showNamePrompt = true
+                  pendingNameVid = id; pendingNamePlatform = platform; pendingNameURL = nil
+                  pendingNameSuggestion = suggested; nameInput = suggested; showNamePrompt = true
               }
 
-              // ---- Search via MP3Juice --------------------------------------------
+              // ---- Search ----------------------------------------------------------
               func performMagicSearch(query: String) {
                   let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
                   guard !clean.isEmpty else { return }
-                  stopPreview()
+                  hideKeyboard()
                   DispatchQueue.main.async {
                       self.isSearching = true
                       self.statusMessage = "Searching MP3Juice…"
                       self.searchResults = []
                       self.showSearchResults = false
                   }
-                  guard let encQ = clean.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-                        let b64 = encQ.data(using: .utf8)?.base64EncodedString(),
+                  guard let enc = clean.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                        let b64 = enc.data(using: .utf8)?.base64EncodedString(),
                         let b64enc = b64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
                       DispatchQueue.main.async { self.isSearching = false; self.errorDetails = "Bad query"; self.showError = true }
                       return
                   }
                   let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-                  // Fetch both YouTube (y=y) and SoundCloud (y=s) in parallel
                   let group = DispatchGroup()
                   let collectQ = DispatchQueue(label: "com.asmusic.collect")
                   var collected = [SearchResult]()
@@ -2061,65 +2116,58 @@ jobs:
 
                   func fetchOne(scope: String) {
                       group.enter()
-                      let plat = (scope == "s") ? "sc" : "yt"
+                      let plat = scope
                       let us = "https://mp3juice.sc/api/v1/search?y=\(scope)&q=\(b64enc)&_=\(Int(Date().timeIntervalSince1970*1000))"
                       guard let url = URL(string: us) else { group.leave(); return }
                       var req = URLRequest(url: url, timeoutInterval: 20)
                       req.setValue(ua, forHTTPHeaderField: "User-Agent")
                       req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
+                      req.setValue("application/json,*/*", forHTTPHeaderField: "Accept")
                       URLSession.shared.dataTask(with: req) { data, _, err in
                           defer { group.leave() }
-                          if let err = err { lastErr = err.localizedDescription; return }
+                          if let e = err { lastErr = e.localizedDescription; return }
                           guard let data = data,
                                 let j = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any] else { return }
-                          let source: SearchResultSource = (scope == "s") ? .mp3juice_sc : .mp3juice_yt
-                          let key = (scope == "s") ? "sc" : "yt"
+                          let key = scope
                           for item in (j[key] as? [[String:Any]] ?? []) {
-                              let idRaw = item["id"]
                               let idStr: String
-                              if let s = idRaw as? String { idStr = s }
-                              else if let n = idRaw as? NSNumber { idStr = n.stringValue }
+                              if let s = item["id"] as? String { idStr = s }
+                              else if let n = item["id"] as? NSNumber { idStr = n.stringValue }
                               else { continue }
                               guard let title = item["title"] as? String else { continue }
                               let durStr = item["duration"] as? String
                               let dur = durStr.flatMap { Self.parseDuration($0) }
-                              var artist = (scope == "s") ? "SoundCloud" : "YouTube"
+                              var artist = (scope == "sc") ? "SoundCloud" : "YouTube"
                               var ttl = title
                               if let r = title.range(of: " - ") {
                                   artist = String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
                                   ttl = String(title[r.upperBound...]).trimmingCharacters(in: .whitespaces)
                               }
-                              // Direct download URL for SoundCloud (b64 id + b64 title)
-                              var directURL: URL? = nil
-                              if scope == "s",
+                              var direct: URL? = nil
+                              if scope == "sc",
                                  let ib = item["id_base64"] as? String,
                                  let tb = item["title_base64"] as? String,
-                                 let ibenc = ib.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-                                 let tbenc = tb.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-                                 let u = URL(string: "https://thetacloud.org/s/\(ibenc)/\(tbenc)/") {
-                                  directURL = u
+                                 let ibe = ib.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+                                 let tbe = tb.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+                                 let u = URL(string: "https://thetacloud.org/s/\(ibe)/\(tbe)/") {
+                                  direct = u
                               }
                               collectQ.sync {
-                                  collected.append(SearchResult(source: source, title: ttl, artist: artist,
-                                                                duration: dur, artworkURL: nil,
-                                                                previewURL: directURL,
-                                                                platform: plat, extId: idStr))
+                                  collected.append(SearchResult(source: (scope=="sc" ? .mp3juice_sc : .mp3juice_yt),
+                                                                title: ttl, artist: artist, duration: dur,
+                                                                platform: plat, extId: idStr, directURL: direct))
                               }
                           }
                       }.resume()
                   }
-
                   fetchOne(scope: "y")
                   fetchOne(scope: "s")
-
                   group.notify(queue: .main) { [weak self] in
                       guard let self = self else { return }
                       self.isSearching = false
                       if collected.isEmpty {
-                          self.errorDetails = lastErr ?? "No results found."
-                          self.showError = true
+                          self.errorDetails = lastErr ?? "No results found."; self.showError = true
                       } else {
-                          // dedupe by artist+title
                           var seen = Set<String>()
                           self.searchResults = collected.filter {
                               seen.insert("\($0.artist.lowercased())|\($0.title.lowercased())").inserted
