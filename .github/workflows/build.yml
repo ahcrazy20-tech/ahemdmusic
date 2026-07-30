@@ -420,18 +420,16 @@ jobs:
               @State private var showDownloads = false
 
               var body: some View {
-                  ZStack(alignment: .bottom) {
-                      TabView {
-                          LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
-                          PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
-                          SmartDownloaderView().tabItem { Label("Magic DL", systemImage: "sparkles") }
-                          BrowserMainView().padding(.bottom, musicManager.currentSong != nil ? 60 : 0)
-                              .tabItem { Label("Web Hub", systemImage: "safari") }
-                      }
-                      .accentColor(.purple)
-
+                  TabView {
+                      LibraryView().tabItem { Label("Library", systemImage: "music.note.list") }
+                      PlaylistsView().tabItem { Label("Playlists", systemImage: "music.mic") }
+                      SmartDownloaderView().tabItem { Label("Magic DL", systemImage: "sparkles") }
+                      BrowserMainView().tabItem { Label("Web Hub", systemImage: "safari") }
+                  }
+                  .accentColor(.purple)
+                  // Place mini-player + download banner above the tab bar, not over it.
+                  .safeAreaInset(edge: .bottom, spacing: 0) {
                       VStack(spacing: 0) {
-                          // Active-downloads banner (tap to open queue)
                           if dc.showBanner, let first = dc.tasks.first {
                               DownloadBannerView(task: first, total: dc.tasks.count)
                                   .onTapGesture { showDownloads = true }
@@ -440,13 +438,16 @@ jobs:
                               MiniPlayerView(showFullPlayer: $showFullPlayer)
                           }
                       }
+                      .background(.bar)
+                      // Only add the bar when there's something to show.
+                      .frame(maxWidth: .infinity)
                   }
                   .sheet(isPresented: $showFullPlayer) { FullPlayerView() }
                   .sheet(isPresented: $showDownloads) { DownloadsQueueView() }
                   .onReceive(dc.$tasks) { _ in
-                      // keep banner visible while any non-done task exists
                       dc.showBanner = dc.tasks.contains { t in
-                          if case .done = t.status { return false }; if case .failed = t.status { return false }
+                          if case .done = t.status { return false }
+                          if case .failed = t.status { return false }
                           return true
                       } || !dc.tasks.isEmpty
                       NotificationCenter.default.post(name: .downloadCenterChanged, object: nil)
@@ -463,34 +464,38 @@ jobs:
               var body: some View {
                   HStack(spacing: 10) {
                       Image(systemName: "arrow.down.circle.fill")
-                          .foregroundColor(.purple).font(.title3)
-                      VStack(alignment: .leading, spacing: 3) {
+                          .foregroundColor(.white).font(.title3)
+                      VStack(alignment: .leading, spacing: 4) {
                           Text(task.fileName.isEmpty ? task.proposedName : task.fileName)
                               .font(.footnote).bold().lineLimit(1).foregroundColor(.white)
-                          switch task.status {
-                          case .queued:
-                              ProgressView().progressViewStyle(.linear).tint(.purple)
-                          case .contacting(let p):
-                              ProgressView(value: p).progressViewStyle(.linear).tint(.purple)
-                          case .downloading(let p):
-                              ProgressView(value: p).progressViewStyle(.linear).tint(.purple)
-                          case .extracting:
-                              ProgressView().progressViewStyle(.linear).tint(.purple)
-                          case .done:
-                              Label("Saved to Library", systemImage: "checkmark.circle.fill")
-                                  .font(.caption).foregroundColor(.green)
-                          case .failed(let msg):
-                              Text(msg).font(.caption2).foregroundColor(.red).lineLimit(1)
+                          Group {
+                              switch task.status {
+                              case .queued:
+                                  HStack { ProgressView().progressViewStyle(.linear).tint(.white); Text("Queued").font(.caption2).foregroundColor(.white.opacity(0.85)) }
+                              case .contacting(let p):
+                                  HStack { ProgressView(value: p).progressViewStyle(.linear).tint(.white); Text("Connecting…").font(.caption2).foregroundColor(.white.opacity(0.85)) }
+                              case .downloading(let p):
+                                  HStack { ProgressView(value: p).progressViewStyle(.linear).tint(.white); Text(String(format:"%.0f%%", p*100)).font(.caption2).foregroundColor(.white.opacity(0.85)) }
+                              case .extracting:
+                                  HStack { ProgressView().progressViewStyle(.linear).tint(.white); Text("Extracting…").font(.caption2).foregroundColor(.white.opacity(0.85)) }
+                              case .done:
+                                  Label("Saved to Library", systemImage: "checkmark.circle.fill")
+                                      .font(.caption).foregroundColor(.white)
+                              case .failed(let msg):
+                                  Text(msg).font(.caption2).foregroundColor(.yellow).lineLimit(1)
+                              }
                           }
                       }
-                      Spacer()
-                      Text(total > 1 ? "\(total)" : "").font(.caption).foregroundColor(.white.opacity(0.6))
+                      Spacer(minLength: 4)
+                      if total > 1 {
+                          Text("\(total)")
+                              .font(.caption.bold()).foregroundColor(.white)
+                              .padding(6).background(Color.white.opacity(0.25)).clipShape(Circle())
+                      }
                   }
                   .padding(.horizontal, 12).padding(.vertical, 8)
-                  .background(Color.purple.opacity(0.85))
-                  .cornerRadius(12)
-                  .padding(.horizontal, 10)
-                  .padding(.bottom, 4)
+                  .background(Color.purple)
+                  .contentShape(Rectangle())
               }
           }
 
@@ -1250,13 +1255,17 @@ jobs:
               /// Strategy hint for the downloader: "cobalt" for video sites, "direct" for direct audio links.
               var downloadStrategy: DownloadStrategy {
                   let u = downloadURL.absoluteString.lowercased()
-                  if u.contains("youtube.com") || u.contains("youtu.be") || u.contains("soundcloud.com")
-                      || u.contains("tiktok.com") || u.contains("twitter.com") || u.contains("x.com")
+                  if u.contains("youtube.com") || u.contains("youtu.be") { return .piped }
+                  if u.contains("results?search_query") { return .piped }
+                  if u.contains("soundcloud.com") { return .soundcloud }
+                  if u.contains("tiktok.com") || u.contains("twitter.com") || u.contains("x.com")
                       || u.contains("instagram.com") || u.contains("audiomack.com")
-                      || u.contains("spotify") || u.contains("bandcamp.com") {
+                      || u.contains("bandcamp.com") || u.contains("reddit.com") {
                       return .cobalt
                   }
-                  if u.contains("results?search_query") { return .cobalt }
+                  if u.contains("spotify") || u.contains("music.apple.com") || u.contains("deezer.com") {
+                      return .piped
+                  }
                   return .direct
               }
               var durationFormatted: String {
@@ -1267,7 +1276,7 @@ jobs:
               static func == (lhs: SearchResult, rhs: SearchResult) -> Bool { lhs.id == rhs.id }
           }
 
-          enum DownloadStrategy { case cobalt, direct }
+          enum DownloadStrategy { case piped, cobalt, soundcloud, direct }
 
           // ---------------------------------------------------------------------------
           // MARK: - Shared Download Center (observable from any tab)
@@ -1303,6 +1312,7 @@ jobs:
               private var activeTask: DownloadTask?
               private var activeURLTask: URLSessionDownloadTask?
               private var cobaltAttempt = 0
+              private var pipedAttempt = 0
 
               override private init() {
                   super.init()
@@ -1368,16 +1378,15 @@ jobs:
                   let name = task.proposedName
                   DispatchQueue.main.async { self.objectWillChange.send(); task.fileName = name }
                   let url = task.sourceURL
-                  // If the url is a YouTube search page (e.g. iTunes/Deezer fallback),
-                  // resolve to first watch URL first.
+                  // Resolve YouTube search results pages to a watch URL first
                   if url.absoluteString.contains("youtube.com/results"),
                      let q = URLComponents(string: url.absoluteString)?.queryItems?
                       .first(where: { $0.name == "search_query" })?.value {
                       resolveYouTubeSearch(query: q) { [weak self] watchUrl in
                           guard let self = self else { return }
                           if let w = watchUrl {
-                              self.cobaltAttempt = 0
-                              self.downloadViaCobalt(task: task, url: w, name: name)
+                              self.pipedAttempt = 0
+                              self.downloadViaPiped(task: task, watchUrl: w, name: name)
                           } else {
                               self.fail(task: task, message: "Could not resolve YouTube search.")
                           }
@@ -1385,9 +1394,13 @@ jobs:
                       return
                   }
                   cobaltAttempt = 0
-                  // Choose strategy
+                  pipedAttempt = 0
                   let strat = self.strategy(for: url)
                   switch strat {
+                  case .piped:
+                      downloadViaPiped(task: task, watchUrl: url, name: name)
+                  case .soundcloud:
+                      tryDirectSoundCloud(task: task, permalink: url, name: name)
                   case .cobalt:
                       downloadViaCobalt(task: task, url: url, name: name)
                   case .direct:
@@ -1397,14 +1410,17 @@ jobs:
 
               private func strategy(for url: URL) -> DownloadStrategy {
                   let u = url.absoluteString.lowercased()
-                  let hosters = ["youtube.com","youtu.be","soundcloud.com","tiktok.com","twitter.com",
-                                 "x.com","instagram.com","audiomack.com","spotify","bandcamp.com",
-                                 "music.apple.com","deezer.com","y2mate","cobalt"]
-                  if hosters.contains(where: { u.contains($0) }) { return .cobalt }
-                  if u.contains("results?search_query=") { return .cobalt }
+                  if u.contains("youtube.com") || u.contains("youtu.be") { return .piped }
+                  if u.contains("results?search_query=") { return .piped }
+                  if u.contains("soundcloud.com") { return .soundcloud }
+                  let cobaltHosts = ["tiktok.com","twitter.com","x.com","instagram.com",
+                                     "audiomack.com","bandcamp.com","reddit.com"]
+                  if cobaltHosts.contains(where: { u.contains($0) }) { return .cobalt }
+                  if u.contains("spotify") || u.contains("music.apple.com") || u.contains("deezer.com") {
+                      return .piped
+                  }
                   let ext = (u as NSString).pathExtension.lowercased()
                   if ["mp3","m4a","wav","webm","ogg","aac"].contains(ext) { return .direct }
-                  // If mime type unknown and host isn't known, still try cobalt first as a safe bet
                   return .cobalt
               }
 
@@ -1433,6 +1449,136 @@ jobs:
                   let t = session.downloadTask(with: req)
                   activeURLTask = t
                   t.resume()
+              }
+
+              // ---- YouTube via Piped (direct audio streams, no Cloudflare) ----------
+              private func pipedInstances() -> [String] {
+                  [
+                      "https://pipedapi.kavin.rocks",
+                      "https://pipedapi.adminforge.de",
+                      "https://api.piped.private.coffee",
+                      "https://pipedapi.leptons.xyz",
+                      "https://pipedapi.nosebs.ru",
+                      "https://piped-api.privacy.com.de",
+                      "https://pipedapi.drgns.space",
+                      "https://pipedapi.in.projectsegfau.lt"
+                  ]
+              }
+
+              private func extractVideoId(from url: URL) -> String? {
+                  let s = url.absoluteString
+                  if s.contains("youtu.be/") {
+                      if let c = s.components(separatedBy: "youtu.be/").last?.split(separator: "?").first {
+                          return String(c)
+                      }
+                  }
+                  if s.contains("youtube.com/watch"),
+                     let items = URLComponents(string: s)?.queryItems,
+                     let v = items.first(where: { $0.name == "v" })?.value {
+                      return v
+                  }
+                  if s.contains("/shorts/"),
+                     let tail = s.components(separatedBy: "/shorts/").last?.split(separator: "?").first {
+                      return String(tail)
+                  }
+                  if s.contains("/embed/"),
+                     let tail = s.components(separatedBy: "/embed/").last?.split(separator: "?").first {
+                      return String(tail)
+                  }
+                  return nil
+              }
+
+              private func downloadViaPiped(task: DownloadTask, watchUrl: URL, name: String) {
+                  let instances = pipedInstances()
+                  guard pipedAttempt < instances.count else {
+                      // fall back to cobalt if Piped fails
+                      cobaltAttempt = 0
+                      downloadViaCobalt(task: task, url: watchUrl, name: name)
+                      return
+                  }
+                  guard let vid = extractVideoId(from: watchUrl) else {
+                      fail(task: task, message: "Could not extract YouTube video ID.")
+                      return
+                  }
+                  let server = instances[pipedAttempt]
+                  DispatchQueue.main.async {
+                      self.objectWillChange.send()
+                      task.status = .contacting(Double(self.pipedAttempt + 1) / Double(instances.count))
+                  }
+                  pipedAttempt += 1
+                  guard let streamsUrl = URL(string: server + "/streams/" + vid) else {
+                      downloadViaPiped(task: task, watchUrl: watchUrl, name: name); return
+                  }
+                  var req = URLRequest(url: streamsUrl, timeoutInterval: 15)
+                  req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+                  URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+                      guard let self = self else { return }
+                      if let err = err {
+                          log.warning("piped \(server) err: \(err.localizedDescription)")
+                          DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                              self.downloadViaPiped(task: task, watchUrl: watchUrl, name: name)
+                          }
+                          return
+                      }
+                      guard let data = data,
+                            let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+                          DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                              self.downloadViaPiped(task: task, watchUrl: watchUrl, name: name)
+                          }
+                          return
+                      }
+                      guard let json = try? JSONSerialization.jsonObject(with: data) as? [String:Any],
+                            let audioStreams = json["audioStreams"] as? [[String:Any]] else {
+                          DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                              self.downloadViaPiped(task: task, watchUrl: watchUrl, name: name)
+                          }
+                          return
+                      }
+                      // Pick highest-bitrate audio stream; prefer m4a then webm/opus
+                      let preferred = audioStreams
+                          .compactMap { s -> (url: String, br: Int, mime: String)? in
+                              guard let u = s["url"] as? String else { return nil }
+                              let br = (s["bitrate"] as? NSNumber)?.intValue ?? 0
+                              let mime = (s["mimeType"] as? String) ?? ""
+                              return (u, br, mime)
+                          }
+                          .sorted { a, b in
+                              // prefer m4a/mp4 first
+                              let aMp4 = a.mime.contains("mp4") || a.mime.contains("m4a") || a.mime.contains("aac")
+                              let bMp4 = b.mime.contains("mp4") || b.mime.contains("m4a") || b.mime.contains("aac")
+                              if aMp4 != bMp4 { return aMp4 && !bMp4 }
+                              return a.br > b.br
+                          }
+                      guard let best = preferred.first, let audioUrl = URL(string: best.url) else {
+                          DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                              self.downloadViaPiped(task: task, watchUrl: watchUrl, name: name)
+                          }
+                          return
+                      }
+                      // Pick extension based on the stream's MIME type
+                      let ext: String
+                      if best.mime.contains("mp4") || best.mime.contains("m4a") || best.mime.contains("aac") { ext = "m4a" }
+                      else if best.mime.contains("webm") { ext = "webm" }
+                      else if best.mime.contains("opus") || best.mime.contains("ogg") { ext = "opus" }
+                      else { ext = "m4a" }
+
+                      // Use the title returned from Piped as the filename whenever possible.
+                      var finalName: String
+                      if let title = json["title"] as? String, !title.isEmpty {
+                          finalName = title.replacingOccurrences(of: "/", with: "-")
+                              .trimmingCharacters(in: .whitespacesAndNewlines)
+                      } else {
+                          finalName = name
+                      }
+                      if finalName.isEmpty { finalName = "Track" }
+                      let lower = finalName.lowercased()
+                      if !lower.hasSuffix(".mp3") && !lower.hasSuffix(".m4a") && !lower.hasSuffix(".webm")
+                          && !lower.hasSuffix(".opus") && !lower.hasSuffix(".wav") && !lower.hasSuffix(".aac") {
+                          finalName += "." + ext
+                      }
+                      DispatchQueue.main.async { self.objectWillChange.send(); task.fileName = finalName }
+                      self.startMediaDownload(task: task, url: audioUrl, name: finalName)
+                  }.resume()
               }
 
               // ---- cobalt -----------------------------------------------------------
@@ -1564,8 +1710,9 @@ jobs:
                       return
                   }
                   var finalName = task.fileName
-                  if !finalName.lowercased().hasSuffix(".mp3") && !finalName.lowercased().hasSuffix(".m4a")
-                      && !finalName.lowercased().hasSuffix(".wav") { finalName += ".mp3" }
+                  let audioExts = ["mp3","m4a","wav","webm","mp4","aac","ogg","opus"]
+                  let fl = finalName.lowercased()
+                  if !audioExts.contains(where: { fl.hasSuffix("." + $0) }) { finalName += ".mp3" }
                   let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
                   let destPath = destDir.appendingPathComponent(finalName)
                   try? fm.removeItem(at: destPath)
