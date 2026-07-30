@@ -57,6 +57,33 @@ jobs:
           mkdir -p DummyAssets
           mkdir -p TrollMusicApp/TrollMusicApp
 
+
+      - name: Create Info.plist
+        run: |
+          mkdir -p TrollMusicApp/TrollMusicApp
+          echo '<?xml version="1.0" encoding="UTF-8"?>' > TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<plist version="1.0">' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<dict>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<key>CFBundleIdentifier</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<string>com.ahmedsoliman.trollmusicapp</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<key>CFBundleName</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<string>AS Music</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<key>CFBundleExecutable</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<string>TrollMusicApp</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<key>CFBundleVersion</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<string>1.0</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<key>CFBundleShortVersionString</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<string>1.0</string>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<key>UIBackgroundModes</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<array><string>audio</string></array>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<key>NSAppTransportSecurity</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<dict><key>NSAllowsArbitraryLoads</key><true/></dict>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<key>UILaunchScreen</key>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '<dict/>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '</dict>' >> TrollMusicApp/TrollMusicApp/Info.plist
+          echo '</plist>' >> TrollMusicApp/TrollMusicApp/Info.plist
+
       - name: Write Swift Files
         run: |
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/TrollMusicAppApp.swift
