@@ -302,7 +302,7 @@ jobs:
 
               @objc private func tick() {
                   guard let node = playerNode, node.isPlaying, let file = audioFile else { return }
-                  let t = node.playerTime(forNodeTime: node.lastRenderTime) ?? AVAudioTime()
+                  guard let lrt = node.lastRenderTime, let t = node.playerTime(forNodeTime: lrt) else { return }
                   let sec = Double(t.sampleTime) / (file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate)
                   DispatchQueue.main.async {
                       self.currentTime = max(0, sec)
@@ -686,10 +686,15 @@ jobs:
                   } else if autoAdvance {
                       isPlaying = false
                   }
-                  // Smart Radio auto-search for more
+                  // Smart Radio auto-search for more — broadcast so a visible Magic DL view can fetch more.
                   if smartRadioMode && !didAutoSearchForRadio {
                       didAutoSearchForRadio = true
-                      SmartDownloaderManager.shared.autoSearchForRadio(artist: currentSong?.artist ?? "", title: currentSong?.title ?? "")
+                      DispatchQueue.global().async {
+                          NotificationCenter.default.post(name: .smartRadioAutoSearch, object: nil, userInfo: [
+                              "artist": currentSong?.artist ?? "",
+                              "title": currentSong?.title ?? ""
+                          ])
+                      }
                   }
               }
 
@@ -2295,6 +2300,11 @@ jobs:
           import CryptoKit
 
           // ---------------------------------------------------------------------------
+          // MARK: - Logging
+          // ---------------------------------------------------------------------------
+          fileprivate let log = Logger(subsystem: "com.ahmedsoliman.trollmusicapp", category: "MagicDL")
+
+          // ---------------------------------------------------------------------------
           // MARK: - TitleCleaner — turns "Amr Diab - Nour El Ain (Official Video) HD"
           //                         into (title: "Nour El Ain", artist: "Amr Diab")
           // ---------------------------------------------------------------------------
@@ -3301,6 +3311,23 @@ jobs:
               @Published var trendingResults: [SearchResult] = []
               @Published var isLoadingTrending: Bool = false
 
+              private var radioSearchCancellable: AnyCancellable?
+              private var lastRadioSearchAt: Date = .distantPast
+
+              init() {
+                  radioSearchCancellable = NotificationCenter.default.publisher(for: .smartRadioAutoSearch)
+                      .sink { [weak self] note in
+                          guard let self else { return }
+                          let now = Date()
+                          guard now.timeIntervalSince(self.lastRadioSearchAt) > 90 else { return }
+                          self.lastRadioSearchAt = now
+                          let artist = (note.userInfo?["artist"] as? String) ?? ""
+                          let title  = (note.userInfo?["title"] as? String) ?? ""
+                          guard !artist.isEmpty, artist != "AS Music" else { return }
+                          self.autoSearchForRadio(artist: artist, title: title)
+                      }
+              }
+
               private let pipedMirrors = [
                   "https://pipedapi.kavin.rocks",
                   "https://pipedapi.adminforge.de",
@@ -3338,7 +3365,6 @@ jobs:
                   pendingNameVid = nil; pendingNameURL = nil; pendingNameThumb = nil; pendingNameArtist = ""
               }
               func cancelNamePrompt() { showNamePrompt = false; pendingNameVid = nil; pendingNameURL = nil; pendingNameThumb = nil; pendingNameArtist = "" }
-              func cancelNamePrompt() { showNamePrompt = false; pendingNameVid = nil; pendingNameURL = nil }
 
               func downloadAllResults() {
                   var items: [(vid: String, platform: String, name: String, artist: String, thumb: String?)] = []
@@ -3362,7 +3388,7 @@ jobs:
                           .trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return }
                   let low = s.lowercased()
                   if low.contains("youtu.be/") || low.contains("youtube.com/") || low.contains("music.youtube.com/") {
-                      if let vid = extractYouTubeID(s) {
+                      if extractYouTubeID(s) != nil {
                           requestLinkDownload(link: s, name: "")
                           return
                       }
@@ -3408,12 +3434,10 @@ jobs:
                   guard trendingResults.isEmpty else { return }
                   isLoadingTrending = true
                   let ua = DownloadCenter.mobileUA
-                  let q = "Amr Diab Tamer Hosny Arabic Hits".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
                   // Use a Piped mirror to get trending EG, fall back to search for top Arabic hits
                   var mirrors = Array(pipedMirrors)
                   func tryTrending() {
                       guard let base = mirrors.first else {
-                          // Fallback: mp3juice search for a curated query
                           mirrors = []  // force search fallback
                           guard let raw = "Amr Diab best hits".data(using: .utf8)?.base64EncodedString(),
                                 let b64enc = raw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
@@ -3640,8 +3664,8 @@ jobs:
                   req.setValue(ua, forHTTPHeaderField: "User-Agent")
                   req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
                   req.setValue("application/json,*/*", forHTTPHeaderField: "Accept")
-                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-                      guard let self, let data = data,
+                      URLSession.shared.dataTask(with: req) { data, _, _ in
+                      guard let data = data,
                             let j = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any],
                             let items = j["yt"] as? [[String:Any]] else { return }
                       let (_, cleanArtist) = TitleCleaner.clean(title, artistHint: artist)
@@ -3652,17 +3676,12 @@ jobs:
                                 let t = it["title"] as? String else { continue }
                           if MusicManager.shared.songByVID(idStr) != nil { continue }
                           let (ct, ca) = TitleCleaner.clean(t, artistHint: cleanArtist)
-                          let finalArtist = ca
-                          let finalName = "\(finalArtist) - \(ct)"
+                          let finalName = "\(ca) - \(ct)"
                           let thumb = it["thumb"] as? String
-                          let song = Song(id: UUID(), title: ct, url: URL(fileURLWithPath: "/"), artist: finalArtist, artworkURL: thumb, sourceVid: idStr)
-                          // We queue the download AND auto-add to upNext as a pending placeholder
-                          // But since the song doesn't exist on disk yet, just enqueue download
-                          // and rely on next play to pick from library once done.
                           DispatchQueue.main.async {
                               DownloadCenter.shared.enqueue(vid: idStr, platform: "yt",
                                                             suggestedName: finalName,
-                                                            artist: finalArtist, thumbnail: thumb)
+                                                            artist: ca, thumbnail: thumb)
                           }
                           added += 1
                       }
@@ -3679,6 +3698,7 @@ jobs:
 
           extension Notification.Name {
               static let downloadCenterChanged = Notification.Name("downloadCenterChanged")
+              static let smartRadioAutoSearch = Notification.Name("smartRadioAutoSearch")
           }
 
           SWIFT
