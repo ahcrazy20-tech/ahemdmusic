@@ -488,7 +488,7 @@ jobs:
                   // Nothing cached yet — need to download
                   guard let art = song.artworkURL, let u = URL(string: art) else { completion(nil); return }
                   // async fetch
-                  URLSession.shared.dataTask(with: u) { [weak self] data, _, _ in
+                  URLSession.shared.dataTask(with: u) { data, _, _ in
                       guard let data = data, let img = UIImage(data: data) else { DispatchQueue.main.async { completion(nil) }; return }
                       try? data.write(to: cached, options: .atomic)
                       DispatchQueue.main.async { completion(img) }
@@ -689,10 +689,12 @@ jobs:
                   // Smart Radio auto-search for more — broadcast so a visible Magic DL view can fetch more.
                   if smartRadioMode && !didAutoSearchForRadio {
                       didAutoSearchForRadio = true
+                      let artist = currentSong?.artist ?? ""
+                      let title = currentSong?.title ?? ""
                       DispatchQueue.global().async {
                           NotificationCenter.default.post(name: .smartRadioAutoSearch, object: nil, userInfo: [
-                              "artist": currentSong?.artist ?? "",
-                              "title": currentSong?.title ?? ""
+                              "artist": artist,
+                              "title": title
                           ])
                       }
                   }
@@ -2794,7 +2796,7 @@ jobs:
                           }
                           // status field: "start" -> "processing" -> "download" (ready)
                           let status = d["status"] as? String ?? ""
-                          let prog = (d["progress"] as? NSNumber)?.doubleValue ?? 0
+                          let _ = (d["progress"] as? NSNumber)?.doubleValue ?? 0
                           // Map progress 0-3+ states to 0.1..0.95
                           let displayProg: Double
                           if status == "download" {
@@ -3314,7 +3316,8 @@ jobs:
               private var radioSearchCancellable: AnyCancellable?
               private var lastRadioSearchAt: Date = .distantPast
 
-              init() {
+              override init() {
+                  super.init()
                   radioSearchCancellable = NotificationCenter.default.publisher(for: .smartRadioAutoSearch)
                       .sink { [weak self] note in
                           guard let self else { return }
