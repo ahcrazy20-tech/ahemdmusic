@@ -2559,6 +2559,23 @@ jobs:
 
               static let mobileUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
+              static let audioExts = ["mp3","m4a","wav","webm","mp4","aac","ogg","opus"]
+              static func ensureExt(_ name: String, ext: String) -> String {
+                  let low = name.lowercased()
+                  for e in audioExts { if low.hasSuffix("." + e) { return name } }
+                  return name + "." + ext
+              }
+              static func y2jarName(_ proposed: String) -> String {
+                  let low = proposed.lowercased()
+                  for e in audioExts {
+                      if low.hasSuffix("." + e) {
+                          if e == "mp3" { return String(proposed.dropLast(4)) + ".m4a" }
+                          return proposed
+                      }
+                  }
+                  return proposed + ".m4a"
+              }
+
               // ---- Public API -------------------------------------------------------
               func enqueue(vid: String, platform: String, suggestedName: String,
                            artist: String = "", thumbnail: String? = nil) {
@@ -2951,7 +2968,7 @@ jobs:
                   req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
                   req.setValue("application/json", forHTTPHeaderField: "Accept")
                   req.setValue("https://v2.y2jar.cc/", forHTTPHeaderField: "Referer")
-                  let onInfo: (Data?, URLResponse?, Error?) -> Void = { [weak self] data, _, err in
+                  let t = URLSession.shared.dataTask(with: req) { [weak self] data, _, err in
                       guard let self = self else { return }
                       if task.raceCancelled || task.isCancelled { return }
                       guard let data = data, err == nil,
@@ -2959,7 +2976,6 @@ jobs:
                             let _ = info["title"] as? String else { lose(); return }
                       self.y2jarRaceToken(task: task, win: win, lose: lose)
                   }
-                  let t = URLSession.shared.dataTask(with: req, completionHandler: onInfo)
                   task.inFlightDataTasks.add(t); t.resume()
               }
 
@@ -2973,7 +2989,7 @@ jobs:
                   tr.setValue("application/json", forHTTPHeaderField: "Accept")
                   tr.setValue("https://v2.y2jar.cc/", forHTTPHeaderField: "Referer")
                   tr.setValue("https://v2.y2jar.cc", forHTTPHeaderField: "Origin")
-                  let onToken: (Data?, URLResponse?, Error?) -> Void = { [weak self] tdata, _, terr in
+                  let t2 = URLSession.shared.dataTask(with: tr) { [weak self] tdata, _, terr in
                       guard let self = self else { return }
                       if task.raceCancelled || task.isCancelled { return }
                       guard let tdata = tdata, terr == nil,
@@ -2983,16 +2999,9 @@ jobs:
                             let dlURL = URL(string: "\(self.y2jarDownloadURL)\(task.vid)?token=\(enc)") else {
                           lose(); return
                       }
-                      var finalName = task.proposedName
-                      let fl = finalName.lowercased()
-                      if !["mp3","m4a","wav","webm","mp4","aac","ogg","opus"].contains(where: { fl.hasSuffix("." + $0) }) {
-                          finalName += ".m4a"
-                      } else if fl.hasSuffix(".mp3") {
-                          finalName = String(finalName.dropLast(4)) + ".m4a"
-                      }
+                      let finalName = DownloadCenter.y2jarName(task.proposedName)
                       win(dlURL, finalName)
                   }
-                  let t2 = URLSession.shared.dataTask(with: tr, completionHandler: onToken)
                   task.inFlightDataTasks.add(t2); t2.resume()
               }
 
@@ -3013,7 +3022,7 @@ jobs:
                   let infoBody: [String:Any] = ["url": ytURL, "token": "1234"]
                   guard let infoBodyData = try? JSONSerialization.data(withJSONObject: infoBody) else { lose(); return }
                   infoReq.httpBody = infoBodyData
-                  let onInfo: (Data?, URLResponse?, Error?) -> Void = { [weak self] data, _, err in
+                  let infoTask = URLSession.shared.dataTask(with: infoReq) { [weak self] data, _, err in
                       guard let self = self else { return }
                       if task.raceCancelled || task.isCancelled { return }
                       var resolvedTitle = task.proposedName
@@ -3025,7 +3034,6 @@ jobs:
                       self.cnvmp3RaceConvert(task: task, convURL: convURL, ytURL: ytURL,
                                              resolvedTitle: resolvedTitle, win: win, lose: lose)
                   }
-                  let infoTask = URLSession.shared.dataTask(with: infoReq, completionHandler: onInfo)
                   task.inFlightDataTasks.add(infoTask); infoTask.resume()
               }
 
@@ -3043,28 +3051,16 @@ jobs:
                   let convBody: [String:Any] = ["url": ytURL, "quality": 4, "title": resolvedTitle, "formatValue": 1]
                   guard let convBodyData = try? JSONSerialization.data(withJSONObject: convBody) else { lose(); return }
                   convReq.httpBody = convBodyData
-                  let onConv: (Data?, URLResponse?, Error?) -> Void = { cdata, _, cerr in
+                  let t2 = URLSession.shared.dataTask(with: convReq) { cdata, _, cerr in
                       if task.raceCancelled || task.isCancelled { return }
-                      guard let cdata = cdata, cerr == nil,
-                            let cj = (try? JSONSerialization.jsonObject(with: cdata)) as? [String:Any] else {
-                          lose(); return
-                      }
-                      if (cj["success"] as? Bool) == false {
-                          log.debug("cnvmp3 rejected: \(cj["error"] ?? "?")")
-                          lose(); return
-                      }
+                      guard let cdata = cdata, cerr == nil else { lose(); return }
+                      guard let cj = (try? JSONSerialization.jsonObject(with: cdata)) as? [String:Any] else { lose(); return }
+                      if (cj["success"] as? Bool) == false { lose(); return }
                       guard let dl = cj["download_link"] as? String, !dl.isEmpty,
-                            let dlURL = URL(string: dl) else {
-                          lose(); return
-                      }
-                      var finalName = task.proposedName
-                      let fl = finalName.lowercased()
-                      if !["mp3","m4a","wav","webm","mp4","aac","ogg","opus"].contains(where: { fl.hasSuffix("." + $0) }) {
-                          finalName += ".mp3"
-                      }
+                            let dlURL = URL(string: dl) else { lose(); return }
+                      let finalName = DownloadCenter.ensureExt(task.proposedName, ext: "mp3")
                       win(dlURL, finalName)
                   }
-                  let t2 = URLSession.shared.dataTask(with: convReq, completionHandler: onConv)
                   task.inFlightDataTasks.add(t2); t2.resume()
               }
 
@@ -3290,7 +3286,7 @@ jobs:
                   req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
                   req.setValue("application/json", forHTTPHeaderField: "Accept")
                   req.setValue("https://v2.y2jar.cc/", forHTTPHeaderField: "Referer")
-                  let onInfo: (Data?, URLResponse?, Error?) -> Void = { [weak self] data, _, err in
+                  let dt = URLSession.shared.dataTask(with: req) { [weak self] data, _, err in
                       guard let self = self else { return }
                       if task.isCancelled { return }
                       guard let data = data, err == nil,
@@ -3300,7 +3296,6 @@ jobs:
                       }
                       self.startY2jarToken(task: task)
                   }
-                  let dt = URLSession.shared.dataTask(with: req, completionHandler: onInfo)
                   task.inFlightDataTasks.add(dt); dt.resume()
               }
 
@@ -3312,7 +3307,7 @@ jobs:
                   tr.setValue("application/json", forHTTPHeaderField: "Accept")
                   tr.setValue("https://v2.y2jar.cc/", forHTTPHeaderField: "Referer")
                   tr.setValue("https://v2.y2jar.cc", forHTTPHeaderField: "Origin")
-                  let onToken: (Data?, URLResponse?, Error?) -> Void = { [weak self] tdata, _, terr in
+                  let t2 = URLSession.shared.dataTask(with: tr) { [weak self] tdata, _, terr in
                       guard let self = self else { return }
                       if task.isCancelled { return }
                       guard let tdata = tdata, terr == nil,
@@ -3321,16 +3316,12 @@ jobs:
                           self.startCnvmp3(task: task); return
                       }
                       DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.7) }
-                      var finalName = task.proposedName
-                      let fl = finalName.lowercased()
-                      if !["mp3","m4a","wav","webm","mp4","aac","ogg","opus"].contains(where: { fl.hasSuffix("." + $0) }) { finalName += ".m4a" }
-                      else if fl.hasSuffix(".mp3") { finalName = String(finalName.dropLast(4)) + ".m4a" }
+                      let finalName = DownloadCenter.y2jarName(task.proposedName)
                       let enc = token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token
                       guard let dlURL = URL(string: "\(self.y2jarDownloadURL)\(task.vid)?token=\(enc)") else { self.startCnvmp3(task: task); return }
                       DispatchQueue.main.async { task.fileName = finalName }
                       self.startMediaDownload(task: task, url: dlURL, finalName: finalName, validate: true, referer:"https://v2.y2jar.cc/", backendLabel: "y2jar")
                   }
-                  let t2 = URLSession.shared.dataTask(with: tr, completionHandler: onToken)
                   task.inFlightDataTasks.add(t2); t2.resume()
               }
 
@@ -3349,7 +3340,7 @@ jobs:
                   let infoBody: [String:Any] = ["url": ytURL, "token": "1234"]
                   guard let infoBodyData = try? JSONSerialization.data(withJSONObject: infoBody) else { beginMp3Juice(task: task); return }
                   infoReq.httpBody = infoBodyData
-                  let onInfo: (Data?, URLResponse?, Error?) -> Void = { [weak self] data, _, err in
+                  let dtInfo = URLSession.shared.dataTask(with: infoReq) { [weak self] data, _, err in
                       guard let self = self else { return }
                       if task.isCancelled { return }
                       var resolvedTitle = task.proposedName
@@ -3359,7 +3350,6 @@ jobs:
                       DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.6) }
                       self.startCnvmp3Convert(task: task, convURL: convURL, ytURL: ytURL, resolvedTitle: resolvedTitle)
                   }
-                  let dtInfo = URLSession.shared.dataTask(with: infoReq, completionHandler: onInfo)
                   task.inFlightDataTasks.add(dtInfo); dtInfo.resume()
               }
 
@@ -3374,30 +3364,20 @@ jobs:
                   let convBody: [String:Any] = ["url": ytURL, "quality": 4, "title": resolvedTitle, "formatValue": 1]
                   guard let convBodyData = try? JSONSerialization.data(withJSONObject: convBody) else { self.beginMp3Juice(task: task); return }
                   convReq.httpBody = convBodyData
-                  let onConv: (Data?, URLResponse?, Error?) -> Void = { [weak self] cdata, _, cerr in
+                  let t2 = URLSession.shared.dataTask(with: convReq) { [weak self] cdata, _, cerr in
                       guard let self = self else { return }
                       if task.isCancelled { return }
-                      guard let cdata = cdata, cerr == nil,
-                            let cj = (try? JSONSerialization.jsonObject(with: cdata)) as? [String:Any] else {
-                          self.beginMp3Juice(task: task); return
-                      }
-                      if (cj["success"] as? Bool) == false {
-                          log.debug("cnvmp3 rejected long track: \(cj["error"] ?? "?")")
-                          self.beginMp3Juice(task: task); return
-                      }
+                      guard let cdata = cdata, cerr == nil else { self.beginMp3Juice(task: task); return }
+                      guard let cj = (try? JSONSerialization.jsonObject(with: cdata)) as? [String:Any] else { self.beginMp3Juice(task: task); return }
+                      if (cj["success"] as? Bool) == false { self.beginMp3Juice(task: task); return }
                       guard let dl = cj["download_link"] as? String, !dl.isEmpty,
-                            let dlURL = URL(string: dl) else {
-                          self.beginMp3Juice(task: task); return
-                      }
+                            let dlURL = URL(string: dl) else { self.beginMp3Juice(task: task); return }
                       DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.9) }
-                      var finalName = task.proposedName
-                      let fl = finalName.lowercased()
-                      if !["mp3","m4a","wav","webm","mp4","aac","ogg","opus"].contains(where: { fl.hasSuffix("." + $0) }) { finalName += ".mp3" }
+                      let finalName = DownloadCenter.ensureExt(task.proposedName, ext: "mp3")
                       DispatchQueue.main.async { task.fileName = finalName }
                       self.startMediaDownload(task: task, url: dlURL, finalName: finalName, validate: true,
                                               referer: "https://cnvmp3.com/v55", backendLabel: "cnvmp3")
                   }
-                  let t2 = URLSession.shared.dataTask(with: convReq, completionHandler: onConv)
                   task.inFlightDataTasks.add(t2); t2.resume()
               }
 
@@ -3621,9 +3601,10 @@ jobs:
                   }
 
                   var finalName = task.fileName.isEmpty ? task.proposedName : task.fileName
-                  let audioExts = ["mp3","m4a","wav","webm","mp4","aac","ogg","opus"]
                   let fl = finalName.lowercased()
-                  if !audioExts.contains(where: { fl.hasSuffix("." + $0) }) {
+                  var hasKnownExt = false
+                  for e in DownloadCenter.audioExts { if fl.hasSuffix("." + e) { hasKnownExt = true; break } }
+                  if !hasKnownExt {
                       if let mt = (downloadTask.response as? HTTPURLResponse)?.mimeType {
                           if mt.contains("mpeg") || mt.contains("mp3") { finalName += ".mp3" }
                           else if mt.contains("mp4") || mt.contains("m4a") || mt.contains("aac") { finalName += ".m4a" }
