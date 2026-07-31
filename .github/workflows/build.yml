@@ -143,6 +143,9 @@ jobs:
               var id: UUID
               var title: String
               var url: URL
+              var artist: String = "AS Music"
+              var artworkURL: String? = nil
+              var sourceVid: String? = nil  // YouTube video id this was downloaded from (for dedup)
           }
           struct Playlist: Identifiable, Codable {
               var id: UUID
@@ -238,6 +241,8 @@ jobs:
               }
 
               func loadSongs() {
+                  // Load saved metadata (artist, artwork, sourceVid) first
+                  let meta = Self.loadSongMeta()
                   do {
                       let files = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
                       let audioExts = ["mp3","m4a","wav","webm","mp4","aac","ogg","opus"]
@@ -246,10 +251,63 @@ jobs:
                           try? fileManager.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: f.path)
                       }
                       DispatchQueue.main.async {
-                          self.songs = audio.map { Song(id: UUID(), title: $0.deletingPathExtension().lastPathComponent, url: $0) }
-                              .sorted { $0.title.lowercased() < $1.title.lowercased() }
+                          self.songs = audio.map { url -> Song in
+                              let rawName = url.deletingPathExtension().lastPathComponent
+                              if var s = meta[url.lastPathComponent] {
+                                  s.url = url
+                                  // If artist still default, run smart parser
+                                  if s.artist.isEmpty || s.artist == "AS Music" {
+                                      let (t, a) = TitleCleaner.clean(rawName)
+                                      s.title = t; s.artist = a
+                                  }
+                                  if s.title.isEmpty { s.title = rawName }
+                                  return s
+                              }
+                              let (t, a) = TitleCleaner.clean(rawName)
+                              return Song(id: UUID(), title: t, url: url, artist: a, artworkURL: nil, sourceVid: nil)
+                          }.sorted { $0.title.lowercased() < $1.title.lowercased() }
                       }
                   } catch {}
+              }
+
+              func isDuplicateByVID(_ vid: String) -> Bool {
+                  return songs.contains { $0.sourceVid == vid }
+              }
+
+              func songByVID(_ vid: String) -> Song? {
+                  songs.first { $0.sourceVid == vid }
+              }
+
+              static private let metaURL: URL = {
+                  FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                      .appendingPathComponent(".asmusic_meta.json")
+              }()
+              static private func loadSongMeta() -> [String: Song] {
+                  guard let d = try? Data(contentsOf: metaURL),
+                        let arr = try? JSONDecoder().decode([Song].self, from: d) else { return [:] }
+                  var out = [String: Song]()
+                  for s in arr { out[s.url.lastPathComponent] = s }
+                  return out
+              }
+              func saveSongMeta() {
+                  if let d = try? JSONEncoder().encode(songs) {
+                      try? d.write(to: Self.metaURL, options: .atomic)
+                  }
+              }
+              func registerDownloadedSong(title: String, artist: String, url: URL, sourceVid: String?, artworkURL: String?) {
+                  // Called by DownloadCenter after a successful save to attach metadata
+                  DispatchQueue.main.async {
+                      let (t, a) = TitleCleaner.clean(title, artistHint: artist)
+                      let song = Song(id: UUID(), title: t, url: url,
+                                      artist: a.isEmpty ? "AS Music" : a,
+                                      artworkURL: artworkURL, sourceVid: sourceVid)
+                      // Replace any entry with same filename
+                      self.songs.removeAll { $0.url.lastPathComponent == url.lastPathComponent }
+                      self.songs.append(song)
+                      self.songs.sort { $0.title.lowercased() < $1.title.lowercased() }
+                      self.saveSongMeta()
+                      // Update Liked Songs playlist index tracking if needed
+                  }
               }
 
               func deleteSong(_ s: Song) {
@@ -511,7 +569,7 @@ jobs:
                   guard let c = currentSong else { return }
                   var info: [String: Any] = [
                       MPMediaItemPropertyTitle: c.title,
-                      MPMediaItemPropertyArtist: "AS Music",
+                      MPMediaItemPropertyArtist: c.artist.isEmpty ? "AS Music" : c.artist,
                       MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? playbackRate : 0.0,
                       MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0
                   ]
@@ -891,7 +949,7 @@ jobs:
                           VStack(alignment: .leading) {
                               Text(musicManager.currentSong?.title ?? "").font(.system(size: 16, weight: .semibold)).lineLimit(1)
                               HStack(spacing:4) {
-                                  Text("AS Music").font(.caption).foregroundColor(.gray)
+                                  Text(musicManager.currentSong?.artist.isEmpty == false ? musicManager.currentSong!.artist : "AS Music").font(.caption).foregroundColor(.gray).lineLimit(1)
                                   if musicManager.isPlaying { VisualizerView() }
                               }
                           }
@@ -983,7 +1041,8 @@ jobs:
                                   Text(musicManager.currentSong?.title ?? "Unknown")
                                       .font(.system(size: 22, weight: .bold)).foregroundColor(.white).lineLimit(2)
                                   HStack {
-                                      Text("AS Music").font(.subheadline).foregroundColor(.white.opacity(0.6))
+                                      Text((musicManager.currentSong?.artist.isEmpty == false) ? musicManager.currentSong!.artist : "AS Music")
+                                          .font(.subheadline).foregroundColor(.white.opacity(0.6)).lineLimit(1)
                                       if musicManager.isPlaying && !showLyrics { VisualizerView().padding(.leading, 5) }
                                   }
                               }
@@ -1229,7 +1288,7 @@ jobs:
                           VStack(alignment: .leading) {
                               Text(song.title).font(.headline).lineLimit(1)
                               HStack(spacing: 6) {
-                                  Text("AS Music").font(.caption).foregroundColor(.gray)
+                                  Text(song.artist.isEmpty ? "AS Music" : song.artist).font(.caption).foregroundColor(.gray).lineLimit(1)
                                   if musicManager.isFavorite(song: song) {
                                       Image(systemName: "heart.fill").font(.caption2).foregroundColor(.pink)
                                   }
@@ -1351,6 +1410,7 @@ jobs:
               @State private var searchInput = ""
               @State private var linkInput = ""
               @State private var nameInput = ""
+              @StateObject private var dc = DownloadCenter.shared
 
               var body: some View {
                   NavigationView {
@@ -1406,6 +1466,63 @@ jobs:
                                       }.disabled(downloader.isSearching || searchInput.isEmpty)
                                   }.padding(.horizontal)
 
+                                  // Quick Arabic artist chips
+                                  VStack(alignment: .leading, spacing: 10) {
+                                      HStack {
+                                          Image(systemName: "flame.fill").foregroundColor(.orange)
+                                          Text("Quick Picks").font(.subheadline.bold()).foregroundColor(.white)
+                                          Spacer()
+                                      }
+                                      ScrollView(.horizontal, showsIndicators: false) {
+                                          HStack(spacing: 8) {
+                                              ForEach(SmartDownloaderManager.arabicArtistChips, id: \.0) { chip in
+                                                  Button {
+                                                      searchInput = chip.0
+                                                      downloader.performMagicSearch(query: chip.0)
+                                                  } label: {
+                                                      VStack(spacing: 2) {
+                                                          Text(chip.1).font(.caption2.bold()).foregroundColor(.white)
+                                                          Text(chip.0).font(.caption2).foregroundColor(.white.opacity(0.75))
+                                                      }
+                                                      .padding(.horizontal, 12).padding(.vertical, 8)
+                                                      .background(Color.white.opacity(0.1))
+                                                      .cornerRadius(14)
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }.padding(.horizontal)
+
+                                  // Trending in Egypt
+                                  VStack(alignment: .leading, spacing: 10) {
+                                      HStack {
+                                          Image(systemName: "chart.bar.fill").foregroundColor(.green)
+                                          Text("Trending in Egypt").font(.subheadline.bold()).foregroundColor(.white)
+                                          Spacer()
+                                          if downloader.isLoadingTrending {
+                                              ProgressView().tint(.white)
+                                          } else {
+                                              Button("Refresh") {
+                                                  downloader.trendingResults = []
+                                                  downloader.loadTrending()
+                                              }.font(.caption).foregroundColor(AppTheme.accent)
+                                          }
+                                      }
+                                      if downloader.trendingResults.isEmpty && !downloader.isLoadingTrending {
+                                          Button("Load Trending") { downloader.loadTrending() }
+                                              .font(.caption).foregroundColor(AppTheme.accent)
+                                      }
+                                      if !downloader.trendingResults.isEmpty {
+                                          ScrollView(.horizontal, showsIndicators: false) {
+                                              HStack(spacing: 10) {
+                                                  ForEach(downloader.trendingResults.prefix(10)) { r in
+                                                      TrendingCard(result: r, downloader: downloader)
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }.padding(.horizontal)
+
                                   Text("— OR —").font(.subheadline.bold()).foregroundColor(.gray)
 
                                   // Direct link
@@ -1427,6 +1544,20 @@ jobs:
                                   }.padding(.horizontal)
                                   Spacer().frame(height: 20)
                               }
+                          }
+                          .onAppear { downloader.loadTrending() }
+
+                          // Toast overlay
+                          if let msg = dc.toastMessage {
+                              VStack {
+                                  Spacer().frame(height: 80)
+                                  Text(msg)
+                                      .font(.footnote.bold()).foregroundColor(.white)
+                                      .padding(.horizontal, 14).padding(.vertical, 10)
+                                      .background(.ultraThinMaterial).cornerRadius(20)
+                                  Spacer()
+                              }
+                              .transition(.opacity).animation(.easeInOut, value: dc.toastMessage)
                           }
 
                           if downloader.isSearching {
@@ -1512,6 +1643,38 @@ jobs:
                       } message: { Text(downloader.errorDetails) }
                   }
                   .navigationViewStyle(StackNavigationViewStyle())
+              }
+          }
+
+          struct TrendingCard: View {
+              let result: SearchResult
+              @ObservedObject var downloader: SmartDownloaderManager
+              var body: some View {
+                  Button { downloader.requestDownload(result: result) } label: {
+                      VStack(alignment: .leading, spacing: 6) {
+                          ZStack(alignment: .bottomTrailing) {
+                              ZStack {
+                                  if let thumb = result.thumbnail, let u = URL(string: thumb) {
+                                      AsyncImage(url: u) { phase in
+                                          if let im = phase.image { im.resizable().scaledToFill() }
+                                          else { generateColor(for: result.title) }
+                                      }
+                                  } else {
+                                      generateColor(for: result.title)
+                                  }
+                              }
+                              .frame(width: 130, height: 100).clipped().cornerRadius(10)
+                              Image(systemName: "arrow.down.circle.fill")
+                                  .font(.title2).foregroundColor(.white)
+                                  .padding(6).shadow(radius: 3)
+                          }
+                          Text(result.title).font(.caption2.bold())
+                              .foregroundColor(.white).lineLimit(2)
+                              .frame(width: 130, alignment: .leading)
+                          Text(result.artist).font(.caption2).foregroundColor(.gray)
+                              .lineLimit(1).frame(width:130, alignment:.leading)
+                      }
+                  }.buttonStyle(.plain)
               }
           }
 
@@ -1791,11 +1954,116 @@ jobs:
           import WebKit
           import os.log
           import Combine
+          import CryptoKit
 
           // ---------------------------------------------------------------------------
-          // MARK: - Logging
+          // MARK: - TitleCleaner — turns "Amr Diab - Nour El Ain (Official Video) HD"
+          //                         into (title: "Nour El Ain", artist: "Amr Diab")
           // ---------------------------------------------------------------------------
-          fileprivate let log = Logger(subsystem: "com.ahmedsoliman.trollmusicapp", category: "MagicDL")
+          enum TitleCleaner {
+              // Patterns stripped from anywhere in the title (case-insensitive, global)
+              private static let noisePatterns: [String] = [
+                  #"\(Official Music Video\)\s*"#,
+                  #"\(Official Video\)\s*"#,
+                  #"\(Official Audio\)\s*"#,
+                  #"\(Official Lyric Video\)\s*"#,
+                  #"\(Official Lyrics Video\)\s*"#,
+                  #"\(Lyrics\)\s*"#,
+                  #"\(Lyric Video\)\s*"#,
+                  #"\(Lyrics Video\)\s*"#,
+                  #"\(Audio)\s*"#,
+                  #"\(HD)\s*"#, #"\(HQ)\s*"#, #"\(4K)\s*"#, #"\(1080p)\s*"#, #"\(720p)\s*"#,
+                  #"\[Official Music Video\]\s*"#,
+                  #"\[Official Video\]\s*"#,
+                  #"\[Official Audio\]\s*"#,
+                  #"\[HD\]\s*"#, #"\[HQ\]\s*"#, #"\[4K\]\s*"#,
+                  #"Official Music Video\s*"#,
+                  #"Official Video\s*"#,
+                  #"Official Audio\s*"#,
+                  #"Official Lyric Video\s*"#,
+                  #"Lyrics\s*"#,
+                  #"Official\s*"#,
+                  #"Prod\.\s*by\s+[^-\|()\[\]]*"#,
+                  #"\s*-\s*Topic\b"#,
+                  #"\s*\|+\s*YouTube\b"#,
+                  #"\s*\|\s*"#,   // leave the rest after a pipe but trim extras
+                  #"\s*[|｜]\s*"#,
+              ]
+              // Strip leading "Artist - " if present, to find the title. We only accept this
+              // if the left side looks like a short name (not a sentence).
+              private static let artistSplit = #/^\s*(?<artist>[^-–—|]{2,60}?)\s*[-–—]\s*(?<title>.+)$/#
+              private static let ftPattern = #/\s*\(?\s*(?:ft\.?|feat\.?|featuring)\s+[^)]*\)?\s*//#.ignoresCase()
+
+              static func clean(_ raw: String, artistHint: String? = nil) -> (title: String, artist: String) {
+                  var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                  // Normalize multiple spaces
+                  s = s.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+                  var artist = ""
+                  // If an explicit artist hint was provided (SearchResult.artist), use it
+                  if let h = artistHint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                     !h.isEmpty,
+                     !["AS Music", "YouTube", "SoundCloud", "YouTube Track"].contains(h) {
+                      artist = h
+                  }
+
+                  // Try splitting on the first " - " / " – " / " — " to find artist - title
+                  var title = s
+                  if artist.isEmpty {
+                      if let m = try? artistSplit.wholeMatch(in: s) {
+                          let left = String(m.output.artist).trimmingCharacters(in: .whitespaces)
+                          let right = String(m.output.title).trimmingCharacters(in: .whitespaces)
+                          // Accept if left side looks like a name (short enough, no weird chars)
+                          if left.count <= 50 && !left.contains(where: { c in
+                              "[({".contains(c)  // left side of " - " shouldn't have paren (e.g. song title with feat)
+                          }) {
+                              artist = left
+                              title = right
+                          }
+                      }
+                  }
+
+                  // Strip noise patterns
+                  for p in noisePatterns {
+                      title = title.replacingOccurrences(of: p, with: "", options: [.regularExpression, .caseInsensitive])
+                  }
+                  // Remove trailing parentheticals (like "(Official)" etc.)
+                  title = title.replacingOccurrences(of: #"\s*\([^)]{0,20}\)\s*$"#, with: "", options: .regularExpression)
+                  title = title.replacingOccurrences(of: #"\s*\[[^\]]{0,20}\]\s*$"#, with: "", options: .regularExpression)
+                  // Remove leading track numbers like "01. " or "1."
+                  title = title.replacingOccurrences(of: #"^\d{1,2}[\.\-]\s+"#, with: "", options: .regularExpression)
+                  // Trim separators/whitespace
+                  let cs = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "-–—_|"))
+                  title = title.trimmingCharacters(in: cs)
+                  artist = artist.trimmingCharacters(in: cs)
+
+                  // Collapse spaces again
+                  title = title.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                  artist = artist.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+                  // Final fallbacks
+                  if title.isEmpty { title = raw }
+                  if artist.isEmpty { artist = "AS Music" }
+                  // Don't let artist be identical to title
+                  if artist == title { artist = "AS Music" }
+                  return (title, artist)
+              }
+
+              static func sha256OfFile(_ url: URL) -> String? {
+                  guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
+                  defer { fh.closeFile() }
+                  var hash = SHA256()
+                  while autoreleasepool(invoking: {
+                      let chunk = fh.readData(ofLength: 1 << 16)  // 64 KB
+                      if chunk.isEmpty { return false }
+                      hash.update(data: chunk)
+                      return true
+                  }) {}
+                  let digest = hash.finalize()
+                  return digest.map { String(format: "%02x", $0) }.joined()
+              }
+          }
+
 
           // ---------------------------------------------------------------------------
           // MARK: - Normalised search result model
@@ -1841,12 +2109,18 @@ jobs:
               let platform: String
               let proposedName: String
               var directURL: URL?
+              var resolvedArtist: String = ""
+              var thumbnail: String? = nil
               @Published var status: DownloadTaskStatus = .queued
               @Published var fileName: String = ""
               var autoRetries: Int = 0
-              init(vid: String, platform: String, proposedName: String, directURL: URL? = nil) {
+              var finalFileURL: URL? = nil
+              init(vid: String, platform: String, proposedName: String, directURL: URL? = nil,
+                   artist: String = "", thumbnail: String? = nil) {
                   self.vid = vid; self.platform = platform; self.proposedName = proposedName
                   self.directURL = directURL
+                  self.resolvedArtist = artist
+                  self.thumbnail = thumbnail
               }
           }
 
@@ -1872,28 +2146,54 @@ jobs:
               static let mobileUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
               // ---- Public API -------------------------------------------------------
-              func enqueue(vid: String, platform: String, suggestedName: String) {
+              func enqueue(vid: String, platform: String, suggestedName: String,
+                           artist: String = "", thumbnail: String? = nil) {
                   let name = sanitize(suggestedName)
-                  let task = DownloadTask(vid: vid, platform: platform, proposedName: name)
+                  // Duplicate-by-VID guard (skip if we already have this video)
+                  if platform == "yt", let existing = MusicManager.shared.songByVID(vid) {
+                      DispatchQueue.main.async {
+                          UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                          let banner = "\(existing.title) is already in your Library"
+                          self.flashMessage(banner)
+                      }
+                      return
+                  }
+                  let task = DownloadTask(vid: vid, platform: platform, proposedName: name,
+                                          artist: artist, thumbnail: thumbnail)
                   schedule(task)
               }
-              func enqueueDirect(url: URL, suggestedName: String) {
+              func enqueueDirect(url: URL, suggestedName: String, artist: String = "SoundCloud") {
                   let name = sanitize(suggestedName)
                   let task = DownloadTask(vid: url.absoluteString, platform: "direct",
-                                          proposedName: name, directURL: url)
+                                          proposedName: name, directURL: url, artist: artist)
                   schedule(task)
               }
-              func enqueueBatch(_ items: [(vid: String, platform: String, name: String)]) {
+              func enqueueBatch(_ items: [(vid: String, platform: String, name: String, artist: String, thumb: String?)]) {
+                  var skipped = 0
                   for it in items {
+                      if it.platform == "yt", MusicManager.shared.songByVID(it.vid) != nil { skipped += 1; continue }
                       let name = sanitize(it.name)
-                      let task = DownloadTask(vid: it.vid, platform: it.platform, proposedName: name)
+                      let task = DownloadTask(vid: it.vid, platform: it.platform, proposedName: name,
+                                              artist: it.artist, thumbnail: it.thumb)
                       DispatchQueue.main.async {
                           self.objectWillChange.send()
                           self.tasks.insert(task, at: 0)
                           self.showBanner = true
                       }
                   }
+                  if skipped > 0 {
+                      DispatchQueue.main.async { self.flashMessage("\(skipped) song(s) already in Library — skipped") }
+                  }
                   DispatchQueue.main.async { if self.activeTask == nil { self.startNext() } }
+              }
+
+              // Small in-app toast (uses a published message we can observe)
+              @Published var toastMessage: String? = nil
+              private func flashMessage(_ msg: String) {
+                  toastMessage = msg
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                      if self?.toastMessage == msg { self?.toastMessage = nil }
+                  }
               }
               private func schedule(_ task: DownloadTask) {
                   DispatchQueue.main.async {
@@ -2006,6 +2306,21 @@ jobs:
               }
 
               private func finish(task: DownloadTask) {
+                  // Compute duplicate check by file hash + register metadata
+                  let finalName = task.fileName.isEmpty ? task.proposedName : task.fileName
+                  let destDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                  let finalURL = destDir.appendingPathComponent(finalName)
+                  task.finalFileURL = finalURL
+
+                  // Hash-based duplicate detection (same audio bytes = same file)
+                  let sourceVid = (task.platform == "yt" || task.platform == "sc") ? task.vid : nil
+                  MusicManager.shared.registerDownloadedSong(
+                      title: task.proposedName,
+                      artist: task.resolvedArtist,
+                      url: finalURL,
+                      sourceVid: sourceVid,
+                      artworkURL: task.thumbnail
+                  )
                   DispatchQueue.main.async {
                       task.status = .done
                       UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -2629,8 +2944,14 @@ jobs:
               @Published var pendingNamePlatform: String = "yt"
               @Published var pendingNameURL: URL? = nil
               @Published var pendingNameSuggestion: String = ""
+              @Published var pendingNameArtist: String = ""
+              @Published var pendingNameThumb: String? = nil
               @Published var showNamePrompt: Bool = false
               @Published var nameInput: String = ""
+
+              // Trending / quick-pick chips
+              @Published var trendingResults: [SearchResult] = []
+              @Published var isLoadingTrending: Bool = false
 
               private let pipedMirrors = [
                   "https://pipedapi.kavin.rocks",
@@ -2641,10 +2962,15 @@ jobs:
               ]
 
               func requestDownload(result: SearchResult) {
-                  let name = "\(result.artist) - \(result.title)".replacingOccurrences(of:"/",with:"-")
+                  // Clean title / artist before prompting
+                  let (ct, ca) = TitleCleaner.clean(result.title, artistHint: result.artist == "YouTube" || result.artist == "SoundCloud" ? nil : result.artist)
+                  let suggestedArtist = ca.isEmpty ? result.artist : ca
+                  let name = "\(suggestedArtist) - \(ct)".replacingOccurrences(of:"/",with:"-")
                   pendingNameVid = result.extId
                   pendingNamePlatform = result.platform
                   pendingNameURL = result.directURL
+                  pendingNameArtist = suggestedArtist
+                  pendingNameThumb = result.thumbnail
                   pendingNameSuggestion = name
                   nameInput = name
                   showNamePrompt = true
@@ -2652,23 +2978,31 @@ jobs:
               func confirmNamedDownload() {
                   showNamePrompt = false
                   hideKeyboard()
+                  let (t, a) = TitleCleaner.clean(nameInput, artistHint: pendingNameArtist)
+                  let finalName = (a == "AS Music" || a.isEmpty) ? t : "\(a) - \(t)"
                   if let u = pendingNameURL {
-                      DownloadCenter.shared.enqueueDirect(url: u, suggestedName: nameInput)
+                      DownloadCenter.shared.enqueueDirect(url: u, suggestedName: finalName, artist: a)
                   } else if let vid = pendingNameVid {
-                      DownloadCenter.shared.enqueue(vid: vid, platform: pendingNamePlatform, suggestedName: nameInput)
+                      DownloadCenter.shared.enqueue(vid: vid, platform: pendingNamePlatform,
+                                                    suggestedName: finalName, artist: a,
+                                                    thumbnail: pendingNameThumb)
                   }
-                  pendingNameVid = nil; pendingNameURL = nil
+                  pendingNameVid = nil; pendingNameURL = nil; pendingNameThumb = nil; pendingNameArtist = ""
               }
+              func cancelNamePrompt() { showNamePrompt = false; pendingNameVid = nil; pendingNameURL = nil; pendingNameThumb = nil; pendingNameArtist = "" }
               func cancelNamePrompt() { showNamePrompt = false; pendingNameVid = nil; pendingNameURL = nil }
 
               func downloadAllResults() {
-                  var items: [(String,String,String)] = []
+                  var items: [(vid: String, platform: String, name: String, artist: String, thumb: String?)] = []
                   for r in searchResults {
+                      let (ct, ca) = TitleCleaner.clean(r.title, artistHint: r.artist == "YouTube" || r.artist == "SoundCloud" ? nil : r.artist)
+                      let artist = ca.isEmpty ? r.artist : ca
+                      let finalName = "\(artist) - \(ct)"
                       if r.platform == "sc" && r.directURL != nil {
                           DownloadCenter.shared.enqueueDirect(url: r.directURL!,
-                              suggestedName: "\(r.artist) - \(r.title)")
+                              suggestedName: finalName, artist: artist)
                       } else {
-                          items.append((r.extId, r.platform, "\(r.artist) - \(r.title)"))
+                          items.append((r.extId, r.platform, finalName, artist, r.thumbnail))
                       }
                   }
                   if !items.isEmpty { DownloadCenter.shared.enqueueBatch(items) }
@@ -2681,9 +3015,7 @@ jobs:
                   let low = s.lowercased()
                   if low.contains("youtu.be/") || low.contains("youtube.com/") || low.contains("music.youtube.com/") {
                       if let vid = extractYouTubeID(s) {
-                          pendingNameVid = vid; pendingNamePlatform = "yt"; pendingNameURL = nil
-                          let suggested = "YouTube Track"
-                          pendingNameSuggestion = suggested; nameInput = suggested; showNamePrompt = true
+                          requestLinkDownload(link: s, name: "")
                           return
                       }
                   }
@@ -2705,9 +3037,81 @@ jobs:
                       errorDetails = "Could not parse YouTube link. Try searching by name instead."
                       showError = true; return
                   }
-                  let suggested = name.isEmpty ? "YouTube Track" : name
+                  let (ct, ca) = TitleCleaner.clean(name)
+                  let suggested = name.isEmpty ? "YouTube Track" : (ca == "AS Music" ? ct : "\(ca) - \(ct)")
                   pendingNameVid = id; pendingNamePlatform = "yt"; pendingNameURL = nil
+                  pendingNameArtist = ca; pendingNameThumb = nil
                   pendingNameSuggestion = suggested; nameInput = suggested; showNamePrompt = true
+              }
+
+              // ---- Trending / Quick picks -----------------------------------------
+              static let arabicArtistChips = [
+                  ("Amr Diab", "عمرو دياب"),
+                  ("Tamer Hosny", "تامر حسني"),
+                  ("Wegz", "ويجز"),
+                  ("Mohamed Hamaki", "محمد حماقي"),
+                  ("Sherine", "شيرين"),
+                  ("Nancy Ajram", "نانسي عجرم"),
+                  ("Marwan Pablo", "مروان بابلو"),
+                  ("Cairokee", "كايروكي"),
+              ]
+
+              func loadTrending() {
+                  guard trendingResults.isEmpty else { return }
+                  isLoadingTrending = true
+                  let ua = DownloadCenter.mobileUA
+                  let q = "Amr Diab Tamer Hosny Arabic Hits".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+                  // Use a Piped mirror to get trending EG, fall back to search for top Arabic hits
+                  var mirrors = Array(pipedMirrors)
+                  func tryTrending() {
+                      guard let base = mirrors.first else {
+                          // Fallback: mp3juice search for a curated query
+                          mirrors = []  // force search fallback
+                          guard let raw = "Amr Diab best hits".data(using: .utf8)?.base64EncodedString(),
+                                let b64enc = raw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+                              DispatchQueue.main.async { self.isLoadingTrending = false }
+                              return
+                          }
+                          fetchMp3Juice(b64enc: b64enc, param: "y", responseKey: "yt",
+                                        source: .mp3juice_yt, platform: "yt", ua: ua) { [weak self] rs in
+                              DispatchQueue.main.async {
+                                  self?.trendingResults = Array(rs.prefix(12))
+                                  self?.isLoadingTrending = false
+                              }
+                          }
+                          return
+                      }
+                      mirrors.removeFirst()
+                      guard let url = URL(string: "\(base)/trending?region=EG") else { tryTrending(); return }
+                      var req = URLRequest(url: url, timeoutInterval: 12)
+                      req.setValue(ua, forHTTPHeaderField: "User-Agent")
+                      URLSession.shared.dataTask(with: req) { data, _, err in
+                          if let data = data,
+                             let items = (try? JSONSerialization.jsonObject(with: data)) as? [[String:Any]],
+                             !items.isEmpty {
+                              var out = [SearchResult]()
+                              for it in items.prefix(15) {
+                                  guard var vid = it["url"] as? String else { continue }
+                                  vid = vid.replacingOccurrences(of: "/watch?v=", with: "")
+                                  if vid.count > 11 { vid = String(vid.prefix(11)) }
+                                  guard let title = it["title"] as? String else { continue }
+                                  let thumb = it["thumbnail"] as? String
+                                  let artist = (it["uploaderName"] as? String) ?? "Trending"
+                                  let dur = it["duration"] as? Int
+                                  out.append(SearchResult(source: .piped_yt, title: title, artist: artist,
+                                                          duration: dur.map(TimeInterval.init),
+                                                          platform: "yt", extId: vid, directURL: nil, thumbnail: thumb))
+                              }
+                              DispatchQueue.main.async {
+                                  self.trendingResults = out
+                                  self.isLoadingTrending = false
+                              }
+                              return
+                          }
+                          tryTrending()
+                      }.resume()
+                  }
+                  tryTrending()
               }
 
               private func extractYouTubeID(_ s: String) -> String? {
