@@ -2711,7 +2711,6 @@ jobs:
                   var resolved = false
                   var failedCount = 0
                   let totalContenders = 3
-                  var _dummy = 0
                   func tryWin(_ label: String, downloadURL: URL, finalName: String, referer: String = "https://mp3juice.sc/") {
                       winnerQueue.async { [weak self] in
                           guard let self = self else { return }
@@ -2864,8 +2863,8 @@ jobs:
                   req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
                   req.setValue(referer, forHTTPHeaderField: "Referer")
                   req.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
-                  let t = URLSession.shared.dataTask(with: req) { data, resp, err in
-                      if let err = err { completion(false); return }
+                  let probeTask = URLSession.shared.dataTask(with: req) { data, resp, err in
+                      if err != nil { completion(false); return }
                       guard let hr = resp as? HTTPURLResponse else { completion(false); return }
                       // 206 Partial Content = range accepted; 200 = server ignores range but returns full file
                       guard hr.statusCode == 206 || hr.statusCode == 200 else { completion(false); return }
@@ -2881,7 +2880,7 @@ jobs:
                       // text/plain with long content-length = not ready yet
                       completion(false)
                   }
-                  t.resume()
+                  probeTask.resume()
               }
 
               private func workerPollRace(task: DownloadTask, progURL: String, mirrorIndex: Int,
@@ -3007,14 +3006,14 @@ jobs:
                   let infoBody: [String:Any] = ["url": ytURL, "token": "1234"]
                   guard let infoBodyData = try? JSONSerialization.data(withJSONObject: infoBody) else { lose(); return }
                   infoReq.httpBody = infoBodyData
-                  let t = URLSession.shared.dataTask(with: infoReq) { [weak self] data, resp, err in
+                  let infoTask = URLSession.shared.dataTask(with: infoReq) { [weak self] data, resp, err in
                       guard let self = self else { return }
                       if task.raceCancelled || task.isCancelled { return }
                       var resolvedTitle = task.proposedName
                       if let data = data, err == nil,
                          let j = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any],
-                         let t = j["title"] as? String, !t.isEmpty {
-                          resolvedTitle = t
+                         let titleStr = j["title"] as? String, !titleStr.isEmpty {
+                          resolvedTitle = titleStr
                       }
                       var convReq = URLRequest(url: convURL, timeoutInterval: 120)
                       convReq.httpMethod = "POST"
@@ -3050,10 +3049,9 @@ jobs:
                           win(dlURL, finalName)
                       }
                       task.inFlightDataTasks.add(t2)
-                      t2.resume()
+                      task.inFlightDataTasks.add(t2); t2.resume()
                   }
-                  task.inFlightDataTasks.add(t)
-                  t.resume()
+                  task.inFlightDataTasks.add(infoTask); infoTask.resume()
               }
 
               // ---- SoundCloud preflight --------------------------------------------
@@ -3331,13 +3329,13 @@ jobs:
                   let infoBody: [String:Any] = ["url": ytURL, "token": "1234"]
                   guard let infoBodyData = try? JSONSerialization.data(withJSONObject: infoBody) else { beginMp3Juice(task: task); return }
                   infoReq.httpBody = infoBodyData
-                  let dt = URLSession.shared.dataTask(with: infoReq) { [weak self] data, resp, err in
+                  let dtInfo = URLSession.shared.dataTask(with: infoReq) { [weak self] data, resp, err in
                       guard let self = self else { return }
                       if task.isCancelled { return }
                       var resolvedTitle = task.proposedName
                       if let data = data, err == nil,
                          let j = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any],
-                         let t = j["title"] as? String, !t.isEmpty { resolvedTitle = t }
+                         let titleStr = j["title"] as? String, !titleStr.isEmpty { resolvedTitle = titleStr }
                       DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(0.6) }
                       var convReq = URLRequest(url: convURL, timeoutInterval: 90)
                       convReq.httpMethod = "POST"
@@ -3375,7 +3373,7 @@ jobs:
                       }
                       task.inFlightDataTasks.add(t2); t2.resume()
                   }
-                  task.inFlightDataTasks.add(dt); dt.resume()
+                  task.inFlightDataTasks.add(dtInfo); dtInfo.resume()
               }
 
               private func mp3JuiceAuth(completion: @escaping (String?) -> Void) {
