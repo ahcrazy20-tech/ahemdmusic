@@ -2551,8 +2551,8 @@ jobs:
               override private init() {
                   super.init()
                   let config = URLSessionConfiguration.default
-                  config.timeoutIntervalForRequest = 30
-                  config.timeoutIntervalForResource = 600
+                  config.timeoutIntervalForRequest = 45
+                  config.timeoutIntervalForResource = 3600     // 1 hour for long mixes / slow connections
                   config.httpMaximumConnectionsPerHost = 6
                   session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
               }
@@ -2701,23 +2701,23 @@ jobs:
               }
 
               // =====================================================================
-              // FAST RACE: worker mirrors + y2jar + cnvmp3 + yt5s ALL IN PARALLEL
+              // FAST RACE: y2jar (DIRECT, no transcode) + worker mirrors + cnvmp3
+              // y2jar goes FIRST because it returns direct M4A links in ~0.5s with
+              // ZERO server conversion time (it proxies YouTube's native audio),
+              // making it the fastest backend by far for long songs/mixes.
               // =====================================================================
               private func startFastRace(task: DownloadTask) {
-                  // Serialize winner selection so only one backend finishes.
                   let winnerQueue = DispatchQueue(label: "asMusic.race")
-                  var resolved = false                     // protected by winnerQueue
+                  var resolved = false
                   var failedCount = 0
-                  let totalContenders = 3                  // worker-mirrors-group, y2jar, cnvmp3 (+ yt5s)
-                  var contenderCount = 0
-
+                  let totalContenders = 3
+                  var _dummy = 0
                   func tryWin(_ label: String, downloadURL: URL, finalName: String, referer: String = "https://mp3juice.sc/") {
                       winnerQueue.async { [weak self] in
                           guard let self = self else { return }
                           if resolved || task.isCancelled { return }
                           resolved = true
-                          task.raceCancelled = true        // signal other contenders to abort
-                          // Cancel in-flight requests from other contenders
+                          task.raceCancelled = true
                           for t in task.inFlightDataTasks.allObjects { t.cancel() }
                           for tm in task.pollTimers { tm.invalidate() }
                           task.pollTimers.removeAll()
@@ -2735,7 +2735,6 @@ jobs:
                       winnerQueue.async { [weak self] in
                           guard let self = self else { return }
                           failedCount += 1
-                          // Update UI with progress-like indicator
                           let p = min(0.5, Double(failedCount) / Double(totalContenders + 1))
                           if !resolved && !task.isCancelled {
                               DispatchQueue.main.async {
@@ -2745,35 +2744,32 @@ jobs:
                           }
                           log.debug("[\(reason)] failed, \(failedCount)/\(totalContenders)")
                           if failedCount >= totalContenders && !resolved && !task.isCancelled {
-                              // All fast backends failed → slow Theta/mp3juice pipeline
                               DispatchQueue.main.async {
                                   self.objectWillChange.send()
                                   task.status = .contacting(0.2)
                                   task.backendLabel = ""
                               }
+                              // Try the slow theta/worker pipeline (longer timeout for long tracks)
                               self.beginMp3Juice(task: task)
                           }
                       }
                   }
 
-                  // Contender 1: mp3juice workers (primary instant-MP3 path). Tries all mirrors
-                  // but we count it as a single contender — success from any mirror wins.
-                  contenderCount += 1
-                  workerRace(task: task, win: { url,name,ref in tryWin("Mp3Juice", downloadURL:url, finalName:name, referer:ref) },
-                             lose: { oneFailed("worker") })
-
-                  // Contender 2: y2jar (nbike.pl) — fast M4A, no transcoding
-                  contenderCount += 1
+                  // Contender 1: y2jar — returns instant M4A direct link, NO TRANSCODE.
+                  // For long videos/mixes this is always the fastest because YouTube
+                  // already serves the AAC audio natively; we just stream it.
                   y2jarRace(task: task, win: { url,name in tryWin("y2jar", downloadURL:url, finalName:name, referer:"https://v2.y2jar.cc/") },
                             lose: { oneFailed("y2jar") })
 
-                  // Contender 3: cnvmp3 — returns direct ID3 MP3
-                  contenderCount += 1
+                  // Contender 2: mp3juice worker mirrors (instant MP3 for short songs,
+                  // may need MP3 re-encode poll for longer tracks — hence slower).
+                  workerRace(task: task, win: { url,name,ref in tryWin("Mp3Juice", downloadURL:url, finalName:name, referer:ref) },
+                             lose: { oneFailed("worker") })
+
+                  // Contender 3: cnvmp3 — often duration-limited to ~90min, but fast
+                  // for short songs. Detect the limit error quickly and move on.
                   cnvmp3Race(task: task, win: { url,name in tryWin("cnvmp3", downloadURL:url, finalName:name, referer:"https://cnvmp3.com/v55") },
                              lose: { oneFailed("cnvmp3") })
-
-                  // NOTE: totalContenders stays at 3 because worker-group is treated as one
-                  // contender internally it races all mirrors; if all mirrors fail it calls lose().
               }
 
               // ---- Fast-race: worker mirrors (parallel within the group) -----------
@@ -2804,21 +2800,46 @@ jobs:
                           guard let data = data,
                                 let d = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any] else { return }
                           if let e = d["error"] as? Int, e != 0 { log.debug("worker mirror \(idx) err=\(e)"); return }
-                          // Direct download URL (instant)
+                          // Direct download URL (instant short track, OR sometimes returned
+                          // immediately alongside progress for long tracks — try it!).
                           if let dl = d["downloadURL"] as? String, !dl.isEmpty {
                               let decoded = self.decodeWorkerURL(dl)
                               if let du = URL(string: decoded) {
-                                  lock.lock(); anySucceeded = true; lock.unlock()
-                                  var name = task.proposedName
-                                  if !name.lowercased().hasSuffix(".mp3") { name += ".mp3" }
-                                  win(du, name, "https://mp3juice.sc/")
+                                  // Probe the decoded URL with a tiny Range request: if it
+                                  // returns audio/mpeg with real Content-Length, it's ready.
+                                  self.probeForAudio(url: du, referer: "https://mp3juice.sc/") { [weak self] ready in
+                                      guard let self = self else { return }
+                                      if task.raceCancelled || task.isCancelled { return }
+                                      lock.lock(); let already2 = anySucceeded; lock.unlock()
+                                      if already2 { return }
+                                      if ready {
+                                          lock.lock(); anySucceeded = true; lock.unlock()
+                                          var name = task.proposedName
+                                          if !name.lowercased().hasSuffix(".mp3") { name += ".mp3" }
+                                          win(du, name, "https://mp3juice.sc/")
+                                          return
+                                      }
+                                      // Not ready yet — fall into polling if progressURL exists
+                                      if let purl = d["progressURL"] as? String, !purl.isEmpty {
+                                          self.workerPollRace(task: task, progURL: purl, mirrorIndex: idx,
+                                                              lock: lock, anySucceeded: { lock.lock(); let v=anySucceeded; lock.unlock(); return v },
+                                                              setSucceeded: { lock.lock(); anySucceeded=true; lock.unlock() },
+                                                              win: { url in
+                                                                  lock.lock(); anySucceeded = true; lock.unlock()
+                                                                  var name = task.proposedName
+                                                                  if !name.lowercased().hasSuffix(".mp3") { name += ".mp3" }
+                                                                  win(url, name, "https://mp3juice.sc/")
+                                                              })
+                                      }
+                                  }
                                   return
                               }
                           }
-                          // Progress URL — need to poll (slower but can still win)
+                          // Progress URL — poll until ready (slow MP3 transcode path)
                           if let purl = d["progressURL"] as? String, !purl.isEmpty {
                               self.workerPollRace(task: task, progURL: purl, mirrorIndex: idx,
-                                                  lock: lock, anySucceeded: { lock.lock(); let v = anySucceeded; lock.unlock(); return v },
+                                                  lock: lock, anySucceeded: { lock.lock(); let v=anySucceeded; lock.unlock(); return v },
+                                                  setSucceeded: { lock.lock(); anySucceeded=true; lock.unlock() },
                                                   win: { url in
                                                       lock.lock(); anySucceeded = true; lock.unlock()
                                                       var name = task.proposedName
@@ -2836,13 +2857,43 @@ jobs:
                   }
               }
 
+              /// Probe a URL quickly: send a small Range request and return true if it
+              /// looks like a real audio response (right content-type or magic bytes).
+              private func probeForAudio(url: URL, referer: String, completion: @escaping (Bool) -> Void) {
+                  var req = URLRequest(url: url, timeoutInterval: 8)
+                  req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
+                  req.setValue(referer, forHTTPHeaderField: "Referer")
+                  req.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
+                  let t = URLSession.shared.dataTask(with: req) { data, resp, err in
+                      if let err = err { completion(false); return }
+                      guard let hr = resp as? HTTPURLResponse else { completion(false); return }
+                      // 206 Partial Content = range accepted; 200 = server ignores range but returns full file
+                      guard hr.statusCode == 206 || hr.statusCode == 200 else { completion(false); return }
+                      let ct = hr.mimeType ?? ""
+                      if ct.contains("audio") || ct.contains("mpeg") || ct.contains("mp4") { completion(true); return }
+                      // Magic byte sniff
+                      if let d = data, d.count >= 3 {
+                          let b = [UInt8](d.prefix(4))
+                          if b[0] == 0x49 && b[1] == 0x44 && b[2] == 0x33 { completion(true); return }
+                          if b[0] == 0xFF && (b[1] & 0xE0) == 0xE0 { completion(true); return }
+                          if d.count >= 8 && b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70 { completion(true); return }
+                      }
+                      // text/plain with long content-length = not ready yet
+                      completion(false)
+                  }
+                  t.resume()
+              }
+
               private func workerPollRace(task: DownloadTask, progURL: String, mirrorIndex: Int,
-                                          lock: NSLock, anySucceeded: @escaping () -> Bool,
+                                          lock: NSLock,
+                                          anySucceeded: @escaping () -> Bool,
+                                          setSucceeded: @escaping () -> Void,
                                           win: @escaping (URL) -> Void) {
                   var ticks = 0
-                  let maxTicks = 60
+                  // Longer timeout for long tracks: 180 ticks * 2s = 6 minutes (covers 2+hr mixes).
+                  let maxTicks = 180
                   func tick() {
-                      DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                      DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) { [weak self] in
                           guard let self = self else { return }
                           if task.raceCancelled || task.isCancelled { return }
                           if anySucceeded() { return }
@@ -2861,9 +2912,26 @@ jobs:
                               }
                               if let e = d["error"] as? Int, e != 0 { return }
                               let status = d["status"] as? String ?? ""
+                              let prog = (d["progress"] as? NSNumber)?.doubleValue ?? 0
+                              // "download" = fully ready
                               if status == "download", let dl = d["downloadURL"] as? String {
                                   let decoded = self.decodeWorkerURL(dl)
-                                  if let du = URL(string: decoded) { win(du); return }
+                                  if let du = URL(string: decoded) { setSucceeded(); win(du); return }
+                              }
+                              // For theta numeric progress >= 3 (converting/uploading) we
+                              // also re-probe the direct download URL — it may already be
+                              // partially served. We only take it if it validates as audio.
+                              if prog >= 3, let dl = d["downloadURL"] as? String {
+                                  let decoded = self.decodeWorkerURL(dl)
+                                  if let du = URL(string: decoded) {
+                                      self.probeForAudio(url: du, referer: "https://mp3juice.sc/") { ready in
+                                          if task.raceCancelled || task.isCancelled { return }
+                                          if anySucceeded() { return }
+                                          if ready { setSucceeded(); win(du); return }
+                                          tick()
+                                      }
+                                      return
+                                  }
                               }
                               tick()
                           }
@@ -2948,7 +3016,7 @@ jobs:
                          let t = j["title"] as? String, !t.isEmpty {
                           resolvedTitle = t
                       }
-                      var convReq = URLRequest(url: convURL, timeoutInterval: 40)
+                      var convReq = URLRequest(url: convURL, timeoutInterval: 120)
                       convReq.httpMethod = "POST"
                       convReq.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
                       convReq.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -2961,8 +3029,16 @@ jobs:
                       let t2 = URLSession.shared.dataTask(with: convReq) { cdata, _, cerr in
                           if task.raceCancelled || task.isCancelled { return }
                           guard let cdata = cdata, cerr == nil,
-                                let cj = (try? JSONSerialization.jsonObject(with: cdata)) as? [String:Any],
-                                let dl = cj["download_link"] as? String, !dl.isEmpty,
+                                let cj = (try? JSONSerialization.jsonObject(with: cdata)) as? [String:Any] else {
+                              lose(); return
+                          }
+                          // cnvmp3 returns {"success":false,"error":"Video duration limit reached","errorType":4}
+                          // for long tracks. Treat as immediate failure, don't waste time.
+                          if (cj["success"] as? Bool) == false {
+                              log.debug("cnvmp3 rejected: \(cj["error"] ?? "?")")
+                              lose(); return
+                          }
+                          guard let dl = cj["download_link"] as? String, !dl.isEmpty,
                                 let dlURL = URL(string: dl) else {
                               lose(); return
                           }
@@ -3119,6 +3195,7 @@ jobs:
 
               private func workerPoll(task: DownloadTask, progURL: String, ticks: Int) {
                   pollTimer?.invalidate()
+                  // 1.5s * 300 = 7.5 min max — enough for 2hr+ MP3 encodes on theta workers
                   let maxTicks = 300
                   var tickCount = ticks
                   pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] t in
@@ -3276,8 +3353,15 @@ jobs:
                           guard let self = self else { return }
                           if task.isCancelled { return }
                           guard let cdata = cdata, cerr == nil,
-                                let cj = (try? JSONSerialization.jsonObject(with: cdata)) as? [String:Any],
-                                let dl = cj["download_link"] as? String, !dl.isEmpty,
+                                let cj = (try? JSONSerialization.jsonObject(with: cdata)) as? [String:Any] else {
+                              self.beginMp3Juice(task: task); return
+                          }
+                          // cnvmp3 returns success:false + errorType:4 for "Video duration limit reached"
+                          if (cj["success"] as? Bool) == false {
+                              log.debug("cnvmp3 rejected long track: \(cj["error"] ?? "?")")
+                              self.beginMp3Juice(task: task); return
+                          }
+                          guard let dl = cj["download_link"] as? String, !dl.isEmpty,
                                 let dlURL = URL(string: dl) else {
                               self.beginMp3Juice(task: task); return
                           }
@@ -3379,7 +3463,8 @@ jobs:
               }
               private func pollConvertProgress(task: DownloadTask, key: String?, progURL: String, ticks: Int) {
                   pollTimer?.invalidate()
-                  let maxTicks = 200
+                  // 2s * 300 = 10 minutes for long tracks
+                  let maxTicks = 300
                   if ticks > maxTicks { failOrRetry(task: task, message: "Conversion timed out"); return }
                   var tickCount = ticks
                   pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] t in
@@ -3459,10 +3544,11 @@ jobs:
                       task.fileName = finalName
                       if !backendLabel.isEmpty { task.backendLabel = backendLabel }
                   }
-                  var req = URLRequest(url: url, timeoutInterval: 300)
+                  var req = URLRequest(url: url, timeoutInterval: 1800)
                   req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
                   req.setValue(referer, forHTTPHeaderField: "Referer")
-                  req.setValue("bytes=0-", forHTTPHeaderField: "Range")
+                  // Don't force Range header — some CDNs (especially cnvmp3.online and
+                  // y2jar) respond better without it; URLSession handles progress fine.
                   let t = session.downloadTask(with: req)
                   activeURLTask = t
                   task.inFlightDownloadTasks.add(t)
