@@ -147,6 +147,7 @@ jobs:
               var artworkURL: String? = nil
               var sourceVid: String? = nil  // YouTube video id this was downloaded from (for dedup)
           }
+
           struct Playlist: Identifiable, Codable {
               var id: UUID
               var name: String
@@ -155,7 +156,45 @@ jobs:
 
           enum RepeatMode: Int { case off, all, one }
 
-          class MusicManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
+          enum EQPreset: String, CaseIterable, Identifiable {
+              case flat = "Flat"
+              case bassBoost = "Bass Boost"
+              case vocal = "Vocal Boost"
+              case arabic = "Arabic/Maqaam"
+              case treble = "Treble Boost"
+              case rock = "Rock"
+              var id: String { rawValue }
+
+              // 10-band EQ gains (dB) for bands 32,64,125,250,500,1k,2k,4k,8k,16k Hz
+              var gains: [Float] {
+                  switch self {
+                  case .flat:      return [0,0,0,0,0,0,0,0,0,0]
+                  case .bassBoost: return [6,7,6,4,2,0,0,0,0,0]
+                  case .vocal:     return [-2,-2,-1,1,3,4,4,3,1,0]
+                  case .arabic:    return [3,3,2,1,0,1,2,3,4,3]   // Oud/Qanun highs + warmth
+                  case .treble:    return [0,0,0,0,0,1,3,5,6,6]
+                  case .rock:      return [5,4,3,1,-1,1,3,4,5,5]
+                  }
+              }
+          }
+
+          struct AppAccent: Identifiable, Equatable {
+              let id: String
+              let name: String
+              let r,g,b: Double
+              static let list: [AppAccent] = [
+                  .init(id:"purple", name:"Purple", r:0.55,g:0.27,b:0.85),
+                  .init(id:"pink",   name:"Pink",   r:0.92,g:0.29,b:0.60),
+                  .init(id:"blue",   name:"Blue",   r:0.20,g:0.45,b:0.95),
+                  .init(id:"teal",   name:"Teal",   r:0.10,g:0.70,b:0.65),
+                  .init(id:"green",  name:"Green",  r:0.20,g:0.75,b:0.40),
+                  .init(id:"orange", name:"Orange", r:0.97,g:0.55,b:0.18),
+                  .init(id:"red",    name:"Red",    r:0.90,g:0.20,b:0.30),
+                  .init(id:"gold",   name:"Gold",   r:0.87,g:0.72,b:0.25),
+              ]
+          }
+
+          class MusicManager: NSObject, ObservableObject {
               static let shared = MusicManager()
 
               @Published var songs: [Song] = []
@@ -170,54 +209,135 @@ jobs:
               @Published var duration: TimeInterval = 1.0
               @Published var upNextQueue: [Song] = [] // play-next/play-later queue
               @Published var smartRadioMode: Bool = false
+              @Published var eqPreset: EQPreset = .flat {
+                  didSet { applyEQ(); UserDefaults.standard.set(eqPreset.rawValue, forKey: "asmusic_eq") }
+              }
+              @Published var accent: AppAccent = .list[0] {
+                  didSet {
+                      UserDefaults.standard.set(accent.id, forKey: "asmusic_accent")
+                      objectWillChange.send()
+                  }
+              }
+              @Published var levels: (Float,Float) = (0,0)  // current audio power (left,right) 0..1
 
-              var audioPlayer: AVAudioPlayer?
-              var avPlayer: AVPlayer?
-              var avPlayerItem: AVPlayerItem?
-              var useAVPlayer = false
+              // AVAudioEngine-based player: playerNode -> eqNode -> timePitch -> engine.mainMixerNode
+              private var engine: AVAudioEngine!
+              private var playerNode: AVAudioPlayerNode!
+              private var eqNode: AVAudioUnitEQ!
+              private var timePitch: AVAudioUnitTimePitch!
+              private var fileLength: AVAudioFramePosition = 0
+              private var fileSampleRate: Double = 44100
+              private var audioFile: AVAudioFile?
+              private var displayLink: CADisplayLink?
+
               var sleepTimer: Timer?
               var progressTimer: Timer?
               var queueObserver: NSObjectProtocol?
+              private var didAutoSearchForRadio = false
 
               let fileManager = FileManager.default
               var documentsDirectory: URL {
                   fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
               }
+              var artworkCacheDir: URL {
+                  let d = documentsDirectory.appendingPathComponent(".artwork_cache")
+                  try? fileManager.createDirectory(at: d, withIntermediateDirectories: true)
+                  return d
+              }
 
               override init() {
                   super.init()
+                  setupEngine()
                   loadSongs()
                   loadPlaylists()
+                  loadPrefs()
                   setupRemoteCommandCenter()
+                  startLevelMeter()
               }
 
-              func startProgressTimer() {
-                  progressTimer?.invalidate()
-                  progressTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-                      guard let self = self else { return }
-                      DispatchQueue.main.async {
-                          if self.useAVPlayer {
-                              self.currentTime = self.avPlayer?.currentTime().seconds ?? 0.0
-                              let d = self.avPlayer?.currentItem?.duration.seconds ?? 0.0
-                              self.duration = (d.isNaN || d.isInfinite) ? 1.0 : d
-                          } else {
-                              self.currentTime = self.audioPlayer?.currentTime ?? 0.0
-                              self.duration = self.audioPlayer?.duration ?? 1.0
-                              self.audioPlayer?.enableRate = true
-                              self.audioPlayer?.rate = self.playbackRate
-                          }
-                      }
+              func setupEngine() {
+                  engine = AVAudioEngine()
+                  playerNode = AVAudioPlayerNode()
+                  eqNode = AVAudioUnitEQ(numberOfBands: 10)
+                  timePitch = AVAudioUnitTimePitch()
+                  let freqs: [Float] = [32,64,125,250,500,1000,2000,4000,8000,16000]
+                  for (i,b) in eqNode.bands.enumerated() {
+                      b.frequency = freqs[i]
+                      b.filterType = .parametric
+                      b.bandwidth = 1.0
+                      b.gain = 0
+                      b.bypass = false
+                  }
+                  engine.attach(playerNode)
+                  engine.attach(eqNode)
+                  engine.attach(timePitch)
+                  engine.connect(playerNode, to: eqNode, format: nil)
+                  engine.connect(eqNode, to: timePitch, format: nil)
+                  engine.connect(timePitch, to: engine.mainMixerNode, format: nil)
+                  engine.mainMixerNode.outputVolume = 1.0
+                  engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buf, _ in
+                      self?.updatePowerLevel(buffer: buf)
+                  }
+                  do {
+                      try engine.start()
+                  } catch {
+                      print("Engine start error:", error)
+                  }
+              }
+
+              func applyEQ() {
+                  let gains = eqPreset.gains
+                  for (i,b) in eqNode.bands.enumerated() where i < gains.count {
+                      b.gain = gains[i]
+                  }
+              }
+
+              private func startLevelMeter() {
+                  // CADisplayLink to smoothly update currentTime from playerNode
+                  displayLink?.invalidate()
+                  let dl = CADisplayLink(target: DisplayLinkProxy { [weak self] in self?.tick() }, selector: #selector(DisplayLinkProxy.tick))
+                  dl.add(to: .main, forMode: .common)
+                  displayLink = dl
+              }
+
+              @objc private func tick() {
+                  guard let node = playerNode, node.isPlaying, let file = audioFile else { return }
+                  let t = node.playerTime(forNodeTime: node.lastRenderTime) ?? AVAudioTime()
+                  let sec = Double(t.sampleTime) / (file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate)
+                  DispatchQueue.main.async {
+                      self.currentTime = max(0, sec)
+                      self.duration = Double(self.fileLength) / self.fileSampleRate
+                  }
+              }
+
+              private func updatePowerLevel(buffer: AVAudioPCMBuffer) {
+                  guard let ch0 = buffer.floatChannelData?[0] else { return }
+                  let frames = Int(buffer.frameLength)
+                  var peak: Float = 0
+                  for i in 0..<frames {
+                      let s = abs(ch0[i])
+                      if s > peak { peak = s }
+                  }
+                  // Convert to 0..1 with logarithmic scaling
+                  let db = peak > 0 ? 20 * log10(peak) : -60
+                  let normalized = max(0, min(1, (db + 50) / 50))
+                  DispatchQueue.main.async {
+                      self.levels = (normalized, normalized)
                   }
               }
 
               func seek(to time: TimeInterval) {
-                  if useAVPlayer {
-                      avPlayer?.seek(to: CMTime(seconds: time, preferredTimescale: 1000))
-                      avPlayer?.rate = playbackRate
-                  } else {
-                      audioPlayer?.currentTime = time
-                      audioPlayer?.enableRate = true
-                      audioPlayer?.rate = isPlaying ? playbackRate : 0
+                  guard let file = audioFile, playerNode != nil else { return }
+                  let wasPlaying = isPlaying
+                  playerNode.stop()
+                  let sr = file.processingFormat.sampleRate
+                  let frame = AVAudioFramePosition(time * sr)
+                  let framesToPlay = fileLength - frame
+                  guard framesToPlay > 0 else { if wasPlaying { playerNode.play() }; return }
+                  playerNode.scheduleSegment(file, startingFrame: max(0,frame), frameCount: AVAudioFrameCount(framesToPlay), at: nil)
+                  if wasPlaying {
+                      playerNode.rate = playbackRate
+                      playerNode.play()
                   }
                   updateNowPlayingInfo()
               }
@@ -225,13 +345,8 @@ jobs:
               func setPlaybackRate(_ r: Float) {
                   playbackRate = r
                   UserDefaults.standard.set(r, forKey: "asmusic_rate")
-                  if useAVPlayer {
-                      avPlayer?.rate = isPlaying ? r : 0
-                      avPlayerItem?.audioTimePitchAlgorithm = .timeDomain
-                  } else {
-                      audioPlayer?.enableRate = true
-                      audioPlayer?.rate = isPlaying ? r : 0
-                  }
+                  timePitch.rate = r
+                  if playerNode.isPlaying { playerNode.rate = r }
               }
 
               func formatTime(_ t: TimeInterval) -> String {
@@ -241,12 +356,11 @@ jobs:
               }
 
               func loadSongs() {
-                  // Load saved metadata (artist, artwork, sourceVid) first
                   let meta = Self.loadSongMeta()
                   do {
                       let files = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
                       let audioExts = ["mp3","m4a","wav","webm","mp4","aac","ogg","opus"]
-                      let audio = files.filter { audioExts.contains($0.pathExtension.lowercased()) }
+                      let audio = files.filter { audioExts.contains($0.pathExtension.lowercased()) && !$0.lastPathComponent.hasPrefix(".") }
                       for f in audio {
                           try? fileManager.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: f.path)
                       }
@@ -255,59 +369,17 @@ jobs:
                               let rawName = url.deletingPathExtension().lastPathComponent
                               if var s = meta[url.lastPathComponent] {
                                   s.url = url
-                                  // If artist still default, run smart parser
-                                  if s.artist.isEmpty || s.artist == "AS Music" {
-                                      let (t, a) = TitleCleaner.clean(rawName)
-                                      s.title = t; s.artist = a
-                                  }
+                                  if s.artist.isEmpty { s.artist = "AS Music" }
+                                  let (t,a) = TitleCleaner.clean(rawName, artistHint: s.artist == "AS Music" ? nil : s.artist)
+                                  s.title = t; s.artist = a
                                   if s.title.isEmpty { s.title = rawName }
                                   return s
                               }
-                              let (t, a) = TitleCleaner.clean(rawName)
+                              let (t,a) = TitleCleaner.clean(rawName)
                               return Song(id: UUID(), title: t, url: url, artist: a, artworkURL: nil, sourceVid: nil)
                           }.sorted { $0.title.lowercased() < $1.title.lowercased() }
                       }
                   } catch {}
-              }
-
-              func isDuplicateByVID(_ vid: String) -> Bool {
-                  return songs.contains { $0.sourceVid == vid }
-              }
-
-              func songByVID(_ vid: String) -> Song? {
-                  songs.first { $0.sourceVid == vid }
-              }
-
-              static private let metaURL: URL = {
-                  FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                      .appendingPathComponent(".asmusic_meta.json")
-              }()
-              static private func loadSongMeta() -> [String: Song] {
-                  guard let d = try? Data(contentsOf: metaURL),
-                        let arr = try? JSONDecoder().decode([Song].self, from: d) else { return [:] }
-                  var out = [String: Song]()
-                  for s in arr { out[s.url.lastPathComponent] = s }
-                  return out
-              }
-              func saveSongMeta() {
-                  if let d = try? JSONEncoder().encode(songs) {
-                      try? d.write(to: Self.metaURL, options: .atomic)
-                  }
-              }
-              func registerDownloadedSong(title: String, artist: String, url: URL, sourceVid: String?, artworkURL: String?) {
-                  // Called by DownloadCenter after a successful save to attach metadata
-                  DispatchQueue.main.async {
-                      let (t, a) = TitleCleaner.clean(title, artistHint: artist)
-                      let song = Song(id: UUID(), title: t, url: url,
-                                      artist: a.isEmpty ? "AS Music" : a,
-                                      artworkURL: artworkURL, sourceVid: sourceVid)
-                      // Replace any entry with same filename
-                      self.songs.removeAll { $0.url.lastPathComponent == url.lastPathComponent }
-                      self.songs.append(song)
-                      self.songs.sort { $0.title.lowercased() < $1.title.lowercased() }
-                      self.saveSongMeta()
-                      // Update Liked Songs playlist index tracking if needed
-                  }
               }
 
               func deleteSong(_ s: Song) {
@@ -318,13 +390,27 @@ jobs:
 
               func renameSong(song: Song, newName: String) {
                   let ext = song.url.pathExtension
-                  let newUrl = documentsDirectory.appendingPathComponent(newName + "." + ext)
+                  let (t,a) = TitleCleaner.clean(newName)
+                  let finalTitle = t
+                  var newUrl = documentsDirectory.appendingPathComponent(finalTitle + "." + ext)
+                  var i = 2
+                  while fileManager.fileExists(atPath: newUrl.path) {
+                      newUrl = documentsDirectory.appendingPathComponent("\(finalTitle) \(i)." + ext)
+                      i += 1
+                  }
                   do {
                       try fileManager.moveItem(at: song.url, to: newUrl)
                       loadSongs()
+                      if let idx = songs.firstIndex(where: { $0.id == song.id }) {
+                          songs[idx].url = newUrl
+                          songs[idx].title = finalTitle
+                          songs[idx].artist = a
+                          saveSongMeta()
+                      }
                       if currentSong?.id == song.id {
-                          currentSong?.title = newName
+                          currentSong?.title = finalTitle
                           currentSong?.url = newUrl
+                          currentSong?.artist = a
                           updateNowPlayingInfo()
                       }
                   } catch {}
@@ -382,6 +468,79 @@ jobs:
                   }
               }
 
+              func loadPrefs() {
+                  if let rate = UserDefaults.standard.object(forKey: "asmusic_rate") as? Float { playbackRate = rate }
+                  if let r = UserDefaults.standard.integer(forKey: "asmusic_repeat") as Int?, let m = RepeatMode(rawValue: r) { repeatMode = m }
+                  if let eqName = UserDefaults.standard.string(forKey: "asmusic_eq"), let e = EQPreset(rawValue: eqName) { eqPreset = e }
+                  else { eqPreset = .flat }
+                  if let accId = UserDefaults.standard.string(forKey: "asmusic_accent"),
+                     let a = AppAccent.list.first(where: { $0.id == accId }) { accent = a }
+                  smartRadioMode = UserDefaults.standard.bool(forKey: "asmusic_radio")
+              }
+
+              // ---- Artwork cache ---------------------------------------------------
+              func artworkImage(for song: Song, size: CGFloat = 200, completion: @escaping (UIImage?) -> Void) {
+                  // Check local file (sidecar)
+                  let sidecar = song.url.deletingPathExtension().appendingPathExtension("jpg")
+                  if let img = UIImage(contentsOfFile: sidecar.path) { completion(img); return }
+                  let cached = artworkCacheDir.appendingPathComponent("\(song.id.uuidString).jpg")
+                  if let img = UIImage(contentsOfFile: cached.path) { completion(img); return }
+                  // Nothing cached yet — need to download
+                  guard let art = song.artworkURL, let u = URL(string: art) else { completion(nil); return }
+                  // async fetch
+                  URLSession.shared.dataTask(with: u) { [weak self] data, _, _ in
+                      guard let data = data, let img = UIImage(data: data) else { DispatchQueue.main.async { completion(nil) }; return }
+                      try? data.write(to: cached, options: .atomic)
+                      DispatchQueue.main.async { completion(img) }
+                  }.resume()
+              }
+
+              func isDuplicateByVID(_ vid: String) -> Bool {
+                  return songs.contains { $0.sourceVid == vid }
+              }
+
+              func songByVID(_ vid: String) -> Song? {
+                  songs.first { $0.sourceVid == vid }
+              }
+
+              static private let metaURL: URL = {
+                  FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                      .appendingPathComponent(".asmusic_meta.json")
+              }()
+              static private func loadSongMeta() -> [String: Song] {
+                  guard let d = try? Data(contentsOf: metaURL),
+                        let arr = try? JSONDecoder().decode([Song].self, from: d) else { return [:] }
+                  var out = [String: Song]()
+                  for s in arr { out[s.url.lastPathComponent] = s }
+                  return out
+              }
+              func saveSongMeta() {
+                  if let d = try? JSONEncoder().encode(songs) {
+                      try? d.write(to: Self.metaURL, options: .atomic)
+                  }
+              }
+              func registerDownloadedSong(title: String, artist: String, url: URL, sourceVid: String?, artworkURL: String?) {
+                  DispatchQueue.main.async {
+                      let (t,a) = TitleCleaner.clean(title, artistHint: artist)
+                      let song = Song(id: UUID(), title: t, url: url,
+                                      artist: a.isEmpty ? "AS Music" : a,
+                                      artworkURL: artworkURL, sourceVid: sourceVid)
+                      self.songs.removeAll { $0.url.lastPathComponent == url.lastPathComponent }
+                      self.songs.append(song)
+                      self.songs.sort { $0.title.lowercased() < $1.title.lowercased() }
+                      self.saveSongMeta()
+                      // If there's an artwork URL, kick off a download in the background
+                      if let art = artworkURL, let u = URL(string: art) {
+                          let sidecar = url.deletingPathExtension().appendingPathExtension("jpg")
+                          if !self.fileManager.fileExists(atPath: sidecar.path) {
+                              URLSession.shared.downloadTask(with: u) { loc, _, _ in
+                                  if let loc = loc { try? self.fileManager.moveItem(at: loc, to: sidecar) }
+                              }.resume()
+                          }
+                      }
+                  }
+              }
+
               // ---- Up Next queue ---------------------------------------------------
               func playNext(_ song: Song) {
                   if let cur = currentSong, cur.id == song.id { return }
@@ -412,7 +571,7 @@ jobs:
                       sleepTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes*60), repeats: false) { [weak self] _ in
                           guard let self = self else { return }
                           DispatchQueue.main.async {
-                              if self.useAVPlayer { self.avPlayer?.pause() } else { self.audioPlayer?.pause() }
+                              self.pausePlayback()
                               self.isPlaying = false
                               self.sleepTimerMinutes = 0
                           }
@@ -426,74 +585,70 @@ jobs:
                       try AVAudioSession.sharedInstance().setActive(true)
                       UIApplication.shared.beginReceivingRemoteControlEvents()
 
-                      audioPlayer?.stop(); avPlayer?.pause()
-                      NotificationCenter.default.removeObserver(self, name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: nil)
-                      if let o = queueObserver { NotificationCenter.default.removeObserver(o); queueObserver = nil }
+                      playerNode.stop()
+                      engine.stop()
+                      audioFile = nil
 
-                      // Try AVAudioPlayer first (mp3/m4a/wav/aac), fall back to AVPlayer
-                      var started = false
-                      do {
-                          let ap = try AVAudioPlayer(contentsOf: song.url)
-                          ap.delegate = self
-                          ap.enableRate = true
-                          ap.prepareToPlay()
-                          ap.rate = playbackRate
-                          ap.play()
-                          audioPlayer = ap
-                          useAVPlayer = false
-                          started = true
-                      } catch {
-                          let item = AVPlayerItem(url: song.url)
-                          item.audioTimePitchAlgorithm = .timeDomain
-                          let p = AVPlayer(playerItem: item)
-                          p.rate = playbackRate
-                          p.play()
-                          avPlayer = p
-                          avPlayerItem = item
-                          useAVPlayer = true
-                          NotificationCenter.default.addObserver(self, selector: #selector(songFinished), name: NSNotification.Name.AVPlayerItemDidPlayToEndTime, object: item)
-                          started = true
-                      }
-                      if started {
-                          currentSong = song; isPlaying = true
-                          updateNowPlayingInfo(); startProgressTimer()
-                          let gen = UIImpactFeedbackGenerator(style: .medium)
-                          gen.impactOccurred()
-                      }
-                  } catch {}
+                      let file = try AVAudioFile(forReading: song.url)
+                      self.audioFile = file
+                      fileLength = file.length
+                      fileSampleRate = file.processingFormat.sampleRate
+                      engine.connect(playerNode, to: eqNode, format: file.processingFormat)
+
+                      applyEQ()
+                      timePitch.rate = playbackRate
+
+                      try engine.start()
+                      playerNode.scheduleFile(file, at: nil)
+                      playerNode.rate = playbackRate
+                      playerNode.play()
+
+                      didAutoSearchForRadio = false
+                      currentSong = song; isPlaying = true
+                      updateNowPlayingInfo()
+                      UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                  } catch {
+                      print("playSong error:", error)
+                  }
+              }
+
+              private func pausePlayback() {
+                  playerNode.pause()
               }
 
               @objc func songFinished() {
                   DispatchQueue.main.async {
-                      // repeat one: replay current
                       if self.repeatMode == .one, let _ = self.currentSong {
-                          self.seek(to: 0)
-                          if self.useAVPlayer { self.avPlayer?.play() } else { self.audioPlayer?.play() }
-                          self.isPlaying = true
-                          return
-                      }
-                      self.playNext(autoAdvance: true)
-                  }
-              }
-              func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-                  DispatchQueue.main.async {
-                      if self.repeatMode == .one, let _ = self.currentSong {
-                          self.seek(to: 0)
-                          self.audioPlayer?.play()
-                          self.isPlaying = true
-                          return
+                          self.seek(to: 0); self.playerNode.play(); self.isPlaying = true; return
                       }
                       self.playNext(autoAdvance: true)
                   }
               }
 
-              func togglePlayPause() {
-                  if useAVPlayer {
-                      if isPlaying { avPlayer?.pause() } else { avPlayer?.play(); avPlayer?.rate = playbackRate }
-                  } else {
-                      if isPlaying { audioPlayer?.pause() } else { _ = audioPlayer?.play(); audioPlayer?.rate = playbackRate }
+              // Detect song finish via periodic check in displayLink tick — when playerNode stops playing but state is playing, song ended
+              // Called from displayLink tick
+              func checkEndOfTrack() {
+                  guard isPlaying, let _ = audioFile, !playerNode.isPlaying else { return }
+                  // Might have just paused; only fire if we've reached end (currentTime >= duration)
+                  if currentTime >= duration - 0.2 && duration > 1 {
+                      songFinished()
                   }
-                  isPlaying.toggle(); updateNowPlayingInfo()
+              }
+
+              func togglePlayPause() {
+                  if isPlaying {
+                      playerNode.pause()
+                      isPlaying = false
+                  } else {
+                      if playerNode.isPlaying { playerNode.pause() }
+                      if audioFile == nil, let cur = currentSong {
+                          playSong(cur); return
+                      }
+                      playerNode.rate = playbackRate
+                      playerNode.play()
+                      isPlaying = true
+                  }
+                  updateNowPlayingInfo()
               }
 
               func playNext() { playNext(autoAdvance: false) }
@@ -503,23 +658,22 @@ jobs:
                       else { isPlaying = false; currentSong = nil }
                       return
                   }
-                  // Pull from upNext queue first
                   if !upNextQueue.isEmpty {
                       let next = upNextQueue.removeFirst()
                       playSong(next); return
                   }
                   if isShuffle || smartRadioMode {
-                      // Smart: prefer songs not matching current title keyword, but fall back to random
                       let others = songs.filter { $0.id != currentSong?.id }
                       let candidates: [Song] = {
                           guard let cur = currentSong else { return others }
-                          // Avoid same-artist-name tracks 50% of the time for variety
-                          let words = cur.title.split(separator: " ").compactMap { $0.count >= 3 ? String($0) : nil }
-                          let different = others.filter { s in !words.contains(where: { s.title.localizedCaseInsensitiveContains($0) }) }
+                          let words = cur.artist.split(separator: " ").filter { $0.count >= 3 }.map(String.init)
+                              + cur.title.split(separator: " ").filter { $0.count >= 3 }.map(String.init)
+                          let different = others.filter { s in
+                              !words.contains(where: { s.title.localizedCaseInsensitiveContains($0) || s.artist.localizedCaseInsensitiveContains($0) })
+                          }
                           return different.isEmpty ? others : different
                       }()
-                      if let s = candidates.randomElement() ?? songs.randomElement() { playSong(s) }
-                      return
+                      if let s = candidates.randomElement() ?? songs.randomElement() { playSong(s); return }
                   }
                   guard let c = currentSong, let i = songs.firstIndex(of: c) else {
                       if let first = songs.first { playSong(first) }
@@ -531,6 +685,11 @@ jobs:
                       if let first = songs.first { playSong(first) }
                   } else if autoAdvance {
                       isPlaying = false
+                  }
+                  // Smart Radio auto-search for more
+                  if smartRadioMode && !didAutoSearchForRadio {
+                      didAutoSearchForRadio = true
+                      SmartDownloaderManager.shared.autoSearchForRadio(artist: currentSong?.artist ?? "", title: currentSong?.title ?? "")
                   }
               }
 
@@ -566,26 +725,34 @@ jobs:
               }
 
               func updateNowPlayingInfo() {
-                  guard let c = currentSong else { return }
+                  guard let c = currentSong else { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil; return }
                   var info: [String: Any] = [
                       MPMediaItemPropertyTitle: c.title,
                       MPMediaItemPropertyArtist: c.artist.isEmpty ? "AS Music" : c.artist,
                       MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? playbackRate : 0.0,
-                      MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0
+                      MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
+                      MPMediaItemPropertyPlaybackDuration: duration,
+                      MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
                   ]
-                  if useAVPlayer {
-                      let d = avPlayer?.currentItem?.duration.seconds ?? 0
-                      if !d.isNaN {
-                          info[MPMediaItemPropertyPlaybackDuration] = d
-                          info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = avPlayer?.currentTime().seconds
-                      }
-                  } else {
-                      if let d = audioPlayer?.duration {
-                          info[MPMediaItemPropertyPlaybackDuration] = d
-                          info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = audioPlayer?.currentTime
+                  // Try to attach artwork async
+                  artworkImage(for: c, size: 600) { img in
+                      if let img = img {
+                          let art = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+                          info[MPMediaItemPropertyArtwork] = art
+                          MPNowPlayingInfoCenter.default().nowPlayingInfo = info
                       }
                   }
                   MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+              }
+          }
+
+          // Helper for CADisplayLine (since we can't use self as target directly for deinit safety)
+          class DisplayLinkProxy: NSObject {
+              let block: () -> Void
+              init(_ block: @escaping () -> Void) { self.block = block }
+              @objc func tick() {
+                  block()
+                  MusicManager.shared.checkEndOfTrack()
               }
           }
 
@@ -593,19 +760,19 @@ jobs:
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/Views.swift
           import SwiftUI
           import UIKit
+          import AVKit
+          import MediaPlayer
 
           func hideKeyboard() {
               UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
           }
 
-          // App-wide accent: purple by default, adjustable in settings
+          // App-wide accent: driven by MusicManager (user pickable)
           struct AppTheme {
               static var accent: Color {
-                  Color(red: accentR, green: accentG, blue: accentB)
+                  let a = MusicManager.shared.accent
+                  return Color(red: a.r, green: a.g, blue: a.b)
               }
-              static var accentR: Double = 0.55
-              static var accentG: Double = 0.27
-              static var accentB: Double = 0.85
           }
 
           func generateColor(for title: String) -> Color {
@@ -614,8 +781,8 @@ jobs:
           }
 
           struct VisualizerView: View {
-              @State private var isAnimating = false
-              @State private var bars: [CGFloat] = [5, 5, 5, 5]
+              @ObservedObject private var mm = MusicManager.shared
+              @State private var bars: [CGFloat] = [3,3,3,3]
               var body: some View {
                   HStack(spacing: 3) {
                       ForEach(0..<4, id: \.self) { i in
@@ -623,13 +790,80 @@ jobs:
                               .frame(width: 3, height: bars[i])
                       }
                   }
-                  .onAppear {
-                      isAnimating = true
-                      Timer.scheduledTimer(withTimeInterval: 0.18, repeats: true) { _ in
-                          withAnimation(.easeInOut(duration: 0.18)) {
-                              bars = (0..<4).map { _ in CGFloat.random(in: 8...24) }
+                  .onReceive(Timer.publish(every: 0.08, on: .main, in: .common).autoconnect()) { _ in
+                      guard mm.isPlaying else { bars = bars.map { _ in 3 }; return }
+                      let l = CGFloat(mm.levels.0)
+                      withAnimation(.easeInOut(duration: 0.08)) {
+                          bars = (0..<4).map { i in
+                              let jitter = CGFloat.random(in: 0...0.25)
+                              return max(4, (l * 22) + CGFloat(i)*1.5 - jitter*5)
                           }
                       }
+                  }
+              }
+          }
+
+          // Reusable artwork view with async image + blur support
+          struct ArtworkView: View {
+              let song: Song
+              var size: CGFloat = 56
+              var cornerRadius: CGFloat = 8
+              var fallbackSystemName: String = "music.note"
+              @State private var img: UIImage? = nil
+              var body: some View {
+                  ZStack {
+                      if let img = img {
+                          Image(uiImage: img).resizable().scaledToFill()
+                      } else {
+                          generateColor(for: song.title)
+                          Image(systemName: fallbackSystemName).foregroundColor(.white)
+                      }
+                  }
+                  .frame(width: size, height: size)
+                  .cornerRadius(cornerRadius)
+                  .clipped()
+                  .onAppear {
+                      MusicManager.shared.artworkImage(for: song, size: size * UIScreen.main.scale) { i in
+                          DispatchQueue.main.async { self.img = i }
+                      }
+                  }
+                  .onChange(of: song.id) { _ in
+                      self.img = nil
+                      MusicManager.shared.artworkImage(for: song, size: size * UIScreen.main.scale) { i in
+                          DispatchQueue.main.async { self.img = i }
+                      }
+                  }
+              }
+          }
+
+          // A view that produces a blurred, dimmed version of the current song's artwork
+          // (Apple-Music style player background)
+          struct BlurredArtworkBackground: View {
+              let song: Song
+              @State private var img: UIImage? = nil
+              var body: some View {
+                  ZStack {
+                      if let img = img {
+                          GeometryReader { geo in
+                              Image(uiImage: img)
+                                  .resizable()
+                                  .scaledToFill()
+                                  .frame(width: geo.size.width + 80, height: geo.size.height + 80)
+                                  .blur(radius: 60)
+                                  .overlay(Color.black.opacity(0.55))
+                                  .clipped()
+                          }
+                      } else {
+                          LinearGradient(gradient: Gradient(colors: [generateColor(for: song.title), Color.black] as [Color]),
+                                         startPoint: .top, endPoint: .bottom)
+                      }
+                  }
+                  .onAppear { load() }
+                  .onChange(of: song.id) { _ in img = nil; load() }
+              }
+              private func load() {
+                  MusicManager.shared.artworkImage(for: song, size: 800) { i in
+                      DispatchQueue.main.async { self.img = i }
                   }
               }
           }
@@ -937,14 +1171,19 @@ jobs:
           struct MiniPlayerView: View {
               @EnvironmentObject var musicManager: MusicManager
               @Binding var showFullPlayer: Bool
+              @Namespace private var ns
               var body: some View {
                   VStack(spacing: 0) {
                       Divider().background(Color.white.opacity(0.1))
                       HStack(spacing: 15) {
-                          ZStack {
-                              generateColor(for: musicManager.currentSong?.title ?? "")
-                                  .frame(width: 45, height: 45).cornerRadius(8)
-                              Image(systemName: "music.note").foregroundColor(.white)
+                          if let song = musicManager.currentSong {
+                              ArtworkView(song: song, size: 45, cornerRadius: 8, fallbackSystemName: "music.note")
+                                  .matchedGeometryEffect(id: "art", in: ns)
+                          } else {
+                              ZStack {
+                                  Color.gray.opacity(0.3).frame(width:45,height:45).cornerRadius(8)
+                                  Image(systemName: "music.note").foregroundColor(.white)
+                              }
                           }
                           VStack(alignment: .leading) {
                               Text(musicManager.currentSong?.title ?? "").font(.system(size: 16, weight: .semibold)).lineLimit(1)
@@ -959,7 +1198,7 @@ jobs:
                                   .font(.title2).foregroundColor(.primary)
                           }.padding(.trailing)
                       }.padding(.horizontal).padding(.vertical, 8).background(.ultraThinMaterial)
-                          .onTapGesture { showFullPlayer = true }
+                          .onTapGesture { withAnimation(.spring(response:0.45,dampingFraction:0.85)) { showFullPlayer = true } }
                   }
               }
           }
@@ -970,14 +1209,22 @@ jobs:
               @StateObject private var lyrics = LyricsStore.shared
               @State private var showTimerOptions = false
               @State private var showLyrics = false
+              @State private var showEQ = false
+              @State private var showTheme = false
 
               var body: some View {
                   ZStack {
-                      LinearGradient(gradient: Gradient(colors: [generateColor(for: musicManager.currentSong?.title ?? "Unknown"), Color.black] as [Color]),
-                                     startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
-                      VStack(spacing: 24) {
+                      if let song = musicManager.currentSong {
+                          BlurredArtworkBackground(song: song).edgesIgnoringSafeArea(.all)
+                      } else {
+                          LinearGradient(gradient: Gradient(colors: [AppTheme.accent, Color.black] as [Color]),
+                                         startPoint: .top, endPoint: .bottom).edgesIgnoringSafeArea(.all)
+                      }
+                      VStack(spacing: 20) {
                           HStack {
-                              Button { presentationMode.wrappedValue.dismiss() } label: {
+                              Button {
+                                  withAnimation(.spring(response:0.45,dampingFraction:0.85)) { presentationMode.wrappedValue.dismiss() }
+                              } label: {
                                   Image(systemName: "chevron.down").font(.title2).foregroundColor(.white)
                               }
                               Spacer()
@@ -989,61 +1236,72 @@ jobs:
                                   } else {
                                       Text("NOW PLAYING").font(.caption).bold().foregroundColor(.white.opacity(0.6))
                                   }
-                                  Text("AS Music").font(.subheadline).bold().foregroundColor(.white)
+                                  Text(musicManager.currentSong?.artist.isEmpty == false ? musicManager.currentSong!.artist : "AS Music")
+                                      .font(.subheadline).bold().foregroundColor(.white).lineLimit(1)
                               }
                               Spacer()
-                              Button { showTimerOptions = true } label: {
-                                  Image(systemName: "moon.fill")
-                                      .foregroundColor(musicManager.sleepTimerMinutes > 0 ? AppTheme.accent : .white)
+                              Menu {
+                                  Button { musicManager.setSleepTimer(minutes: 15) } label: { Label("15 min sleep", systemImage: "moon.zzz") }
+                                  Button { musicManager.setSleepTimer(minutes: 30) } label: { Label("30 min sleep", systemImage: "moon.zzz") }
+                                  Button { musicManager.setSleepTimer(minutes: 60) } label: { Label("60 min sleep", systemImage: "moon.zzz") }
+                                  if musicManager.sleepTimerMinutes > 0 {
+                                      Button(role: .destructive) { musicManager.setSleepTimer(minutes: 0) } label: { Label("Cancel sleep", systemImage: "moon.zzz.slash") }
+                                  }
+                                  Divider()
+                                  Button { showEQ = true } label: { Label("Equalizer", systemImage: "slider.horizontal.3") }
+                                  Button { showTheme = true } label: { Label("Theme color", systemImage: "paintpalette") }
+                                  if let song = musicManager.currentSong {
+                                      Divider()
+                                      Button { musicManager.shareSong(song) } label: { Label("Share / Export", systemImage: "square.and.arrow.up") }
+                                  }
+                              } label: {
+                                  Image(systemName: "ellipsis.circle").font(.title3).foregroundColor(.white)
                               }
                           }.padding()
 
                           if showLyrics {
                               ScrollView(showsIndicators: false) {
-                                  VStack(alignment: .leading, spacing: 12) {
+                                  VStack(alignment: lyricsAreRTL ? .trailing : .leading, spacing: 12) {
                                       if lyrics.loading {
                                           ProgressView().tint(.white)
                                       } else {
                                           Text(lyrics.lyrics)
-                                              .font(.system(size: 18, weight: .medium))
+                                              .font(.system(size: isRTL(lyrics.lyrics) ? 20 : 18, weight: .medium))
                                               .foregroundColor(.white)
-                                              .multilineTextAlignment(.leading)
+                                              .multilineTextAlignment(lyricsAreRTL ? .trailing : .leading)
                                               .lineSpacing(6)
+                                              .environment(\.layoutDirection, lyricsAreRTL ? .rightToLeft : .leftToRight)
                                       }
                                   }
                                   .padding(24)
-                                  .frame(maxWidth: .infinity, alignment: .leading)
+                                  .frame(maxWidth: .infinity, alignment: lyricsAreRTL ? .trailing : .leading)
                               }
-                              .frame(maxHeight: 320)
+                              .frame(maxHeight: 340)
                               .background(Color.white.opacity(0.08))
                               .cornerRadius(16)
                               .padding(.horizontal)
                           } else {
-                              ZStack {
-                                  RoundedRectangle(cornerRadius: 15)
-                                      .fill(generateColor(for: musicManager.currentSong?.title ?? ""))
-                                      .frame(width: 300, height: 300)
-                                      .shadow(color: Color.black.opacity(0.5), radius: 20, x: 0, y: 15)
-                                  Image(systemName: "music.note.list").resizable().aspectRatio(contentMode: .fit)
-                                      .frame(width: 100, height: 100).foregroundColor(.white.opacity(0.8))
+                              if let song = musicManager.currentSong {
+                                  ArtworkView(song: song, size: 290, cornerRadius: 16, fallbackSystemName: "music.note.list")
+                                      .shadow(color: Color.black.opacity(0.5), radius: 25, x: 0, y: 18)
+                                      .padding(.top, 10)
+                                      .rotation3DEffect(
+                                          .degrees(musicManager.isPlaying ? 3 : 0),
+                                          axis: (x: 0, y: 1, z: 0)
+                                      )
+                                      .animation(.easeInOut(duration: 2.5).repeatForever(autoreverses: true),
+                                                 value: musicManager.isPlaying)
                               }
-                              .rotation3DEffect(
-                                  .degrees(musicManager.isPlaying ? 3 : 0),
-                                  axis: (x: 0, y: 1, z: 0)
-                              )
-                              .animation(.easeInOut(duration: 2.5).repeatForever(autoreverses: true),
-                                         value: musicManager.isPlaying)
-                              .padding(.top, 10)
                           }
 
                           HStack {
                               VStack(alignment: .leading, spacing: 6) {
                                   Text(musicManager.currentSong?.title ?? "Unknown")
                                       .font(.system(size: 22, weight: .bold)).foregroundColor(.white).lineLimit(2)
-                                  HStack {
-                                      Text((musicManager.currentSong?.artist.isEmpty == false) ? musicManager.currentSong!.artist : "AS Music")
-                                          .font(.subheadline).foregroundColor(.white.opacity(0.6)).lineLimit(1)
-                                      if musicManager.isPlaying && !showLyrics { VisualizerView().padding(.leading, 5) }
+                                  HStack(spacing: 6) {
+                                      Text(musicManager.currentSong?.artist.isEmpty == false ? musicManager.currentSong!.artist : "AS Music")
+                                          .font(.subheadline).foregroundColor(.white.opacity(0.7)).lineLimit(1)
+                                      if musicManager.isPlaying && !showLyrics { VisualizerView().padding(.leading, 4) }
                                   }
                               }
                               Spacer()
@@ -1057,27 +1315,8 @@ jobs:
                                           Image(systemName: musicManager.isFavorite(song: song) ? "heart.fill" : "heart")
                                               .font(.title3).foregroundColor(musicManager.isFavorite(song: song) ? .pink : .white)
                                       }
-                                      Menu {
-                                          Button { musicManager.shareSong(song) } label: { Label("Share / Export", systemImage: "square.and.arrow.up") }
-                                          Button { musicManager.playNext(song) } label: { Label("Play Next", systemImage: "text.insert") }
-                                          Button { musicManager.playLater(song) } label: { Label("Play Later", systemImage: "text.append") }
-                                          Menu("Playback Speed") {
-                                              ForEach([0.75, 1.0, 1.25, 1.5, 2.0] as [Float], id: \.self) { rate in
-                                                  Button { musicManager.setPlaybackRate(rate) } label: {
-                                                      Label(String(format: "%.2gx", rate),
-                                                            systemImage: abs(musicManager.playbackRate - rate) < 0.01 ? "checkmark" : "")
-                                                  }
-                                              }
-                                          }
-                                          if musicManager.sleepTimerMinutes > 0 {
-                                              Button { musicManager.setSleepTimer(minutes: 0) } label: {
-                                                  Label("Cancel Sleep Timer", systemImage: "moon.zzz")
-                                              }
-                                          }
-                                      } label: {
-                                          Image(systemName: "ellipsis.circle").font(.title3).foregroundColor(.white)
-                                      }
                                   }
+                                  AirPlayButton().frame(width:28,height:26).tint(.white)
                               }
                           }.padding(.horizontal, 30)
 
@@ -1117,7 +1356,6 @@ jobs:
                                       .foregroundColor(musicManager.repeatMode == .off ? .white.opacity(0.5) : .green)
                               }
                           }.padding(.top, 4)
-                          // Smart radio + speed pills
                           HStack(spacing: 10) {
                               Button { musicManager.toggleSmartRadio() } label: {
                                   Label("Smart Radio", systemImage: "dot.radiowaves.left.and.right")
@@ -1133,25 +1371,121 @@ jobs:
                                   Text("\(musicManager.sleepTimerMinutes)m").font(.caption).foregroundColor(.white.opacity(0.8))
                                       .padding(.horizontal, 12).padding(.vertical, 6).background(AppTheme.accent).cornerRadius(20)
                               }
+                              Text(musicManager.eqPreset.rawValue).font(.caption).foregroundColor(.white.opacity(0.8))
+                                  .padding(.horizontal, 12).padding(.vertical, 6).background(Color.white.opacity(0.15)).cornerRadius(20)
                           }
                           Spacer()
                       }
                   }
-                  .onAppear { if let t = musicManager.currentSong?.title { lyrics.fetch(for: t) } }
-                  .onChange(of: musicManager.currentSong?.title) { _ in
-                      if let t = musicManager.currentSong?.title { lyrics.fetch(for: t) }
+                  .onAppear {
+                      if let t = musicManager.currentSong?.title {
+                          lyrics.fetch(for: t, artist: musicManager.currentSong?.artist ?? "")
+                      }
                   }
-                  .actionSheet(isPresented: $showTimerOptions) {
-                      ActionSheet(title: Text("Sleep Timer"), buttons: [
-                          .default(Text("15 Minutes")) { musicManager.setSleepTimer(minutes: 15) },
-                          .default(Text("30 Minutes")) { musicManager.setSleepTimer(minutes: 30) },
-                          .default(Text("60 Minutes")) { musicManager.setSleepTimer(minutes: 60) },
-                          .destructive(Text("Turn Off Timer")) { musicManager.setSleepTimer(minutes: 0) },
-                          .cancel()
-                      ])
+                  .onChange(of: musicManager.currentSong?.title) { _ in
+                      if let t = musicManager.currentSong?.title {
+                          lyrics.fetch(for: t, artist: musicManager.currentSong?.artist ?? "")
+                      }
+                  }
+                  .sheet(isPresented: $showEQ) {
+                      NavigationView { EQView() }.environmentObject(musicManager)
+                  }
+                  .sheet(isPresented: $showTheme) {
+                      NavigationView { ThemePickerView() }.environmentObject(musicManager)
+                  }
+              }
+
+              private var lyricsAreRTL: Bool { isRTL(lyrics.lyrics) }
+              private func isRTL(_ text: String) -> Bool {
+                  var rtl = 0; var total = 0
+                  for c in text.prefix(400) {
+                      guard let sv = c.unicodeScalars.first?.value else { continue }
+                      if (0x0600...0x06FF).contains(sv) || (0x0750...0x077F).contains(sv)
+                          || (0x08A0...0x08FF).contains(sv) || (0xFB50...0xFDFF).contains(sv)
+                          || (0xFE70...0xFEFF).contains(sv) || (0x0590...0x05FF).contains(sv) {
+                          rtl += 1; total += 1
+                      } else if c.isLetter { total += 1 }
+                  }
+                  return total > 5 && Double(rtl) / Double(total) > 0.25
+              }
+          }
+
+          struct AirPlayButton: UIViewRepresentable {
+              func makeUIView(context: Context) -> AVRoutePickerView {
+                  let v = AVRoutePickerView()
+                  v.activeTintColor = UIColor(AppTheme.accent)
+                  v.tintColor = .white
+                  return v
+              }
+              func updateUIView(_ uiView: AVRoutePickerView, context: Context) {
+                  uiView.activeTintColor = UIColor(AppTheme.accent)
+              }
+          }
+
+          struct EQView: View {
+              @EnvironmentObject var mm: MusicManager
+              @Environment(\.presentationMode) var pm
+              var body: some View {
+                  List {
+                      Section(header: Text("Equalizer Preset")) {
+                          ForEach(EQPreset.allCases) { p in
+                              Button {
+                                  mm.eqPreset = p
+                                  pm.wrappedValue.dismiss()
+                              } label: {
+                                  HStack {
+                                      Text(p.rawValue).foregroundColor(.primary)
+                                      Spacer()
+                                      if mm.eqPreset == p { Image(systemName: "checkmark").foregroundColor(AppTheme.accent) }
+                                  }
+                              }
+                          }
+                      }
+                      Section(footer: Text("EQ shapes the sound in real time. Arabic/Maqaam boosts oud/qanun highs while keeping warm lows.")) {
+                          EmptyView()
+                      }
+                  }
+                  .navigationTitle("Equalizer")
+                  .navigationBarTitleDisplayMode(.inline)
+                  .toolbar {
+                      ToolbarItem(placement: .navigationBarTrailing) {
+                          Button("Done") { pm.wrappedValue.dismiss() }
+                      }
                   }
               }
           }
+
+          struct ThemePickerView: View {
+              @EnvironmentObject var mm: MusicManager
+              @Environment(\.presentationMode) var pm
+              var body: some View {
+                  List {
+                      Section(header: Text("App Accent Color")) {
+                          ForEach(AppAccent.list) { a in
+                              Button {
+                                  mm.accent = a
+                              } label: {
+                                  HStack {
+                                      Circle().fill(Color(red:a.r, green:a.g, blue:a.b)).frame(width:28,height:28)
+                                      Text(a.name).foregroundColor(.primary).padding(.leading,6)
+                                      Spacer()
+                                      if mm.accent.id == a.id { Image(systemName: "checkmark").foregroundColor(AppTheme.accent) }
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  .navigationTitle("Theme")
+                  .navigationBarTitleDisplayMode(.inline)
+                  .toolbar {
+                      ToolbarItem(placement: .navigationBarTrailing) {
+                          Button("Done") { pm.wrappedValue.dismiss() }
+                      }
+                  }
+              }
+          }
+
+
 
           // ---------------------------------------------------------------------------
           // MARK: - Library
@@ -1281,9 +1615,8 @@ jobs:
               private func songRow(_ song: Song, isQueued: Bool) -> some View {
                   Button { musicManager.playSong(song) } label: {
                       HStack {
-                          ZStack {
-                              generateColor(for: song.title).frame(width: 42, height: 42).cornerRadius(6)
-                              Image(systemName: isQueued ? "text.insert" : "music.note").foregroundColor(.white)
+                          ZStack(alignment: .center) {
+                              ArtworkView(song: song, size: 42, cornerRadius: 6, fallbackSystemName: isQueued ? "text.insert" : "music.note")
                           }
                           VStack(alignment: .leading) {
                               Text(song.title).font(.headline).lineLimit(1)
@@ -1312,9 +1645,11 @@ jobs:
                       ForEach(songsInPlaylist) { song in
                           Button { musicManager.playSong(song) } label: {
                               HStack {
-                                  generateColor(for: song.title).frame(width: 40, height: 40).cornerRadius(5)
-                                      .overlay(Image(systemName: "music.note").foregroundColor(.white))
-                                  Text(song.title).foregroundColor(.primary).lineLimit(1)
+                                  ArtworkView(song: song, size: 40, cornerRadius: 5, fallbackSystemName: "music.note")
+                                  VStack(alignment: .leading) {
+                                      Text(song.title).foregroundColor(.primary).lineLimit(1)
+                                      Text(song.artist).font(.caption).foregroundColor(.secondary).lineLimit(1)
+                                  }
                                   Spacer()
                               }
                           }
@@ -1391,9 +1726,12 @@ jobs:
                   List {
                       ForEach(likedSongs) { song in
                           Button { musicManager.playSong(song) } label: {
-                              HStack {
-                                  Image(systemName: "heart.fill").foregroundColor(.pink).frame(width:36)
-                                  Text(song.title).foregroundColor(.primary).lineLimit(1)
+                              HStack(spacing: 10) {
+                                  ArtworkView(song: song, size: 40, cornerRadius: 5, fallbackSystemName: "heart.fill")
+                                  VStack(alignment: .leading) {
+                                      Text(song.title).foregroundColor(.primary).lineLimit(1)
+                                      Text(song.artist).font(.caption).foregroundColor(.secondary).lineLimit(1)
+                                  }
                                   Spacer()
                               }
                           }
@@ -2899,16 +3237,23 @@ jobs:
               @Published var loading: Bool = false
               private var cache = NSCache<NSString, NSString>()
 
-              func fetch(for title: String) {
-                  let key = title as NSString
+              func fetch(for title: String, artist: String = "") {
+                  // Build a cache key from both title + artist
+                  let key = "\(artist)||\(title)" as NSString
                   if let c = cache.object(forKey: key) {
                       lyrics = c as String; return
                   }
                   loading = true; lyrics = ""
-                  // Use both title + artist guess for better hits
-                  let cleaned = title
-                  let q = cleaned.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-                  guard let url = URL(string: "https://lrclib.net/api/search?q=\(q)") else { loading = false; return }
+                  var comps = URLComponents(string: "https://lrclib.net/api/search")
+                  var qItems: [URLQueryItem] = []
+                  if !artist.isEmpty && artist != "AS Music" {
+                      qItems.append(URLQueryItem(name: "artist_name", value: artist))
+                      qItems.append(URLQueryItem(name: "track_name", value: title))
+                  } else {
+                      qItems.append(URLQueryItem(name: "q", value: title))
+                  }
+                  comps?.queryItems = qItems
+                  guard let url = comps?.url else { loading = false; return }
                   var req = URLRequest(url: url, timeoutInterval: 10)
                   req.setValue("ASMusic/1.0", forHTTPHeaderField: "User-Agent")
                   URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
@@ -2922,7 +3267,10 @@ jobs:
                                   .filter { !$0.isEmpty }.joined(separator: "\n")
                           }
                       }
-                      if txt.isEmpty { txt = "No lyrics found for this track." }
+                      if txt.isEmpty {
+                          // Fallback: try Genius search via google-style scrape is hard; just show message
+                          txt = "No lyrics found for this track."
+                      }
                       self.cache.setObject(txt as NSString, forKey: key)
                       DispatchQueue.main.async { self.lyrics = txt; self.loading = false }
                   }.resume()
@@ -3274,6 +3622,51 @@ jobs:
                       }.resume()
                   }
                   tryNext()
+              }
+
+              // ---- Smart Radio auto-search --------------------------------------
+              // Called by MusicManager when smart radio is on and we've exhausted
+              // the library's variety: background-search for more tracks by same artist.
+              func autoSearchForRadio(artist: String, title: String) {
+                  guard !artist.isEmpty, artist != "AS Music" else { return }
+                  // Fire search in background, auto-enqueue top 3 MP3 results
+                  let query = artist
+                  guard let raw = query.data(using: .utf8)?.base64EncodedString(),
+                        let b64enc = raw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
+                  let ua = DownloadCenter.mobileUA
+                  let us = "https://mp3juice.sc/api/v1/search?y=y&q=\(b64enc)&_=\(Int(Date().timeIntervalSince1970*1000))"
+                  guard let url = URL(string: us) else { return }
+                  var req = URLRequest(url: url, timeoutInterval: 15)
+                  req.setValue(ua, forHTTPHeaderField: "User-Agent")
+                  req.setValue("https://mp3juice.sc/", forHTTPHeaderField: "Referer")
+                  req.setValue("application/json,*/*", forHTTPHeaderField: "Accept")
+                  URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+                      guard let self, let data = data,
+                            let j = (try? JSONSerialization.jsonObject(with: data)) as? [String:Any],
+                            let items = j["yt"] as? [[String:Any]] else { return }
+                      let (_, cleanArtist) = TitleCleaner.clean(title, artistHint: artist)
+                      var added = 0
+                      for it in items.prefix(8) {
+                          guard added < 3 else { break }
+                          guard let idStr = (it["id"] as? String) ?? (it["id"] as? NSNumber)?.stringValue,
+                                let t = it["title"] as? String else { continue }
+                          if MusicManager.shared.songByVID(idStr) != nil { continue }
+                          let (ct, ca) = TitleCleaner.clean(t, artistHint: cleanArtist)
+                          let finalArtist = ca
+                          let finalName = "\(finalArtist) - \(ct)"
+                          let thumb = it["thumb"] as? String
+                          let song = Song(id: UUID(), title: ct, url: URL(fileURLWithPath: "/"), artist: finalArtist, artworkURL: thumb, sourceVid: idStr)
+                          // We queue the download AND auto-add to upNext as a pending placeholder
+                          // But since the song doesn't exist on disk yet, just enqueue download
+                          // and rely on next play to pick from library once done.
+                          DispatchQueue.main.async {
+                              DownloadCenter.shared.enqueue(vid: idStr, platform: "yt",
+                                                            suggestedName: finalName,
+                                                            artist: finalArtist, thumbnail: thumb)
+                          }
+                          added += 1
+                      }
+                  }.resume()
               }
 
               static func parseDuration(_ s: String) -> TimeInterval? {
