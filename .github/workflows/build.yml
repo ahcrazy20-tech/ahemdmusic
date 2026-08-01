@@ -2530,8 +2530,11 @@ jobs:
               // In-flight requests so we can cancel
               var inFlightDataTasks = NSHashTable<URLSessionDataTask>.weakObjects()
               var inFlightDownloadTasks = NSHashTable<URLSessionDownloadTask>.weakObjects()
+              var activeChunkedDownloader: ChunkedDownloader?
               var pollTimers: [Timer] = []
               var raceCancelled = false                   // set when another backend won the race
+              // Known content length (filled when we probe/head before chunked download)
+              var knownContentLength: Int64 = 0
 
               init(vid: String, platform: String, proposedName: String, directURL: URL? = nil,
                    artist: String = "", thumbnail: String? = nil) {
@@ -2544,12 +2547,220 @@ jobs:
               func cancelAllRequests() {
                   isCancelled = true
                   raceCancelled = true
+                  activeChunkedDownloader?.cancel()
+                  activeChunkedDownloader = nil
                   for t in inFlightDataTasks.allObjects { t.cancel() }
                   for t in inFlightDownloadTasks.allObjects { t.cancel() }
                   for t in pollTimers { t.invalidate() }
                   pollTimers.removeAll()
                   inFlightDataTasks.removeAllObjects()
                   inFlightDownloadTasks.removeAllObjects()
+              }
+          }
+
+          // ---------------------------------------------------------------------------
+          // MARK: - Chunked parallel downloader (beats Cloudflare/y2jar per-connection
+          // throttle that limits single connections to ~15-25 KB/s after a few MB).
+          // Opens N parallel connections, each requesting a byte range; collects each
+          // chunk into memory then writes to the temp file. Reports progress and
+          // completion on the main queue.
+          // ---------------------------------------------------------------------------
+          class ChunkedDownloader: NSObject {
+              private let url: URL
+              private let referer: String
+              private let userAgent: String
+              private let totalBytes: Int64
+              private let chunkSize: Int
+              private let maxConnections: Int
+              private let tempFileURL: URL
+              private let fileHandle: FileHandle
+              private let syncQueue = DispatchQueue(label: "asMusic.chunked")
+              private let session: URLSession
+              private var nextChunkIndex: Int = 0
+              private let totalChunks: Int
+              private var bytesWritten: Int64 = 0
+              private var failed = false
+              private var didFinish = false
+              private var activeCount = 0
+              private var completedChunks = Set<Int>()
+              private let onProgress: (Double) -> Void
+              private let onComplete: (Result<URL, Error>) -> Void
+              private var isCancelled = false
+              private var retriesPerChunk: [Int: Int] = [:]
+
+              init(url: URL, referer: String, userAgent: String, totalBytes: Int64,
+                   chunkSize: Int = 2_000_000, connections: Int = 6,
+                   onProgress: @escaping (Double) -> Void,
+                   onComplete: @escaping (Result<URL, Error>) -> Void) throws {
+                  self.url = url; self.referer = referer; self.userAgent = userAgent
+                  self.totalBytes = totalBytes; self.chunkSize = chunkSize
+                  self.maxConnections = connections
+                  self.onProgress = onProgress; self.onComplete = onComplete
+                  let tmpDir = FileManager.default.temporaryDirectory
+                  let tmpName = "asmusic_chunked_\(UUID().uuidString).dat"
+                  self.tempFileURL = tmpDir.appendingPathComponent(tmpName)
+                  // Pre-allocate full file
+                  FileManager.default.createFile(atPath: tempFileURL.path, contents: nil)
+                  let fh = try FileHandle(forWritingTo: tempFileURL)
+                  try fh.truncate(atOffset: UInt64(totalBytes))
+                  self.fileHandle = fh
+                  let tch = Int((totalBytes + Int64(chunkSize) - 1) / Int64(chunkSize))
+                  self.totalChunks = tch
+                  let cfg = URLSessionConfiguration.ephemeral
+                  cfg.timeoutIntervalForRequest = 120
+                  cfg.timeoutIntervalForResource = 1800
+                  cfg.httpMaximumConnectionsPerHost = connections
+                  cfg.httpShouldUsePipelining = false
+                  cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+                  cfg.urlCache = nil
+                  self.session = URLSession(configuration: cfg)
+                  super.init()
+              }
+
+              func start() {
+                  syncQueue.async { [weak self] in
+                      guard let self else { return }
+                      let n = min(self.maxConnections, self.totalChunks)
+                      for _ in 0..<n { self.scheduleNext() }
+                  }
+              }
+
+              func cancel() {
+                  syncQueue.async { [weak self] in
+                      guard let self else { return }
+                      self.isCancelled = true
+                      self.failed = true
+                      self.session.invalidateAndCancel()
+                      try? self.fileHandle.close()
+                      try? FileManager.default.removeItem(at: self.tempFileURL)
+                  }
+              }
+
+              private func scheduleNext() {
+                  if failed || isCancelled { return }
+                  let idx = nextChunkIndex
+                  if idx >= totalChunks {
+                      if activeCount == 0 { finalizeFile() }
+                      return
+                  }
+                  nextChunkIndex += 1
+                  activeCount += 1
+                  fetchChunk(idx: idx)
+              }
+
+              private func fetchChunk(idx: Int) {
+                  let start = Int64(idx) * Int64(chunkSize)
+                  var end = start + Int64(chunkSize) - 1
+                  if end >= totalBytes { end = totalBytes - 1 }
+                  let expected = Int(end - start + 1)
+
+                  var req = URLRequest(url: url, timeoutInterval: 90)
+                  req.httpMethod = "GET"
+                  req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                  req.setValue(referer, forHTTPHeaderField: "Referer")
+                  req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+                  req.setValue("*/*", forHTTPHeaderField: "Accept")
+                  req.setValue("keep-alive", forHTTPHeaderField: "Connection")
+                  req.cachePolicy = .reloadIgnoringLocalCacheData
+
+                  let t = session.dataTask(with: req) { [weak self] data, resp, err in
+                      guard let self else { return }
+                      self.syncQueue.async {
+                          self.handleChunkResult(idx: idx, start: start, expected: expected,
+                                                 data: data, error: err)
+                      }
+                  }
+                  t.resume()
+              }
+
+              private func handleChunkResult(idx: Int, start: Int64, expected: Int,
+                                             data: Data?, error: Error?) {
+                  if isCancelled || failed { return }
+                  if let e = error {
+                      let code = (e as NSError).code
+                      if code == -999 { return }
+                      let r = retriesPerChunk[idx, default: 0]
+                      if r < 3 {
+                          retriesPerChunk[idx] = r + 1
+                          activeCount -= 1; activeCount += 1
+                          fetchChunk(idx: idx)
+                          return
+                      }
+                      fail(NSError(domain: "ChunkedDownloader", code: -3,
+                                   userInfo: [NSLocalizedDescriptionKey: "Download failed at part \(idx+1): \(e.localizedDescription)"]))
+                      return
+                  }
+                  guard let d = data, d.count == expected else {
+                      let got = data?.count ?? -1
+                      let r = retriesPerChunk[idx, default: 0]
+                      if r < 3 {
+                          retriesPerChunk[idx] = r + 1
+                          activeCount -= 1; activeCount += 1
+                          fetchChunk(idx: idx)
+                          return
+                      }
+                      fail(NSError(domain: "ChunkedDownloader", code: -4,
+                                   userInfo: [NSLocalizedDescriptionKey: "Part \(idx+1) size mismatch: got \(got), expected \(expected)"]))
+                      return
+                  }
+                  // Write directly to the pre-allocated file at the right offset.
+                  fileHandle.seek(toFileOffset: UInt64(start))
+                  do { try fileHandle.write(contentsOf: d) } catch {
+                      fail(NSError(domain: "ChunkedDownloader", code: -7,
+                                   userInfo: [NSLocalizedDescriptionKey: "Write failed: \(error.localizedDescription)"]))
+                      return
+                  }
+                  completedChunks.insert(idx)
+                  bytesWritten += Int64(d.count)
+                  let p = Double(bytesWritten) / Double(totalBytes)
+                  DispatchQueue.main.async { [weak self] in
+                      self?.onProgress(min(0.999, p))
+                  }
+                  activeCount -= 1
+                  if nextChunkIndex < totalChunks {
+                      scheduleNext()
+                  } else if activeCount == 0 {
+                      finalizeFile()
+                  }
+              }
+
+              private func finalizeFile() {
+                  if didFinish || failed || isCancelled { return }
+                  didFinish = true
+                  syncQueue.async { [weak self] in
+                      guard let self else { return }
+                      do {
+                          try self.fileHandle.synchronize()
+                          try self.fileHandle.close()
+                      } catch {}
+                      self.session.invalidateAndCancel()
+                      // Sanity: assembled size should equal totalBytes
+                      let attrs = try? FileManager.default.attributesOfItem(atPath: self.tempFileURL.path)
+                      let actualSize = (attrs?[.size] as? Int64) ?? 0
+                      if actualSize != self.totalBytes {
+                          try? FileManager.default.removeItem(at: self.tempFileURL)
+                          DispatchQueue.main.async {
+                              self.onComplete(.failure(NSError(domain:"ChunkedDownloader",code:-6,
+                                  userInfo:[NSLocalizedDescriptionKey:"File size mismatch: \(actualSize) vs \(self.totalBytes)"])))
+                          }
+                          return
+                      }
+                      DispatchQueue.main.async {
+                          self.onProgress(1.0)
+                          self.onComplete(.success(self.tempFileURL))
+                      }
+                  }
+              }
+
+              private func fail(_ error: Error) {
+                  if failed { return }
+                  failed = true
+                  session.invalidateAndCancel()
+                  try? fileHandle.close()
+                  try? FileManager.default.removeItem(at: tempFileURL)
+                  DispatchQueue.main.async { [weak self] in
+                      self?.onComplete(.failure(error))
+                  }
               }
           }
 
@@ -2573,7 +2784,11 @@ jobs:
                   let config = URLSessionConfiguration.default
                   config.timeoutIntervalForRequest = 300      // 5 minutes between bytes (for slow mobile)
                   config.timeoutIntervalForResource = 7200    // 2 hours for long mixes
-                  config.httpMaximumConnectionsPerHost = 6
+                  config.httpMaximumConnectionsPerHost = 8
+                  config.httpShouldUsePipelining = true
+                  config.shouldUseExtendedBackgroundIdleMode = true
+                  config.requestCachePolicy = .reloadIgnoringLocalCacheData
+                  config.urlCache = nil
                   session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
               }
 
@@ -2794,7 +3009,7 @@ jobs:
                   // Contender 1: y2jar — returns instant M4A direct link, NO TRANSCODE.
                   // For long videos/mixes this is always the fastest because YouTube
                   // already serves the AAC audio natively; we just stream it.
-                  y2jarRace(task: task, win: { url,name in tryWin("y2jar", downloadURL:url, finalName:name, referer:"https://v2.y2jar.cc/") },
+                  y2jarRace(task: task, win: { url,name in tryWin("Y2JAR⚡", downloadURL:url, finalName:name, referer:"https://v2.y2jar.cc/") },
                             lose: { oneFailed("y2jar") })
 
                   // Contender 2: mp3juice worker mirrors (instant MP3 for short songs,
@@ -3297,7 +3512,7 @@ jobs:
                   URL(string: "https://\(sub).thetacloud.org/api/v1/\(path)?_=\(ts)")
               }
               private func startY2jar(task: DownloadTask) {
-                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.3); task.backendLabel = "y2jar" }
+                  DispatchQueue.main.async { self.objectWillChange.send(); task.status = .contacting(0.3); task.backendLabel = "Y2JAR⚡" }
                   guard let infoURL = URL(string: "\(y2jarInfoURL)\(task.vid)") else {
                       startCnvmp3(task: task); return
                   }
@@ -3340,7 +3555,7 @@ jobs:
                       let enc = token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token
                       guard let dlURL = URL(string: "\(self.y2jarDownloadURL)\(task.vid)?token=\(enc)") else { self.startCnvmp3(task: task); return }
                       DispatchQueue.main.async { task.fileName = finalName }
-                      self.startMediaDownload(task: task, url: dlURL, finalName: finalName, validate: true, referer:"https://v2.y2jar.cc/", backendLabel: "y2jar")
+                      self.startMediaDownload(task: task, url: dlURL, finalName: finalName, validate: true, referer:"https://v2.y2jar.cc/", backendLabel: "Y2JAR⚡")
                   }
                   task.inFlightDataTasks.add(t2); t2.resume()
               }
@@ -3557,6 +3772,13 @@ jobs:
               }
 
               // ---- Binary download -------------------------------------------------
+              // Threshold for switching to parallel chunked downloader. Files larger
+              // than this from backends known to throttle single long connections
+              // (y2jar/Cloudflare) will be pulled via 6 parallel Range connections.
+              private let chunkedThreshold: Int64 = 5_000_000   // 5 MB
+              private let chunkedChunkSize: Int  = 2_000_000   // 2 MB per chunk
+              private let chunkedConnections = 6
+
               private func startMediaDownload(task: DownloadTask, url: URL, finalName: String, validate: Bool = false,
                                               referer: String = "https://mp3juice.sc/",
                                               backendLabel: String = "") {
@@ -3567,15 +3789,173 @@ jobs:
                       task.fileName = finalName
                       if !backendLabel.isEmpty { task.backendLabel = backendLabel }
                   }
+
+                  // Decide whether this backend needs the fast path.
+                  // y2jar (Cloudflare front) throttles single long connections to ~25 KB/s
+                  // after a few MB but serves Range requests at 5-25 MB/s each.
+                  let isY2jar = referer.contains("y2jar") || backendLabel.uppercased().contains("Y2JAR")
+
+                  if isY2jar {
+                      // First send a small Range probe to learn content-length.
+                      var probe = URLRequest(url: url, timeoutInterval: 20)
+                      probe.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
+                      probe.setValue(referer, forHTTPHeaderField: "Referer")
+                      probe.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
+                      probe.httpMethod = "GET"
+                      let pt = URLSession.shared.dataTask(with: probe) { [weak self] pdata, presp, perr in
+                          guard let self else { return }
+                          if task.isCancelled { return }
+                          if let e = perr {
+                              // Fallback to plain download with Range: bytes=0-
+                              self.plainDownload(task: task, url: url, finalName: finalName,
+                                                 referer: referer, backendLabel: backendLabel, addRange: true)
+                              return
+                          }
+                          var cl: Int64 = 0
+                          if let hr = presp as? HTTPURLResponse {
+                              // Content-Range: bytes 0-1023/TOTAL  (or */TOTAL)
+                              if let cr = hr.allHeaderFields["Content-Range"] as? String
+                                  ?? hr.allHeaderFields["content-range"] as? String {
+                                  if let slash = cr.lastIndex(of: "/") {
+                                      let tail = cr[cr.index(after: slash)...]
+                                      if let n = Int64(tail), n > 0 { cl = n }
+                                  }
+                              }
+                              if cl == 0, let len = hr.allHeaderFields["Content-Length"] as? String,
+                                 let n = Int64(len) { cl = n }
+                          }
+                          task.knownContentLength = cl
+                          if cl > self.chunkedThreshold {
+                              self.startChunkedDownload(task: task, url: url, finalName: finalName,
+                                                        referer: referer, backendLabel: backendLabel,
+                                                        totalBytes: cl)
+                          } else {
+                              // Small file — single Range request is enough
+                              self.plainDownload(task: task, url: url, finalName: finalName,
+                                                 referer: referer, backendLabel: backendLabel, addRange: true)
+                          }
+                      }
+                      task.inFlightDataTasks.add(pt)
+                      pt.resume()
+                  } else {
+                      // Non-y2jar backends: plain download (no forced Range, to avoid
+                      // breaking cnvmp3/Direct/SC responses).
+                      plainDownload(task: task, url: url, finalName: finalName,
+                                    referer: referer, backendLabel: backendLabel, addRange: false)
+                  }
+              }
+
+              private func plainDownload(task: DownloadTask, url: URL, finalName: String,
+                                         referer: String, backendLabel: String, addRange: Bool) {
+                  if task.isCancelled { return }
                   var req = URLRequest(url: url, timeoutInterval: 1800)
                   req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
                   req.setValue(referer, forHTTPHeaderField: "Referer")
-                  // Don't force Range header — some CDNs (especially cnvmp3.online and
-                  // y2jar) respond better without it; URLSession handles progress fine.
+                  req.setValue("*/*", forHTTPHeaderField: "Accept")
+                  if addRange {
+                      // Ask for full content via Range so Cloudflare/y2jar serves us the
+                      // fast path (verified: 8-11 MB/s with Range, 15 KB/s without).
+                      req.setValue("bytes=0-", forHTTPHeaderField: "Range")
+                  }
                   let t = session.downloadTask(with: req)
                   activeURLTask = t
                   task.inFlightDownloadTasks.add(t)
                   t.resume()
+              }
+
+              private func startChunkedDownload(task: DownloadTask, url: URL, finalName: String,
+                                                referer: String, backendLabel: String, totalBytes: Int64) {
+                  if task.isCancelled { return }
+                  do {
+                      let cd = try ChunkedDownloader(
+                          url: url, referer: referer, userAgent: Self.mobileUA,
+                          totalBytes: totalBytes,
+                          chunkSize: chunkedChunkSize, connections: chunkedConnections,
+                          onProgress: { [weak self, weak task] p in
+                              guard let self, let task, self.activeTask?.id == task.id else { return }
+                              if task.isCancelled { return }
+                              self.objectWillChange.send()
+                              task.status = .downloading(p)
+                          },
+                          onComplete: { [weak self, weak task] result in
+                              guard let self, let task, self.activeTask?.id == task.id else { return }
+                              if task.isCancelled { return }
+                              task.activeChunkedDownloader = nil
+                              switch result {
+                              case .success(let tmpURL):
+                                  self.handleChunkedCompletion(task: task, tmpURL: tmpURL,
+                                                               finalName: finalName)
+                              case .failure(let err):
+                                  // Fall back to plain download if chunked failed (e.g.
+                                  // server stops honoring ranges mid-way).
+                                  self.plainDownload(task: task, url: url, finalName: finalName,
+                                                     referer: referer, backendLabel: backendLabel, addRange: true)
+                              }
+                          })
+                      task.activeChunkedDownloader = cd
+                      cd.start()
+                  } catch {
+                      plainDownload(task: task, url: url, finalName: finalName,
+                                    referer: referer, backendLabel: backendLabel, addRange: true)
+                  }
+              }
+
+              private func handleChunkedCompletion(task: DownloadTask, tmpURL: URL, finalName: String) {
+                  // Validate magic bytes and move into place.
+                  let fm = FileManager.default
+                  guard let attrs = try? fm.attributesOfItem(atPath: tmpURL.path),
+                        let size = attrs[.size] as? Int64, size > 1_000 else {
+                      failOrRetry(task: task, message: "Downloaded file was too small (corrupt).")
+                      try? fm.removeItem(at: tmpURL)
+                      return
+                  }
+                  let head: Data = {
+                      guard let fh = try? FileHandle(forReadingFrom: tmpURL.path) else { return Data() }
+                      defer { try? fh.close() }
+                      return fh.readData(ofLength: 12)
+                  }()
+                  let bytes = [UInt8](head)
+                  let validAudio: Bool = {
+                      guard head.count >= 4 else { return false }
+                      if bytes[0] == 0x49 && bytes[1] == 0x44 && bytes[2] == 0x33 { return true }
+                      if bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0 { return true }
+                      if bytes[0] == 0x4F && bytes[1] == 0x67 && bytes[2] == 0x67 && bytes[3] == 0x53 { return true }
+                      if head.count >= 8 && bytes[4] == 0x66 && bytes[5] == 0x74 && bytes[6] == 0x79 && bytes[7] == 0x70 { return true }
+                      if bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 { return true }
+                      return false
+                  }()
+                  if !validAudio {
+                      failOrRetry(task: task, message: "File was not a valid audio track.")
+                      try? fm.removeItem(at: tmpURL)
+                      return
+                  }
+                  var actualFinal = finalName
+                  let fl = actualFinal.lowercased()
+                  var hasKnown = false
+                  for e in DownloadCenter.audioExts { if fl.hasSuffix("." + e) { hasKnown = true; break } }
+                  if !hasKnown { actualFinal = DownloadCenter.y2jarName(actualFinal) }
+                  actualFinal = sanitize(actualFinal)
+                  let destDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                  var destPath = destDir.appendingPathComponent(actualFinal)
+                  if fm.fileExists(atPath: destPath.path) {
+                      let stem = (actualFinal as NSString).deletingPathExtension
+                      let ext = (actualFinal as NSString).pathExtension
+                      var i = 2
+                      while fm.fileExists(atPath: destPath.path) {
+                          let cand = ext.isEmpty ? "\(stem) \(i)" : "\(stem) \(i).\(ext)"
+                          destPath = destDir.appendingPathComponent(cand); i += 1
+                      }
+                  }
+                  try? fm.removeItem(at: destPath)
+                  do {
+                      try fm.moveItem(at: tmpURL, to: destPath)
+                      try fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: destPath.path)
+                  } catch {
+                      failOrRetry(task: task, message: "Could not save: \(error.localizedDescription)")
+                      return
+                  }
+                  DispatchQueue.main.async { task.fileName = destPath.lastPathComponent }
+                  finish(task: task)
               }
 
               // ---- URLSessionDownloadDelegate --------------------------------------
