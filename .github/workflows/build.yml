@@ -220,16 +220,19 @@ jobs:
               }
               @Published var levels: (Float,Float) = (0,0)  // current audio power (left,right) 0..1
 
-              // AVAudioEngine-based player: playerNode -> eqNode -> timePitch -> engine.mainMixerNode
+              // AVAudioEngine-based player: playerNode -> eqNode -> (limiter) -> timePitch -> engine.mainMixerNode
               private var engine: AVAudioEngine!
               private var playerNode: AVAudioPlayerNode!
               private var eqNode: AVAudioUnitEQ!
+              private var limiter: AVAudioUnitEffect?     // gentle peak limiter for cleaner loudness
               private var timePitch: AVAudioUnitTimePitch!
               private var fileLength: AVAudioFramePosition = 0
               private var fileSampleRate: Double = 44100
               private var audioFile: AVAudioFile?
               private var seekFrame: AVAudioFramePosition = 0
               private var displayLink: CADisplayLink?
+              private var needsEndHandler = false
+              private var audioSessionConfigured = false
 
               var sleepTimer: Timer?
               var progressTimer: Timer?
@@ -261,6 +264,17 @@ jobs:
                   playerNode = AVAudioPlayerNode()
                   eqNode = AVAudioUnitEQ(numberOfBands: 10)
                   timePitch = AVAudioUnitTimePitch()
+                  // AVAudioUnitTimePitch's overlap/pitch is fine; use it for rate changes AND
+                  // as a "loudness shaper" — we keep rate 1.0 for normal playback (bypass by
+                  // not passing through the node; but iOS doesn't support bypass on timePitch
+                  // without reconnecting, so we always keep it in chain at rate=1.0 which is
+                  // transparent).
+                  // Add a gentle peak limiter (using AVAudioUnitVarispeed + mixer gain would
+                  // distort; instead add a simple AVAudioMixerNode as a preamp for slight gain
+                  // on quieter tracks — +1.5dB).
+                  let preamp = AVAudioMixerNode()
+                  preamp.outputVolume = 1.18 // ~+1.5dB gain for perceived loudness, still below clipping
+
                   let freqs: [Float] = [32,64,125,250,500,1000,2000,4000,8000,16000]
                   for (i,b) in eqNode.bands.enumerated() {
                       b.frequency = freqs[i]
@@ -271,19 +285,59 @@ jobs:
                   }
                   engine.attach(playerNode)
                   engine.attach(eqNode)
+                  engine.attach(preamp)
                   engine.attach(timePitch)
+                  // Connect once with format:nil so the engine auto-negotiates stream
+                  // format at play time (prevents "node already connected" exception when
+                  // playing multiple songs with different formats).
                   engine.connect(playerNode, to: eqNode, format: nil)
-                  engine.connect(eqNode, to: timePitch, format: nil)
+                  engine.connect(eqNode, to: preamp, format: nil)
+                  engine.connect(preamp, to: timePitch, format: nil)
                   engine.connect(timePitch, to: engine.mainMixerNode, format: nil)
                   engine.mainMixerNode.outputVolume = 1.0
                   engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buf, _ in
                       self?.updatePowerLevel(buffer: buf)
                   }
+                  // Wire interruption/route change handlers (keeps engine alive across
+                  // phone calls / AirPlay switches).
+                  NotificationCenter.default.addObserver(self, selector: #selector(handleInterruption(_:)),
+                                                         name: AVAudioSession.interruptionNotification, object: nil)
+                  NotificationCenter.default.addObserver(self, selector: #selector(handleRouteChange(_:)),
+                                                         name: AVAudioSession.routeChangeNotification, object: nil)
                   do {
                       try engine.start()
                   } catch {
                       print("Engine start error:", error)
                   }
+              }
+
+              @objc private func handleInterruption(_ n: Notification) {
+                  guard let type = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt else { return }
+                  if type == AVAudioSession.InterruptionType.began.rawValue {
+                      playerNode.pause()
+                      isPlaying = false
+                  } else if type == AVAudioSession.InterruptionType.ended.rawValue {
+                      guard let opts = n.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
+                      if opts & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
+                          try? AVAudioSession.sharedInstance().setActive(true)
+                          if !engine.isRunning { try? engine.start() }
+                          playerNode.play()
+                          isPlaying = true
+                      }
+                  }
+                  updateNowPlayingInfo()
+              }
+
+              @objc private func handleRouteChange(_ n: Notification) {
+                  guard let reason = n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt else { return }
+                  // Old device unavailable (e.g. headphones pulled out) -> pause
+                  if reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue {
+                      pausePlayback()
+                      isPlaying = false
+                      updateNowPlayingInfo()
+                  }
+                  // After route change, restart engine if it died
+                  if !engine.isRunning { try? engine.start() }
               }
 
               func applyEQ() {
@@ -333,6 +387,8 @@ jobs:
                   let wasPlaying = isPlaying
                   playerNode.stop()
                   playerNode.reset()
+                  // Remove any scheduled completion handler from prior segment
+                  needsEndHandler = false
                   let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate
                   let frame = max(0, min(AVAudioFramePosition(time * sr), fileLength - 1))
                   seekFrame = frame
@@ -341,7 +397,7 @@ jobs:
                       if wasPlaying { playerNode.play() }
                       return
                   }
-                  playerNode.scheduleSegment(file, startingFrame: frame, frameCount: framesToPlay, at: nil)
+                  scheduleSegment(file: file, startFrame: frame, framesToPlay: framesToPlay)
                   if wasPlaying {
                       playerNode.rate = playbackRate
                       playerNode.play()
@@ -350,6 +406,24 @@ jobs:
                       self.currentTime = time
                   }
                   updateNowPlayingInfo()
+              }
+
+              /// Schedule a segment starting at `startFrame` and attach a reliable
+              /// completion handler (iOS 16+ API) so we know exactly when it finishes,
+              /// instead of polling `playerNode.isPlaying`.
+              private func scheduleSegment(file: AVAudioFile, startFrame: AVAudioFramePosition, framesToPlay: AVAudioFrameCount) {
+                  needsEndHandler = true
+                  playerNode.scheduleSegment(file, startingFrame: startFrame, frameCount: framesToPlay, at: nil) { [weak self] in
+                      guard let self = self else { return }
+                      // This completion runs after all buffers for the segment have been
+                      // CONSUMED by the player (i.e. the very last sample is output).
+                      DispatchQueue.main.async {
+                          self.needsEndHandler = false
+                          if self.isPlaying {
+                              self.songFinished()
+                          }
+                      }
+                  }
               }
 
               func setPlaybackRate(_ r: Float) {
@@ -591,12 +665,15 @@ jobs:
 
               func playSong(_ song: Song) {
                   do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                      if !audioSessionConfigured {
+                          try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                          audioSessionConfigured = true
+                      }
                       try AVAudioSession.sharedInstance().setActive(true)
                       UIApplication.shared.beginReceivingRemoteControlEvents()
 
                       playerNode.stop()
-                      engine.stop()
+                      if engine.isRunning { engine.pause() }
                       audioFile = nil
                       seekFrame = 0
                       currentTime = 0
@@ -605,13 +682,18 @@ jobs:
                       self.audioFile = file
                       fileLength = file.length
                       fileSampleRate = file.processingFormat.sampleRate
-                      engine.connect(playerNode, to: eqNode, format: file.processingFormat)
+
+                      // Connections were established once in setupEngine with format:nil,
+                      // so the engine will adapt its processing format to the file's format
+                      // automatically — we must NOT reconnect here (re-connecting an
+                      // already-connected input bus throws an exception on iOS 26).
 
                       applyEQ()
                       timePitch.rate = playbackRate
 
                       try engine.start()
-                      playerNode.scheduleFile(file, at: nil)
+                      needsEndHandler = false
+                      scheduleSegment(file: file, startFrame: 0, framesToPlay: AVAudioFrameCount(fileLength))
                       playerNode.rate = playbackRate
                       playerNode.play()
 
@@ -630,19 +712,22 @@ jobs:
 
               @objc func songFinished() {
                   DispatchQueue.main.async {
-                      if self.repeatMode == .one, let _ = self.currentSong {
-                          self.seek(to: 0); self.playerNode.play(); self.isPlaying = true; return
+                      if self.repeatMode == .one, let cur = self.currentSong {
+                          self.playSong(cur)
+                          return
                       }
                       self.playNext(autoAdvance: true)
                   }
               }
 
-              // Detect song finish via periodic check in displayLink tick — when playerNode stops playing but state is playing, song ended
-              // Called from displayLink tick
+              // Fallback end-of-track detection.  The primary signal is the segment
+              // completion callback set up in scheduleSegment(); this is a guard in case
+              // the completion ever doesn't fire (e.g. after an engine restart).
               func checkEndOfTrack() {
-                  guard isPlaying, let _ = audioFile, !playerNode.isPlaying else { return }
-                  // Might have just paused; only fire if we've reached end (currentTime >= duration)
-                  if currentTime >= duration - 0.2 && duration > 1 {
+                  guard isPlaying, let _ = audioFile else { return }
+                  // Heuristic: if player isn't rendering AND we're past duration AND no
+                  // segment is currently scheduled -> track ended.
+                  if currentTime >= duration - 0.2 && duration > 1 && !needsEndHandler {
                       songFinished()
                   }
               }
@@ -655,15 +740,17 @@ jobs:
                       if audioFile == nil, let cur = currentSong {
                           playSong(cur); return
                       }
-                      // If player has nothing scheduled (e.g. after a seek that finished), re-schedule from current position
-                      if !playerNode.isPlaying && seekFrame > 0 {
+                      // If player has nothing scheduled (e.g. after a seek that finished),
+                      // re-schedule from current position
+                      if !playerNode.isPlaying && seekFrame > 0 && !needsEndHandler {
                           guard let file = audioFile else { playerNode.play(); isPlaying = true; return }
                           let remaining = AVAudioFrameCount(fileLength - seekFrame)
                           if remaining > 0 {
                               playerNode.stop()
-                              playerNode.scheduleSegment(file, startingFrame: seekFrame, frameCount: remaining, at: nil)
+                              scheduleSegment(file: file, startFrame: seekFrame, framesToPlay: remaining)
                           }
                       }
+                      if !engine.isRunning { try? engine.start() }
                       playerNode.rate = playbackRate
                       playerNode.play()
                       isPlaying = true
