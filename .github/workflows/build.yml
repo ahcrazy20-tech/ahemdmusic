@@ -228,6 +228,7 @@ jobs:
               private var fileLength: AVAudioFramePosition = 0
               private var fileSampleRate: Double = 44100
               private var audioFile: AVAudioFile?
+              private var seekFrame: AVAudioFramePosition = 0
               private var displayLink: CADisplayLink?
 
               var sleepTimer: Timer?
@@ -303,9 +304,10 @@ jobs:
               @objc private func tick() {
                   guard let node = playerNode, node.isPlaying, let file = audioFile else { return }
                   guard let lrt = node.lastRenderTime, let t = node.playerTime(forNodeTime: lrt) else { return }
-                  let sec = Double(t.sampleTime) / (file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate)
+                  let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate
+                  let sec = (Double(t.sampleTime) / sr) + (Double(seekFrame) / sr)
                   DispatchQueue.main.async {
-                      self.currentTime = max(0, sec)
+                      self.currentTime = max(0, min(sec, self.duration))
                       self.duration = Double(self.fileLength) / self.fileSampleRate
                   }
               }
@@ -330,14 +332,22 @@ jobs:
                   guard let file = audioFile, playerNode != nil else { return }
                   let wasPlaying = isPlaying
                   playerNode.stop()
-                  let sr = file.processingFormat.sampleRate
-                  let frame = AVAudioFramePosition(time * sr)
-                  let framesToPlay = fileLength - frame
-                  guard framesToPlay > 0 else { if wasPlaying { playerNode.play() }; return }
-                  playerNode.scheduleSegment(file, startingFrame: max(0,frame), frameCount: AVAudioFrameCount(framesToPlay), at: nil)
+                  playerNode.reset()
+                  let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate
+                  let frame = max(0, min(AVAudioFramePosition(time * sr), fileLength - 1))
+                  seekFrame = frame
+                  let framesToPlay = AVAudioFrameCount(fileLength - frame)
+                  guard framesToPlay > 0 else {
+                      if wasPlaying { playerNode.play() }
+                      return
+                  }
+                  playerNode.scheduleSegment(file, startingFrame: frame, frameCount: framesToPlay, at: nil)
                   if wasPlaying {
                       playerNode.rate = playbackRate
                       playerNode.play()
+                  }
+                  DispatchQueue.main.async {
+                      self.currentTime = time
                   }
                   updateNowPlayingInfo()
               }
@@ -588,6 +598,8 @@ jobs:
                       playerNode.stop()
                       engine.stop()
                       audioFile = nil
+                      seekFrame = 0
+                      currentTime = 0
 
                       let file = try AVAudioFile(forReading: song.url)
                       self.audioFile = file
@@ -640,9 +652,17 @@ jobs:
                       playerNode.pause()
                       isPlaying = false
                   } else {
-                      if playerNode.isPlaying { playerNode.pause() }
                       if audioFile == nil, let cur = currentSong {
                           playSong(cur); return
+                      }
+                      // If player has nothing scheduled (e.g. after a seek that finished), re-schedule from current position
+                      if !playerNode.isPlaying && seekFrame > 0 {
+                          guard let file = audioFile else { playerNode.play(); isPlaying = true; return }
+                          let remaining = AVAudioFrameCount(fileLength - seekFrame)
+                          if remaining > 0 {
+                              playerNode.stop()
+                              playerNode.scheduleSegment(file, startingFrame: seekFrame, frameCount: remaining, at: nil)
+                          }
                       }
                       playerNode.rate = playbackRate
                       playerNode.play()
@@ -2551,8 +2571,8 @@ jobs:
               override private init() {
                   super.init()
                   let config = URLSessionConfiguration.default
-                  config.timeoutIntervalForRequest = 45
-                  config.timeoutIntervalForResource = 3600     // 1 hour for long mixes / slow connections
+                  config.timeoutIntervalForRequest = 300      // 5 minutes between bytes (for slow mobile)
+                  config.timeoutIntervalForResource = 7200    // 2 hours for long mixes
                   config.httpMaximumConnectionsPerHost = 6
                   session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
               }
