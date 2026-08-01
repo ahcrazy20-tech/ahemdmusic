@@ -3805,7 +3805,7 @@ jobs:
                       let pt = URLSession.shared.dataTask(with: probe) { [weak self] pdata, presp, perr in
                           guard let self else { return }
                           if task.isCancelled { return }
-                          if let e = perr {
+                          if perr != nil {
                               // Fallback to plain download with Range: bytes=0-
                               self.plainDownload(task: task, url: url, finalName: finalName,
                                                  referer: referer, backendLabel: backendLabel, addRange: true)
@@ -3885,7 +3885,7 @@ jobs:
                               case .success(let tmpURL):
                                   self.handleChunkedCompletion(task: task, tmpURL: tmpURL,
                                                                finalName: finalName)
-                              case .failure(let err):
+                              case .failure(_):
                                   // Fall back to plain download if chunked failed (e.g.
                                   // server stops honoring ranges mid-way).
                                   self.plainDownload(task: task, url: url, finalName: finalName,
@@ -3910,7 +3910,7 @@ jobs:
                       return
                   }
                   let head: Data = {
-                      guard let fh = try? FileHandle(forReadingFrom: tmpURL.path) else { return Data() }
+                      guard let fh = try? FileHandle(forReadingFrom: tmpURL) else { return Data() }
                       defer { try? fh.close() }
                       return fh.readData(ofLength: 12)
                   }()
