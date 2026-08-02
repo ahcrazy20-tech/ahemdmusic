@@ -119,10 +119,10 @@ jobs:
                   return true
               }
               func applicationDidEnterBackground(_ application: UIApplication) {
-                  MusicManager.shared.saveResumePosition()
+                  MusicManager.shared.appWillBackground()
               }
               func applicationWillTerminate(_ application: UIApplication) {
-                  MusicManager.shared.saveResumePosition()
+                  MusicManager.shared.appWillBackground()
               }
           }
 
@@ -137,7 +137,6 @@ jobs:
                           .onAppear {
                               guard !didResume else { return }
                               didResume = true
-                              // Auto-resume last song (where the user left off) after a short delay
                               DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                                   if UserDefaults.standard.bool(forKey: "asmusic_autoresume") {
                                       MusicManager.shared.resumeLastSongIfAvailable()
@@ -162,7 +161,7 @@ jobs:
               var url: URL
               var artist: String = "AS Music"
               var artworkURL: String? = nil
-              var sourceVid: String? = nil  // YouTube video id this was downloaded from (for dedup)
+              var sourceVid: String? = nil
           }
 
           struct Playlist: Identifiable, Codable {
@@ -182,13 +181,12 @@ jobs:
               case rock = "Rock"
               var id: String { rawValue }
 
-              // 10-band EQ gains (dB) for bands 32,64,125,250,500,1k,2k,4k,8k,16k Hz
               var gains: [Float] {
                   switch self {
                   case .flat:      return [0,0,0,0,0,0,0,0,0,0]
                   case .bassBoost: return [6,7,6,4,2,0,0,0,0,0]
                   case .vocal:     return [-2,-2,-1,1,3,4,4,3,1,0]
-                  case .arabic:    return [3,3,2,1,0,1,2,3,4,3]   // Oud/Qanun highs + warmth
+                  case .arabic:    return [3,3,2,1,0,1,2,3,4,3]
                   case .treble:    return [0,0,0,0,0,1,3,5,6,6]
                   case .rock:      return [5,4,3,1,-1,1,3,4,5,5]
                   }
@@ -211,6 +209,10 @@ jobs:
               ]
           }
 
+          /// A serial queue we use for all player-state mutations so play/pause/seek
+          /// never interleave (the #1 cause of "skip / seek broke playback" bugs).
+          private let playerQueue = DispatchQueue(label: "asMusic.player")
+
           class MusicManager: NSObject, ObservableObject {
               static let shared = MusicManager()
 
@@ -218,13 +220,15 @@ jobs:
               @Published var playlists: [Playlist] = []
               @Published var currentSong: Song?
               @Published var isPlaying: Bool = false
+              @Published var isSeeking: Bool = false           // true while slider drag is in progress
+              @Published var seekPreviewTime: TimeInterval = 0 // shown during drag
               @Published var isShuffle: Bool = false
               @Published var repeatMode: RepeatMode = .off
               @Published var playbackRate: Float = 1.0
               @Published var sleepTimerMinutes: Int = 0
               @Published var currentTime: TimeInterval = 0.0
               @Published var duration: TimeInterval = 1.0
-              @Published var upNextQueue: [Song] = [] // play-next/play-later queue
+              @Published var upNextQueue: [Song] = []
               @Published var smartRadioMode: Bool = false
               @Published var eqPreset: EQPreset = .flat {
                   didSet { applyEQ(); UserDefaults.standard.set(eqPreset.rawValue, forKey: "asmusic_eq") }
@@ -235,31 +239,40 @@ jobs:
                       objectWillChange.send()
                   }
               }
-              @Published var levels: (Float,Float) = (0,0)  // current audio power (left,right) 0..1
-              @Published var preampDB: Float = 0.0 {        // user loudness boost in dB (-12 ... +9)
+              @Published var levels: (Float,Float) = (0,0)
+              @Published var preampDB: Float = 0.0 {
                   didSet { applyGain(); UserDefaults.standard.set(preampDB, forKey: "asmusic_preamp") }
               }
-              @Published var spatialEnhance: Bool = false { // subtle hall reverb for headphones/car
+              @Published var spatialEnhance: Bool = false {
                   didSet { applySpatial(); UserDefaults.standard.set(spatialEnhance, forKey: "asmusic_spatial") }
               }
 
-              // AVAudioEngine signal chain:
-              //   playerNode -> eqNode -> preampMixer -> reverb -> timePitch -> mainMixerNode
+              // Signal chain: playerNode -> eqNode -> preampMixer -> reverb -> timePitch -> mainMixerNode
               private var engine: AVAudioEngine!
               private var playerNode: AVAudioPlayerNode!
               private var eqNode: AVAudioUnitEQ!
               private var preampMixer: AVAudioMixerNode!
               private var reverb: AVAudioUnitReverb!
               private var timePitch: AVAudioUnitTimePitch!
+
+              private var audioFile: AVAudioFile?
               private var fileLength: AVAudioFramePosition = 0
               private var fileSampleRate: Double = 44100
-              private var audioFile: AVAudioFile?
+
+              /// The frame position the playerNode is scheduled FROM (the start of the
+              /// currently-scheduled segment). We compute the live playback position as
+              /// seekFrame + playerTime.sampleTime for accuracy even at non-1.0 rates.
               private var seekFrame: AVAudioFramePosition = 0
+              private var scheduledSegmentEnd: AVAudioFramePosition = 0
+              private var isScheduled = false  // true when playerNode has a buffer/segment queued
+              private var scheduleGeneration: Int = 0 // monotonically increasing; stale callbacks are ignored
+
               private var displayLink: CADisplayLink?
-              private var needsEndHandler = false
               private var audioSessionConfigured = false
               private var lastSongId: UUID? = nil
               private var lastSongTime: TimeInterval = 0
+              private var engineIsStarting = false
+              private var shouldResumePlaybackAfterInterruption = false
 
               var sleepTimer: Timer?
               var progressTimer: Timer?
@@ -290,6 +303,8 @@ jobs:
                   NotificationCenter.default.removeObserver(self)
               }
 
+              // MARK: - Engine
+
               func setupEngine() {
                   engine = AVAudioEngine()
                   playerNode = AVAudioPlayerNode()
@@ -314,9 +329,7 @@ jobs:
                   engine.attach(preampMixer)
                   engine.attach(reverb)
                   engine.attach(timePitch)
-                  // Connect once with format:nil so the engine auto-negotiates stream
-                  // format at play time (prevents "node already connected" exception
-                  // when playing multiple songs with different formats on iOS 26).
+                  // Connect once with format:nil; engine auto-negotiates per-file format.
                   engine.connect(playerNode, to: eqNode, format: nil)
                   engine.connect(eqNode, to: preampMixer, format: nil)
                   engine.connect(preampMixer, to: reverb, format: nil)
@@ -339,6 +352,7 @@ jobs:
                   }
                   applyGain()
                   applySpatial()
+                  isScheduled = false
               }
 
               private func applyGain() {
@@ -347,8 +361,6 @@ jobs:
               }
 
               private func applySpatial() {
-                  // 25% wet = subtle room/hall; enough to widen the stereo image without
-                  // washing out the mix (important for Arabic vocal-centric tracks).
                   reverb?.wetDryMix = spatialEnhance ? 25 : 0
               }
 
@@ -359,16 +371,19 @@ jobs:
                   }
               }
 
+              // MARK: - Interruptions / route changes
+
               @objc private func handleInterruption(_ n: Notification) {
                   guard let type = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt else { return }
                   if type == AVAudioSession.InterruptionType.began.rawValue {
+                      shouldResumePlaybackAfterInterruption = isPlaying
                       playerNode.pause()
                       isPlaying = false
                   } else if type == AVAudioSession.InterruptionType.ended.rawValue {
                       guard let opts = n.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
-                      if opts & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
+                      if opts & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 || shouldResumePlaybackAfterInterruption {
                           try? AVAudioSession.sharedInstance().setActive(true)
-                          if !engine.isRunning { try? engine.start() }
+                          ensureEngineRunning()
                           playerNode.play()
                           isPlaying = true
                       }
@@ -379,17 +394,37 @@ jobs:
               @objc private func handleRouteChange(_ n: Notification) {
                   guard let reason = n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt else { return }
                   if reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue {
-                      pausePlayback()
+                      playerNode.pause()
                       isPlaying = false
                       updateNowPlayingInfo()
                   }
-                  if !engine.isRunning { try? engine.start() }
+                  ensureEngineRunning()
               }
 
               @objc private func handleMediaReset(_ n: Notification) {
-                  // On media-services-reset (rare), rebuild the engine.
-                  setupEngine()
+                  playerQueue.async { [weak self] in
+                      guard let self = self else { return }
+                      // Rebuild the engine and re-schedule the current file if possible
+                      self.playerNode.stop()
+                      self.setupEngine()
+                      if let f = self.audioFile {
+                          let frames = AVAudioFrameCount(self.fileLength - self.seekFrame)
+                          if frames > 0 {
+                              self.scheduleSegmentOnPlayer(file: f, startFrame: self.seekFrame, framesToPlay: frames)
+                          }
+                      }
+                      if self.isPlaying {
+                          self.ensureEngineRunning()
+                          self.playerNode.play()
+                      }
+                  }
               }
+
+              private func ensureEngineRunning() {
+                  if !engine.isRunning { try? engine.start() }
+              }
+
+              // MARK: - Display tick (time / levels / end detection)
 
               private func startLevelMeter() {
                   displayLink?.invalidate()
@@ -399,18 +434,25 @@ jobs:
               }
 
               @objc private func tick() {
+                  // Only update displayed time when the user isn't dragging the slider,
+                  // otherwise our updates fight with the user's finger.
+                  guard !isSeeking else { return }
                   guard let node = playerNode, let file = audioFile else { return }
-                  guard let lrt = node.lastRenderTime, let t = node.playerTime(forNodeTime: lrt) else { return }
                   let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate
-                  let sec = (Double(t.sampleTime) / sr) + (Double(seekFrame) / sr)
+                  var sec: TimeInterval = Double(seekFrame) / sr
+                  if node.isPlaying, let lrt = node.lastRenderTime, let pt = node.playerTime(forNodeTime: lrt) {
+                      // playerTime.sampleTime advances at rate * sampleRate (for timePitch).
+                      let effectiveRate = playbackRate > 0 ? playbackRate : 1.0
+                      sec = (Double(seekFrame) + Double(pt.sampleTime) / Double(effectiveRate)) / sr
+                  }
                   DispatchQueue.main.async {
-                      self.currentTime = max(0, min(sec, self.duration))
-                      self.duration = Double(self.fileLength) / self.fileSampleRate
+                      let d = Double(self.fileLength) / self.fileSampleRate
+                      self.duration = d
+                      self.currentTime = max(0, min(sec, d))
                   }
               }
 
               private func updatePowerLevel(buffer: AVAudioPCMBuffer) {
-                  // Compute RMS from ALL channels (stereo-aware). Fall back to ch0 for mono.
                   let chCount = Int(buffer.format.channelCount)
                   guard chCount > 0, let data = buffer.floatChannelData else { return }
                   let frames = Int(buffer.frameLength)
@@ -423,61 +465,142 @@ jobs:
                   let framesF = Float(frames)
                   let rmsL = framesF > 0 ? sqrt(sumSqL / framesF) : 0
                   let rmsR = (chCount >= 2 && framesF > 0) ? sqrt(sumSqR / framesF) : rmsL
-                  // Convert RMS to normalized 0..1 using log scale. -40 dBFS -> 0, 0 dBFS -> 1.
                   let dbL = rmsL > 0 ? 20 * log10(rmsL) : -60
                   let dbR = rmsR > 0 ? 20 * log10(rmsR) : -60
                   let normL = max(0, min(1, (dbL + 50) / 50))
                   let normR = max(0, min(1, (dbR + 50) / 50))
-                  // Smooth towards target (simple one-pole LPF) for a nicer visualizer.
                   DispatchQueue.main.async {
                       self.levels.0 = self.levels.0 * 0.6 + normL * 0.4
                       self.levels.1 = self.levels.1 * 0.6 + normR * 0.4
                   }
               }
 
-              func seek(to time: TimeInterval) {
-                  guard let file = audioFile, playerNode != nil else { return }
-                  let wasPlaying = isPlaying
+              // MARK: - Playback primitives
+
+              /// Schedule a segment of `audioFile` on playerNode. CALL FROM playerQueue.
+              /// Clears any previously scheduled buffers first via stop().
+              private func scheduleSegmentOnPlayer(file: AVAudioFile, startFrame: AVAudioFramePosition, framesToPlay: AVAudioFrameCount) {
                   playerNode.stop()
-                  playerNode.reset()
-                  needsEndHandler = false
+                  scheduleGeneration &+= 1
+                  let gen = scheduleGeneration
+                  seekFrame = startFrame
+                  scheduledSegmentEnd = startFrame + AVAudioFramePosition(framesToPlay)
+                  playerNode.scheduleSegment(file, startingFrame: startFrame, frameCount: framesToPlay, at: nil) { [weak self] in
+                      guard let self = self else { return }
+                      playerQueue.async {
+                          // If a newer schedule (seek/new song/rate change) happened
+                          // after this callback was enqueued, ignore it — otherwise
+                          // a stale completion fires songFinished mid-playback.
+                          if self.scheduleGeneration != gen { return }
+                          self.isScheduled = false
+                          if self.isPlaying && self.audioFile != nil
+                              && self.seekFrame + AVAudioFramePosition(framesToPlay) >= self.fileLength - 1 {
+                              DispatchQueue.main.async { self.songFinished() }
+                          }
+                      }
+                  }
+                  isScheduled = true
+              }
+
+              private func playCurrent(resumeFrom seekTime: TimeInterval? = nil) {
+                  guard let file = audioFile else { return }
                   let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate
-                  let frame = max(0, min(AVAudioFramePosition(time * sr), fileLength - 1))
-                  seekFrame = frame
-                  let framesToPlay = AVAudioFrameCount(fileLength - frame)
-                  guard framesToPlay > 0 else {
-                      if wasPlaying { playerNode.play() }
-                      return
+                  let targetFrame: AVAudioFramePosition
+                  if let t = seekTime {
+                      targetFrame = max(0, min(AVAudioFramePosition(t * sr), fileLength - 1))
+                  } else {
+                      targetFrame = 0
                   }
-                  scheduleSegment(file: file, startFrame: frame, framesToPlay: framesToPlay)
-                  if wasPlaying {
-                      playerNode.rate = playbackRate
-                      playerNode.play()
+                  let remaining = AVAudioFrameCount(max(0, fileLength - targetFrame))
+                  guard remaining > 0 else { return }
+                  scheduleSegmentOnPlayer(file: file, startFrame: targetFrame, framesToPlay: remaining)
+                  timePitch.rate = playbackRate
+                  ensureEngineRunning()
+                  playerNode.rate = playbackRate
+                  playerNode.play()
+                  isPlaying = true
+              }
+
+              // MARK: - Public controls
+
+              func seek(to time: TimeInterval) {
+                  beginSeek(to: time)
+                  endSeek(to: time)
+              }
+
+              /// Called when the user starts dragging the slider (pauses audio if playing
+              /// so preview scrubbing is glitch-free).
+              func beginSeek(to time: TimeInterval? = nil) {
+                  isSeeking = true
+                  if let t = time { seekPreviewTime = t }
+                  // Do NOT stop playback while scrubbing on iOS 16+; we only pause live
+                  // time updates. Pausing/stopping mid-drag causes AVAudioEngine stalls.
+              }
+
+              /// Called when the user releases the slider: actually re-schedule from the
+              /// requested time.
+              func endSeek(to time: TimeInterval) {
+                  isSeeking = false
+                  let t = max(0, min(time, duration))
+                  seekPreviewTime = t
+                  playerQueue.async { [weak self] in
+                      guard let self = self, let file = self.audioFile else { return }
+                      let wasPlaying = self.isPlaying
+                      // Stop current playback and clear scheduled state before rescheduling
+                      self.playerNode.stop()
+                      self.isScheduled = false
+                      let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : self.fileSampleRate
+                      let frame = max(0, min(AVAudioFramePosition(t * sr), self.fileLength - 1))
+                      self.seekFrame = frame
+                      let remaining = AVAudioFrameCount(max(0, self.fileLength - frame))
+                      guard remaining > 0 else {
+                          DispatchQueue.main.async {
+                              self.currentTime = t
+                              if wasPlaying { self.songFinished() }
+                          }
+                          return
+                      }
+                      self.scheduleSegmentOnPlayer(file: file, startFrame: frame, framesToPlay: remaining)
+                      self.timePitch.rate = self.playbackRate
+                      self.ensureEngineRunning()
+                      self.playerNode.rate = self.playbackRate
+                      if wasPlaying { self.playerNode.play() }
+                      else { self.isPlaying = false }
+                      DispatchQueue.main.async { self.currentTime = t }
                   }
-                  DispatchQueue.main.async { self.currentTime = time }
                   updateNowPlayingInfo()
               }
 
-              private func scheduleSegment(file: AVAudioFile, startFrame: AVAudioFramePosition, framesToPlay: AVAudioFrameCount) {
-                  needsEndHandler = true
-                  playerNode.scheduleSegment(file, startingFrame: startFrame, frameCount: framesToPlay, at: nil) { [weak self] in
+              func setPlaybackRate(_ r: Float) {
+                  let clamped = max(0.5, min(2.0, r))
+                  playbackRate = clamped
+                  UserDefaults.standard.set(clamped, forKey: "asmusic_rate")
+                  // Changing rate on a playing AVAudioPlayerNode requires rescheduling on
+                  // iOS 26 to avoid distortion/crash; do it cleanly.
+                  playerQueue.async { [weak self] in
                       guard let self = self else { return }
-                      DispatchQueue.main.async {
-                          self.needsEndHandler = false
-                          if self.isPlaying { self.songFinished() }
+                      self.timePitch.rate = clamped
+                      if self.isPlaying, let file = self.audioFile {
+                          let wasPos = self.currentTime
+                          self.playerNode.stop()
+                          self.isScheduled = false
+                          let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : self.fileSampleRate
+                          let frame = max(0, min(AVAudioFramePosition(wasPos * sr), self.fileLength - 1))
+                          self.seekFrame = frame
+                          let remaining = AVAudioFrameCount(max(0, self.fileLength - frame))
+                          if remaining > 0 {
+                              self.scheduleSegmentOnPlayer(file: file, startFrame: frame, framesToPlay: remaining)
+                              self.playerNode.rate = clamped
+                              self.ensureEngineRunning()
+                              self.playerNode.play()
+                          }
+                      } else {
+                          self.playerNode.rate = clamped
                       }
                   }
               }
 
-              func setPlaybackRate(_ r: Float) {
-                  playbackRate = r
-                  UserDefaults.standard.set(r, forKey: "asmusic_rate")
-                  timePitch.rate = r
-                  if playerNode.isPlaying { playerNode.rate = r }
-              }
-
               func cyclePlaybackRate() {
-                  // Tap through 0.75x -> 1.0x -> 1.25x -> 1.5x -> 1.0x
                   let steps: [Float] = [0.75, 1.0, 1.25, 1.5]
                   if let idx = steps.firstIndex(of: playbackRate) {
                       setPlaybackRate(steps[(idx + 1) % steps.count])
@@ -491,6 +614,8 @@ jobs:
                   let m = Int(t) / 60, s = Int(t) % 60
                   return String(format: "%d:%02d", m, s)
               }
+
+              // MARK: - Library / playlists / metadata
 
               func loadSongs() {
                   let meta = Self.loadSongMeta()
@@ -521,9 +646,16 @@ jobs:
 
               func deleteSong(_ s: Song) {
                   try? fileManager.removeItem(at: s.url)
-                  // Remove sidecar artwork too
                   try? fileManager.removeItem(at: s.url.deletingPathExtension().appendingPathExtension("jpg"))
                   upNextQueue.removeAll { $0.id == s.id }
+                  if currentSong?.id == s.id {
+                      playerQueue.async { [weak self] in
+                          self?.playerNode.stop()
+                          self?.isScheduled = false
+                          self?.audioFile = nil
+                      }
+                      currentSong = nil; isPlaying = false
+                  }
                   loadSongs()
               }
 
@@ -539,12 +671,9 @@ jobs:
                   }
                   do {
                       try fileManager.moveItem(at: song.url, to: newUrl)
-                      // Move sidecar artwork if present
                       let oldSide = song.url.deletingPathExtension().appendingPathExtension("jpg")
                       let newSide = newUrl.deletingPathExtension().appendingPathExtension("jpg")
-                      if fileManager.fileExists(atPath: oldSide.path) {
-                          try? fileManager.moveItem(at: oldSide, to: newSide)
-                      }
+                      if fileManager.fileExists(atPath: oldSide.path) { try? fileManager.moveItem(at: oldSide, to: newSide) }
                       loadSongs()
                       if let idx = songs.firstIndex(where: { $0.id == song.id }) {
                           songs[idx].url = newUrl
@@ -630,14 +759,21 @@ jobs:
                   }
               }
 
-              private func saveResumePosition() {
+              func saveResumePosition() {
                   if let s = currentSong {
                       UserDefaults.standard.set(s.id.uuidString, forKey: "asmusic_last_song")
                       UserDefaults.standard.set(currentTime, forKey: "asmusic_last_time")
                   }
               }
 
-              // ---- Artwork cache ---------------------------------------------------
+              /// Call this when the app is backgrounded or about to terminate to persist
+              /// the current playback position. Public so AppDelegate can invoke it.
+              func appWillBackground() {
+                  saveResumePosition()
+              }
+
+              // MARK: - Artwork
+
               func artworkImage(for song: Song, size: CGFloat = 200, completion: @escaping (UIImage?) -> Void) {
                   let sidecar = song.url.deletingPathExtension().appendingPathExtension("jpg")
                   if let img = UIImage(contentsOfFile: sidecar.path) { completion(img); return }
@@ -651,13 +787,8 @@ jobs:
                   }.resume()
               }
 
-              func isDuplicateByVID(_ vid: String) -> Bool {
-                  return songs.contains { $0.sourceVid == vid }
-              }
-
-              func songByVID(_ vid: String) -> Song? {
-                  songs.first { $0.sourceVid == vid }
-              }
+              func isDuplicateByVID(_ vid: String) -> Bool { songs.contains { $0.sourceVid == vid } }
+              func songByVID(_ vid: String) -> Song? { songs.first { $0.sourceVid == vid } }
 
               static private let metaURL: URL = {
                   FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -671,9 +802,7 @@ jobs:
                   return out
               }
               func saveSongMeta() {
-                  if let d = try? JSONEncoder().encode(songs) {
-                      try? d.write(to: Self.metaURL, options: .atomic)
-                  }
+                  if let d = try? JSONEncoder().encode(songs) { try? d.write(to: Self.metaURL, options: .atomic) }
               }
               func registerDownloadedSong(title: String, artist: String, url: URL, sourceVid: String?, artworkURL: String?) {
                   DispatchQueue.main.async {
@@ -696,7 +825,8 @@ jobs:
                   }
               }
 
-              // ---- Up Next queue ---------------------------------------------------
+              // MARK: - Queue
+
               func playNext(_ song: Song) {
                   if let cur = currentSong, cur.id == song.id { return }
                   upNextQueue.insert(song, at: 0)
@@ -704,9 +834,7 @@ jobs:
               }
               func playLater(_ song: Song) {
                   if let cur = currentSong, cur.id == song.id { return }
-                  if !upNextQueue.contains(where: { $0.id == song.id }) {
-                      upNextQueue.append(song)
-                  }
+                  if !upNextQueue.contains(where: { $0.id == song.id }) { upNextQueue.append(song) }
                   objectWillChange.send()
               }
               func toggleRepeat() {
@@ -735,70 +863,65 @@ jobs:
               }
 
               func playSong(_ song: Song) {
-                  do {
-                      if !audioSessionConfigured {
-                          try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-                          audioSessionConfigured = true
-                      }
-                      try AVAudioSession.sharedInstance().setActive(true)
-                      UIApplication.shared.beginReceivingRemoteControlEvents()
-
-                      playerNode.stop()
-                      playerNode.reset()
-                      needsEndHandler = false
-                      if engine.isRunning { engine.pause() }
-                      audioFile = nil
-                      seekFrame = 0
-                      currentTime = 0
-
-                      let file = try AVAudioFile(forReading: song.url)
-                      self.audioFile = file
-                      fileLength = file.length
-                      fileSampleRate = file.processingFormat.sampleRate
-
-                      applyEQ()
-                      applyGain()
-                      applySpatial()
-                      timePitch.rate = playbackRate
-
-                      try engine.start()
-                      needsEndHandler = true
-                      playerNode.scheduleFile(file, at: nil) { [weak self] in
-                          guard let self = self else { return }
-                          DispatchQueue.main.async {
-                              self.needsEndHandler = false
-                              if self.isPlaying { self.songFinished() }
+                  // Always run on playerQueue to serialize with seeks/rate changes.
+                  playerQueue.async { [weak self] in
+                      guard let self = self else { return }
+                      do {
+                          if !self.audioSessionConfigured {
+                              try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                              self.audioSessionConfigured = true
                           }
-                      }
-                      playerNode.rate = playbackRate
-                      playerNode.play()
+                          try AVAudioSession.sharedInstance().setActive(true)
+                          DispatchQueue.main.async { UIApplication.shared.beginReceivingRemoteControlEvents() }
 
-                      didAutoSearchForRadio = false
-                      currentSong = song; isPlaying = true
-                      lastSongId = song.id; lastSongTime = 0
-                      updateNowPlayingInfo()
-                      UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                  } catch {
-                      print("playSong error:", error)
+                          self.playerNode.stop()
+                          self.isScheduled = false
+                          self.audioFile = nil
+                          self.seekFrame = 0
+
+                          let file = try AVAudioFile(forReading: song.url)
+                          self.audioFile = file
+                          self.fileLength = file.length
+                          self.fileSampleRate = file.processingFormat.sampleRate
+
+                          self.applyEQ(); self.applyGain(); self.applySpatial()
+
+                          DispatchQueue.main.async {
+                              self.duration = Double(self.fileLength) / self.fileSampleRate
+                              self.currentTime = 0
+                              self.currentSong = song
+                              self.isPlaying = true
+                              self.lastSongId = song.id
+                              self.lastSongTime = 0
+                              self.updateNowPlayingInfo()
+                              UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                          }
+
+                          self.playCurrent(resumeFrom: nil)
+                          self.didAutoSearchForRadio = false
+                      } catch {
+                          print("playSong error:", error)
+                          DispatchQueue.main.async { self.isPlaying = false }
+                      }
                   }
               }
 
-              /// Resume the last-played song (called once on app launch if user wants it).
               func resumeLastSongIfAvailable() {
-                  guard let id = lastSongId,
-                        let s = songs.first(where: { $0.id == id }) else { return }
+                  guard let id = lastSongId, let s = songs.first(where: { $0.id == id }) else { return }
                   playSong(s)
                   if lastSongTime > 2 {
-                      // Defer seek slightly so scheduling completes
-                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                           self?.seek(to: self?.lastSongTime ?? 0)
                       }
                   }
               }
 
-              private func pausePlayback() {
-                  playerNode.pause()
-                  saveResumePosition()
+              func pausePlayback() {
+                  playerQueue.async { [weak self] in
+                      guard let self = self else { return }
+                      self.playerNode.pause()
+                      DispatchQueue.main.async { self.isPlaying = false; self.saveResumePosition() }
+                  }
               }
 
               @objc func songFinished() {
@@ -811,8 +934,10 @@ jobs:
               }
 
               func checkEndOfTrack() {
-                  guard isPlaying, let _ = audioFile else { return }
-                  if currentTime >= duration - 0.2 && duration > 1 && !needsEndHandler {
+                  // End-of-track is now driven by the scheduleSegment completion handler.
+                  // This remains as a safety net for the rare case the completion doesn't fire.
+                  guard isPlaying, audioFile != nil, duration > 1 else { return }
+                  if currentTime >= duration - 0.15 && !isScheduled {
                       songFinished()
                   }
               }
@@ -820,23 +945,25 @@ jobs:
               func togglePlayPause() {
                   if isPlaying {
                       pausePlayback()
-                      isPlaying = false
                   } else {
                       if audioFile == nil, let cur = currentSong {
                           playSong(cur); return
                       }
-                      if !playerNode.isPlaying && seekFrame > 0 && !needsEndHandler {
-                          guard let file = audioFile else { playerNode.play(); isPlaying = true; return }
-                          let remaining = AVAudioFrameCount(fileLength - seekFrame)
-                          if remaining > 0 {
-                              playerNode.stop()
-                              scheduleSegment(file: file, startFrame: seekFrame, framesToPlay: remaining)
+                      playerQueue.async { [weak self] in
+                          guard let self = self else { return }
+                          if !self.isScheduled, let file = self.audioFile {
+                              // Nothing scheduled (e.g. after a stop/seek failure) — reschedule
+                              let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : self.fileSampleRate
+                              let f = max(0, min(AVAudioFramePosition(self.currentTime * sr), self.fileLength - 1))
+                              let rem = AVAudioFrameCount(max(0, self.fileLength - f))
+                              if rem > 0 { self.scheduleSegmentOnPlayer(file: file, startFrame: f, framesToPlay: rem) }
                           }
+                          self.timePitch.rate = self.playbackRate
+                          self.ensureEngineRunning()
+                          self.playerNode.rate = self.playbackRate
+                          self.playerNode.play()
+                          DispatchQueue.main.async { self.isPlaying = true }
                       }
-                      if !engine.isRunning { try? engine.start() }
-                      playerNode.rate = playbackRate
-                      playerNode.play()
-                      isPlaying = true
                   }
                   updateNowPlayingInfo()
               }
@@ -869,13 +996,10 @@ jobs:
                       if let first = songs.first { playSong(first) }
                       return
                   }
-                  if i + 1 < songs.count {
-                      playSong(songs[i+1])
-                  } else if repeatMode == .all {
-                      if let first = songs.first { playSong(first) }
-                  } else if autoAdvance {
-                      isPlaying = false; saveResumePosition()
-                  }
+                  if i + 1 < songs.count { playSong(songs[i+1]) }
+                  else if repeatMode == .all, let first = songs.first { playSong(first) }
+                  else if autoAdvance { isPlaying = false; saveResumePosition() }
+
                   if smartRadioMode && !didAutoSearchForRadio {
                       didAutoSearchForRadio = true
                       let artist = currentSong?.artist ?? ""
@@ -893,11 +1017,8 @@ jobs:
                   if currentTime > 3 { seek(to: 0); return }
                   guard !songs.isEmpty else { return }
                   if isShuffle { if let s = songs.randomElement() { playSong(s) }; return }
-                  if let c = currentSong, let i = songs.firstIndex(of: c), i > 0 {
-                      playSong(songs[i-1])
-                  } else if repeatMode == .all, let last = songs.last {
-                      playSong(last)
-                  }
+                  if let c = currentSong, let i = songs.firstIndex(of: c), i > 0 { playSong(songs[i-1]) }
+                  else if repeatMode == .all, let last = songs.last { playSong(last) }
               }
 
               func setupRemoteCommandCenter() {
@@ -1581,10 +1702,19 @@ jobs:
                           }.padding(.horizontal, 30)
 
                           VStack(spacing: 5) {
-                              Slider(value: Binding(get: { musicManager.currentTime }, set: { musicManager.currentTime = $0 }),
+                              Slider(value: Binding(
+                                  get: { musicManager.isSeeking ? musicManager.seekPreviewTime : musicManager.currentTime },
+                                  set: { v in
+                                      if musicManager.isSeeking { musicManager.seekPreviewTime = v }
+                                      else { musicManager.currentTime = v }
+                                  }),
                                      in: 0...(musicManager.duration > 0 && !musicManager.duration.isNaN ? musicManager.duration : 1),
                                      onEditingChanged: { editing in
-                                         if !editing { musicManager.seek(to: musicManager.currentTime) }
+                                         if editing {
+                                             musicManager.beginSeek(to: musicManager.currentTime)
+                                         } else {
+                                             musicManager.endSeek(to: musicManager.seekPreviewTime)
+                                         }
                                      }).accentColor(.white)
                               HStack {
                                   Text(musicManager.formatTime(musicManager.currentTime)).font(.caption).foregroundColor(.gray)
