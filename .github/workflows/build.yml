@@ -112,21 +112,38 @@ jobs:
           class AppDelegate: NSObject, UIApplicationDelegate {
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
                   do {
-                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
                       try AVAudioSession.sharedInstance().setActive(true)
                       UIApplication.shared.beginReceivingRemoteControlEvents()
                   } catch { print("Background Audio Setup Failed") }
                   return true
+              }
+              func applicationDidEnterBackground(_ application: UIApplication) {
+                  MusicManager.shared.saveResumePosition()
+              }
+              func applicationWillTerminate(_ application: UIApplication) {
+                  MusicManager.shared.saveResumePosition()
               }
           }
 
           @main
           struct TrollMusicAppApp: App {
               @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate: AppDelegate
+              @State private var didResume = false
               var body: some Scene {
                   WindowGroup {
                       MainTabView()
                           .environmentObject(MusicManager.shared)
+                          .onAppear {
+                              guard !didResume else { return }
+                              didResume = true
+                              // Auto-resume last song (where the user left off) after a short delay
+                              DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                  if UserDefaults.standard.bool(forKey: "asmusic_autoresume") {
+                                      MusicManager.shared.resumeLastSongIfAvailable()
+                                  }
+                              }
+                          }
                   }
               }
           }
@@ -219,12 +236,20 @@ jobs:
                   }
               }
               @Published var levels: (Float,Float) = (0,0)  // current audio power (left,right) 0..1
+              @Published var preampDB: Float = 0.0 {        // user loudness boost in dB (-12 ... +9)
+                  didSet { applyGain(); UserDefaults.standard.set(preampDB, forKey: "asmusic_preamp") }
+              }
+              @Published var spatialEnhance: Bool = false { // subtle hall reverb for headphones/car
+                  didSet { applySpatial(); UserDefaults.standard.set(spatialEnhance, forKey: "asmusic_spatial") }
+              }
 
-              // AVAudioEngine-based player: playerNode -> eqNode -> (limiter) -> timePitch -> engine.mainMixerNode
+              // AVAudioEngine signal chain:
+              //   playerNode -> eqNode -> preampMixer -> reverb -> timePitch -> mainMixerNode
               private var engine: AVAudioEngine!
               private var playerNode: AVAudioPlayerNode!
               private var eqNode: AVAudioUnitEQ!
-              private var limiter: AVAudioUnitEffect?     // gentle peak limiter for cleaner loudness
+              private var preampMixer: AVAudioMixerNode!
+              private var reverb: AVAudioUnitReverb!
               private var timePitch: AVAudioUnitTimePitch!
               private var fileLength: AVAudioFramePosition = 0
               private var fileSampleRate: Double = 44100
@@ -233,6 +258,8 @@ jobs:
               private var displayLink: CADisplayLink?
               private var needsEndHandler = false
               private var audioSessionConfigured = false
+              private var lastSongId: UUID? = nil
+              private var lastSongTime: TimeInterval = 0
 
               var sleepTimer: Timer?
               var progressTimer: Timer?
@@ -259,21 +286,20 @@ jobs:
                   startLevelMeter()
               }
 
+              deinit {
+                  NotificationCenter.default.removeObserver(self)
+              }
+
               func setupEngine() {
                   engine = AVAudioEngine()
                   playerNode = AVAudioPlayerNode()
                   eqNode = AVAudioUnitEQ(numberOfBands: 10)
+                  preampMixer = AVAudioMixerNode()
+                  preampMixer.outputVolume = 1.0
+                  reverb = AVAudioUnitReverb()
+                  reverb.loadFactoryPreset(.mediumHall)
+                  reverb.wetDryMix = 0
                   timePitch = AVAudioUnitTimePitch()
-                  // AVAudioUnitTimePitch's overlap/pitch is fine; use it for rate changes AND
-                  // as a "loudness shaper" — we keep rate 1.0 for normal playback (bypass by
-                  // not passing through the node; but iOS doesn't support bypass on timePitch
-                  // without reconnecting, so we always keep it in chain at rate=1.0 which is
-                  // transparent).
-                  // Add a gentle peak limiter (using AVAudioUnitVarispeed + mixer gain would
-                  // distort; instead add a simple AVAudioMixerNode as a preamp for slight gain
-                  // on quieter tracks — +1.5dB).
-                  let preamp = AVAudioMixerNode()
-                  preamp.outputVolume = 1.18 // ~+1.5dB gain for perceived loudness, still below clipping
 
                   let freqs: [Float] = [32,64,125,250,500,1000,2000,4000,8000,16000]
                   for (i,b) in eqNode.bands.enumerated() {
@@ -285,29 +311,51 @@ jobs:
                   }
                   engine.attach(playerNode)
                   engine.attach(eqNode)
-                  engine.attach(preamp)
+                  engine.attach(preampMixer)
+                  engine.attach(reverb)
                   engine.attach(timePitch)
                   // Connect once with format:nil so the engine auto-negotiates stream
-                  // format at play time (prevents "node already connected" exception when
-                  // playing multiple songs with different formats).
+                  // format at play time (prevents "node already connected" exception
+                  // when playing multiple songs with different formats on iOS 26).
                   engine.connect(playerNode, to: eqNode, format: nil)
-                  engine.connect(eqNode, to: preamp, format: nil)
-                  engine.connect(preamp, to: timePitch, format: nil)
+                  engine.connect(eqNode, to: preampMixer, format: nil)
+                  engine.connect(preampMixer, to: reverb, format: nil)
+                  engine.connect(reverb, to: timePitch, format: nil)
                   engine.connect(timePitch, to: engine.mainMixerNode, format: nil)
                   engine.mainMixerNode.outputVolume = 1.0
                   engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buf, _ in
                       self?.updatePowerLevel(buffer: buf)
                   }
-                  // Wire interruption/route change handlers (keeps engine alive across
-                  // phone calls / AirPlay switches).
                   NotificationCenter.default.addObserver(self, selector: #selector(handleInterruption(_:)),
                                                          name: AVAudioSession.interruptionNotification, object: nil)
                   NotificationCenter.default.addObserver(self, selector: #selector(handleRouteChange(_:)),
                                                          name: AVAudioSession.routeChangeNotification, object: nil)
+                  NotificationCenter.default.addObserver(self, selector: #selector(handleMediaReset(_:)),
+                                                         name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
                   do {
                       try engine.start()
                   } catch {
                       print("Engine start error:", error)
+                  }
+                  applyGain()
+                  applySpatial()
+              }
+
+              private func applyGain() {
+                  let db = max(-12, min(9, preampDB))
+                  preampMixer?.outputVolume = pow(10.0, db / 20.0)
+              }
+
+              private func applySpatial() {
+                  // 25% wet = subtle room/hall; enough to widen the stereo image without
+                  // washing out the mix (important for Arabic vocal-centric tracks).
+                  reverb?.wetDryMix = spatialEnhance ? 25 : 0
+              }
+
+              func applyEQ() {
+                  let gains = eqPreset.gains
+                  for (i,b) in eqNode.bands.enumerated() where i < gains.count {
+                      b.gain = gains[i]
                   }
               }
 
@@ -330,25 +378,20 @@ jobs:
 
               @objc private func handleRouteChange(_ n: Notification) {
                   guard let reason = n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt else { return }
-                  // Old device unavailable (e.g. headphones pulled out) -> pause
                   if reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue {
                       pausePlayback()
                       isPlaying = false
                       updateNowPlayingInfo()
                   }
-                  // After route change, restart engine if it died
                   if !engine.isRunning { try? engine.start() }
               }
 
-              func applyEQ() {
-                  let gains = eqPreset.gains
-                  for (i,b) in eqNode.bands.enumerated() where i < gains.count {
-                      b.gain = gains[i]
-                  }
+              @objc private func handleMediaReset(_ n: Notification) {
+                  // On media-services-reset (rare), rebuild the engine.
+                  setupEngine()
               }
 
               private func startLevelMeter() {
-                  // CADisplayLink to smoothly update currentTime from playerNode
                   displayLink?.invalidate()
                   let dl = CADisplayLink(target: DisplayLinkProxy { [weak self] in self?.tick() }, selector: #selector(DisplayLinkProxy.tick))
                   dl.add(to: .main, forMode: .common)
@@ -356,7 +399,7 @@ jobs:
               }
 
               @objc private func tick() {
-                  guard let node = playerNode, node.isPlaying, let file = audioFile else { return }
+                  guard let node = playerNode, let file = audioFile else { return }
                   guard let lrt = node.lastRenderTime, let t = node.playerTime(forNodeTime: lrt) else { return }
                   let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate
                   let sec = (Double(t.sampleTime) / sr) + (Double(seekFrame) / sr)
@@ -367,18 +410,28 @@ jobs:
               }
 
               private func updatePowerLevel(buffer: AVAudioPCMBuffer) {
-                  guard let ch0 = buffer.floatChannelData?[0] else { return }
+                  // Compute RMS from ALL channels (stereo-aware). Fall back to ch0 for mono.
+                  let chCount = Int(buffer.format.channelCount)
+                  guard chCount > 0, let data = buffer.floatChannelData else { return }
                   let frames = Int(buffer.frameLength)
-                  var peak: Float = 0
+                  var sumSqL: Float = 0, sumSqR: Float = 0
                   for i in 0..<frames {
-                      let s = abs(ch0[i])
-                      if s > peak { peak = s }
+                      let l = data[0][i]
+                      sumSqL += l*l
+                      if chCount >= 2 { sumSqR += data[1][i]*data[1][i] }
                   }
-                  // Convert to 0..1 with logarithmic scaling
-                  let db = peak > 0 ? 20 * log10(peak) : -60
-                  let normalized = max(0, min(1, (db + 50) / 50))
+                  let framesF = Float(frames)
+                  let rmsL = framesF > 0 ? sqrt(sumSqL / framesF) : 0
+                  let rmsR = (chCount >= 2 && framesF > 0) ? sqrt(sumSqR / framesF) : rmsL
+                  // Convert RMS to normalized 0..1 using log scale. -40 dBFS -> 0, 0 dBFS -> 1.
+                  let dbL = rmsL > 0 ? 20 * log10(rmsL) : -60
+                  let dbR = rmsR > 0 ? 20 * log10(rmsR) : -60
+                  let normL = max(0, min(1, (dbL + 50) / 50))
+                  let normR = max(0, min(1, (dbR + 50) / 50))
+                  // Smooth towards target (simple one-pole LPF) for a nicer visualizer.
                   DispatchQueue.main.async {
-                      self.levels = (normalized, normalized)
+                      self.levels.0 = self.levels.0 * 0.6 + normL * 0.4
+                      self.levels.1 = self.levels.1 * 0.6 + normR * 0.4
                   }
               }
 
@@ -387,7 +440,6 @@ jobs:
                   let wasPlaying = isPlaying
                   playerNode.stop()
                   playerNode.reset()
-                  // Remove any scheduled completion handler from prior segment
                   needsEndHandler = false
                   let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : fileSampleRate
                   let frame = max(0, min(AVAudioFramePosition(time * sr), fileLength - 1))
@@ -402,26 +454,17 @@ jobs:
                       playerNode.rate = playbackRate
                       playerNode.play()
                   }
-                  DispatchQueue.main.async {
-                      self.currentTime = time
-                  }
+                  DispatchQueue.main.async { self.currentTime = time }
                   updateNowPlayingInfo()
               }
 
-              /// Schedule a segment starting at `startFrame` and attach a reliable
-              /// completion handler (iOS 16+ API) so we know exactly when it finishes,
-              /// instead of polling `playerNode.isPlaying`.
               private func scheduleSegment(file: AVAudioFile, startFrame: AVAudioFramePosition, framesToPlay: AVAudioFrameCount) {
                   needsEndHandler = true
                   playerNode.scheduleSegment(file, startingFrame: startFrame, frameCount: framesToPlay, at: nil) { [weak self] in
                       guard let self = self else { return }
-                      // This completion runs after all buffers for the segment have been
-                      // CONSUMED by the player (i.e. the very last sample is output).
                       DispatchQueue.main.async {
                           self.needsEndHandler = false
-                          if self.isPlaying {
-                              self.songFinished()
-                          }
+                          if self.isPlaying { self.songFinished() }
                       }
                   }
               }
@@ -431,6 +474,16 @@ jobs:
                   UserDefaults.standard.set(r, forKey: "asmusic_rate")
                   timePitch.rate = r
                   if playerNode.isPlaying { playerNode.rate = r }
+              }
+
+              func cyclePlaybackRate() {
+                  // Tap through 0.75x -> 1.0x -> 1.25x -> 1.5x -> 1.0x
+                  let steps: [Float] = [0.75, 1.0, 1.25, 1.5]
+                  if let idx = steps.firstIndex(of: playbackRate) {
+                      setPlaybackRate(steps[(idx + 1) % steps.count])
+                  } else {
+                      setPlaybackRate(1.0)
+                  }
               }
 
               func formatTime(_ t: TimeInterval) -> String {
@@ -468,6 +521,8 @@ jobs:
 
               func deleteSong(_ s: Song) {
                   try? fileManager.removeItem(at: s.url)
+                  // Remove sidecar artwork too
+                  try? fileManager.removeItem(at: s.url.deletingPathExtension().appendingPathExtension("jpg"))
                   upNextQueue.removeAll { $0.id == s.id }
                   loadSongs()
               }
@@ -484,6 +539,12 @@ jobs:
                   }
                   do {
                       try fileManager.moveItem(at: song.url, to: newUrl)
+                      // Move sidecar artwork if present
+                      let oldSide = song.url.deletingPathExtension().appendingPathExtension("jpg")
+                      let newSide = newUrl.deletingPathExtension().appendingPathExtension("jpg")
+                      if fileManager.fileExists(atPath: oldSide.path) {
+                          try? fileManager.moveItem(at: oldSide, to: newSide)
+                      }
                       loadSongs()
                       if let idx = songs.firstIndex(where: { $0.id == song.id }) {
                           songs[idx].url = newUrl
@@ -560,18 +621,29 @@ jobs:
                   if let accId = UserDefaults.standard.string(forKey: "asmusic_accent"),
                      let a = AppAccent.list.first(where: { $0.id == accId }) { accent = a }
                   smartRadioMode = UserDefaults.standard.bool(forKey: "asmusic_radio")
+                  preampDB = UserDefaults.standard.object(forKey: "asmusic_preamp") as? Float ?? 0.0
+                  spatialEnhance = UserDefaults.standard.bool(forKey: "asmusic_spatial")
+                  if let lastIdStr = UserDefaults.standard.string(forKey: "asmusic_last_song"),
+                     let lastId = UUID(uuidString: lastIdStr) {
+                      lastSongId = lastId
+                      lastSongTime = UserDefaults.standard.double(forKey: "asmusic_last_time")
+                  }
+              }
+
+              private func saveResumePosition() {
+                  if let s = currentSong {
+                      UserDefaults.standard.set(s.id.uuidString, forKey: "asmusic_last_song")
+                      UserDefaults.standard.set(currentTime, forKey: "asmusic_last_time")
+                  }
               }
 
               // ---- Artwork cache ---------------------------------------------------
               func artworkImage(for song: Song, size: CGFloat = 200, completion: @escaping (UIImage?) -> Void) {
-                  // Check local file (sidecar)
                   let sidecar = song.url.deletingPathExtension().appendingPathExtension("jpg")
                   if let img = UIImage(contentsOfFile: sidecar.path) { completion(img); return }
                   let cached = artworkCacheDir.appendingPathComponent("\(song.id.uuidString).jpg")
                   if let img = UIImage(contentsOfFile: cached.path) { completion(img); return }
-                  // Nothing cached yet — need to download
                   guard let art = song.artworkURL, let u = URL(string: art) else { completion(nil); return }
-                  // async fetch
                   URLSession.shared.dataTask(with: u) { data, _, _ in
                       guard let data = data, let img = UIImage(data: data) else { DispatchQueue.main.async { completion(nil) }; return }
                       try? data.write(to: cached, options: .atomic)
@@ -613,7 +685,6 @@ jobs:
                       self.songs.append(song)
                       self.songs.sort { $0.title.lowercased() < $1.title.lowercased() }
                       self.saveSongMeta()
-                      // If there's an artwork URL, kick off a download in the background
                       if let art = artworkURL, let u = URL(string: art) {
                           let sidecar = url.deletingPathExtension().appendingPathExtension("jpg")
                           if !self.fileManager.fileExists(atPath: sidecar.path) {
@@ -673,6 +744,8 @@ jobs:
                       UIApplication.shared.beginReceivingRemoteControlEvents()
 
                       playerNode.stop()
+                      playerNode.reset()
+                      needsEndHandler = false
                       if engine.isRunning { engine.pause() }
                       audioFile = nil
                       seekFrame = 0
@@ -683,22 +756,26 @@ jobs:
                       fileLength = file.length
                       fileSampleRate = file.processingFormat.sampleRate
 
-                      // Connections were established once in setupEngine with format:nil,
-                      // so the engine will adapt its processing format to the file's format
-                      // automatically — we must NOT reconnect here (re-connecting an
-                      // already-connected input bus throws an exception on iOS 26).
-
                       applyEQ()
+                      applyGain()
+                      applySpatial()
                       timePitch.rate = playbackRate
 
                       try engine.start()
-                      needsEndHandler = false
-                      scheduleSegment(file: file, startFrame: 0, framesToPlay: AVAudioFrameCount(fileLength))
+                      needsEndHandler = true
+                      playerNode.scheduleFile(file, at: nil) { [weak self] in
+                          guard let self = self else { return }
+                          DispatchQueue.main.async {
+                              self.needsEndHandler = false
+                              if self.isPlaying { self.songFinished() }
+                          }
+                      }
                       playerNode.rate = playbackRate
                       playerNode.play()
 
                       didAutoSearchForRadio = false
                       currentSong = song; isPlaying = true
+                      lastSongId = song.id; lastSongTime = 0
                       updateNowPlayingInfo()
                       UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                   } catch {
@@ -706,27 +783,35 @@ jobs:
                   }
               }
 
+              /// Resume the last-played song (called once on app launch if user wants it).
+              func resumeLastSongIfAvailable() {
+                  guard let id = lastSongId,
+                        let s = songs.first(where: { $0.id == id }) else { return }
+                  playSong(s)
+                  if lastSongTime > 2 {
+                      // Defer seek slightly so scheduling completes
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                          self?.seek(to: self?.lastSongTime ?? 0)
+                      }
+                  }
+              }
+
               private func pausePlayback() {
                   playerNode.pause()
+                  saveResumePosition()
               }
 
               @objc func songFinished() {
                   DispatchQueue.main.async {
                       if self.repeatMode == .one, let cur = self.currentSong {
-                          self.playSong(cur)
-                          return
+                          self.playSong(cur); return
                       }
                       self.playNext(autoAdvance: true)
                   }
               }
 
-              // Fallback end-of-track detection.  The primary signal is the segment
-              // completion callback set up in scheduleSegment(); this is a guard in case
-              // the completion ever doesn't fire (e.g. after an engine restart).
               func checkEndOfTrack() {
                   guard isPlaying, let _ = audioFile else { return }
-                  // Heuristic: if player isn't rendering AND we're past duration AND no
-                  // segment is currently scheduled -> track ended.
                   if currentTime >= duration - 0.2 && duration > 1 && !needsEndHandler {
                       songFinished()
                   }
@@ -734,14 +819,12 @@ jobs:
 
               func togglePlayPause() {
                   if isPlaying {
-                      playerNode.pause()
+                      pausePlayback()
                       isPlaying = false
                   } else {
                       if audioFile == nil, let cur = currentSong {
                           playSong(cur); return
                       }
-                      // If player has nothing scheduled (e.g. after a seek that finished),
-                      // re-schedule from current position
                       if !playerNode.isPlaying && seekFrame > 0 && !needsEndHandler {
                           guard let file = audioFile else { playerNode.play(); isPlaying = true; return }
                           let remaining = AVAudioFrameCount(fileLength - seekFrame)
@@ -762,7 +845,7 @@ jobs:
               func playNext(autoAdvance: Bool) {
                   guard !songs.isEmpty || !upNextQueue.isEmpty else {
                       if repeatMode == .all, let first = songs.first { playSong(first) }
-                      else { isPlaying = false; currentSong = nil }
+                      else { isPlaying = false; currentSong = nil; saveResumePosition() }
                       return
                   }
                   if !upNextQueue.isEmpty {
@@ -791,9 +874,8 @@ jobs:
                   } else if repeatMode == .all {
                       if let first = songs.first { playSong(first) }
                   } else if autoAdvance {
-                      isPlaying = false
+                      isPlaying = false; saveResumePosition()
                   }
-                  // Smart Radio auto-search for more — broadcast so a visible Magic DL view can fetch more.
                   if smartRadioMode && !didAutoSearchForRadio {
                       didAutoSearchForRadio = true
                       let artist = currentSong?.artist ?? ""
@@ -836,6 +918,11 @@ jobs:
                       guard let s = self, let e = ev as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
                       s.seek(to: e.positionTime); return .success
                   }
+                  c.changePlaybackRateCommand.supportedPlaybackRates = [0.75, 1.0, 1.25, 1.5]
+                  c.changePlaybackRateCommand.addTarget { [weak self] ev in
+                      guard let s = self, let e = ev as? MPChangePlaybackRateCommandEvent else { return .commandFailed }
+                      s.setPlaybackRate(e.playbackRate); return .success
+                  }
               }
 
               func updateNowPlayingInfo() {
@@ -848,7 +935,6 @@ jobs:
                       MPMediaItemPropertyPlaybackDuration: duration,
                       MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
                   ]
-                  // Try to attach artwork async
                   artworkImage(for: c, size: 600) { img in
                       if let img = img {
                           let art = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
@@ -860,7 +946,6 @@ jobs:
               }
           }
 
-          // Helper for CADisplayLine (since we can't use self as target directly for deinit safety)
           class DisplayLinkProxy: NSObject {
               let block: () -> Void
               init(_ block: @escaping () -> Void) { self.block = block }
@@ -1539,9 +1624,20 @@ jobs:
                                       .background(musicManager.smartRadioMode ? AppTheme.accent.opacity(1) : Color.white.opacity(0.15))
                                       .cornerRadius(20)
                               }
-                              Text(String(format: "%.2gx", musicManager.playbackRate))
-                                  .font(.caption).foregroundColor(.white.opacity(0.8))
-                                  .padding(.horizontal, 12).padding(.vertical, 6).background(Color.white.opacity(0.15)).cornerRadius(20)
+                              Button { musicManager.cyclePlaybackRate() } label: {
+                                  Text(String(format: "%.2gx", musicManager.playbackRate))
+                                      .font(.caption).foregroundColor(abs(musicManager.playbackRate - 1.0) < 0.01 ? .white.opacity(0.8) : AppTheme.accent)
+                                      .padding(.horizontal, 12).padding(.vertical, 6)
+                                      .background(abs(musicManager.playbackRate - 1.0) < 0.01 ? Color.white.opacity(0.15) : AppTheme.accent.opacity(0.3))
+                                      .cornerRadius(20)
+                              }
+                              Button { musicManager.spatialEnhance.toggle() } label: {
+                                  Image(systemName: musicManager.spatialEnhance ? "speaker.wave.3.fill" : "speaker.wave.2")
+                                      .font(.caption).foregroundColor(musicManager.spatialEnhance ? AppTheme.accent : .white.opacity(0.8))
+                                      .padding(.horizontal, 10).padding(.vertical, 6)
+                                      .background(musicManager.spatialEnhance ? AppTheme.accent.opacity(0.3) : Color.white.opacity(0.15))
+                                      .cornerRadius(20)
+                              }
                               if musicManager.sleepTimerMinutes > 0 {
                                   Text("\(musicManager.sleepTimerMinutes)m").font(.caption).foregroundColor(.white.opacity(0.8))
                                       .padding(.horizontal, 12).padding(.vertical, 6).background(AppTheme.accent).cornerRadius(20)
@@ -1600,13 +1696,13 @@ jobs:
           struct EQView: View {
               @EnvironmentObject var mm: MusicManager
               @Environment(\.presentationMode) var pm
+              @AppStorage("asmusic_autoresume") private var autoResume: Bool = false
               var body: some View {
                   List {
                       Section(header: Text("Equalizer Preset")) {
                           ForEach(EQPreset.allCases) { p in
                               Button {
                                   mm.eqPreset = p
-                                  pm.wrappedValue.dismiss()
                               } label: {
                                   HStack {
                                       Text(p.rawValue).foregroundColor(.primary)
@@ -1616,11 +1712,39 @@ jobs:
                               }
                           }
                       }
-                      Section(footer: Text("EQ shapes the sound in real time. Arabic/Maqaam boosts oud/qanun highs while keeping warm lows.")) {
+                      Section(header: Text("Loudness Boost"),
+                              footer: Text("Adds clean gain (0 = no boost, +3 to +6 dB for quieter Arabic masters, -dB for noisy sources).")) {
+                          VStack(alignment: .leading, spacing: 4) {
+                              HStack {
+                                  Text("Preamp").foregroundColor(.primary)
+                                  Spacer()
+                                  Text(String(format: "%+.1f dB", mm.preampDB))
+                                      .foregroundColor(.secondary).font(.subheadline.monospacedDigit())
+                              }
+                              Slider(value: Binding(
+                                  get: { mm.preampDB },
+                                  set: { mm.preampDB = $0 }
+                              ), in: -12...9, step: 0.5)
+                              .tint(AppTheme.accent)
+                          }
+                      }
+                      Section(header: Text("Audio Enhancements"),
+                              footer: Text("Spatial adds a subtle hall reverb that widens the stereo image on headphones and car speakers.")) {
+                          Toggle(isOn: Binding(
+                              get: { mm.spatialEnhance },
+                              set: { mm.spatialEnhance = $0 }
+                          )) {
+                              Label("Spatial / 3D sound", systemImage: "speaker.wave.3.fill")
+                          }
+                          Toggle(isOn: $autoResume) {
+                              Label("Resume last song on launch", systemImage: "arrow.counterclockwise")
+                          }
+                      }
+                      Section(footer: Text("Tip: Arabic/Maqaam preset boosts oud/qanun highs while keeping warm lows, great for Amr Diab, Sherine, Nancy Ajram.")) {
                           EmptyView()
                       }
                   }
-                  .navigationTitle("Equalizer")
+                  .navigationTitle("Audio Settings")
                   .navigationBarTitleDisplayMode(.inline)
                   .toolbar {
                       ToolbarItem(placement: .navigationBarTrailing) {
@@ -3916,8 +4040,17 @@ jobs:
                               self.startChunkedDownload(task: task, url: url, finalName: finalName,
                                                         referer: referer, backendLabel: backendLabel,
                                                         totalBytes: cl)
+                          } else if cl > 0 {
+                              // Small file (size known and <threshold) — single Range request is enough.
+                              self.plainDownload(task: task, url: url, finalName: finalName,
+                                                 referer: referer, backendLabel: backendLabel, addRange: true)
                           } else {
-                              // Small file — single Range request is enough
+                              // Cloudflare didn't reveal Content-Length in the probe (can
+                              // happen on certain edge nodes). Be safe and still use the
+                              // plain Range request for the first ~5 MB; if the real
+                              // length turns out larger the plain downloader will still
+                              // pull it (Range: bytes=0- is honored), just at single-
+                              // connection speed. Correctness > speed here.
                               self.plainDownload(task: task, url: url, finalName: finalName,
                                                  referer: referer, backendLabel: backendLabel, addRange: true)
                           }
