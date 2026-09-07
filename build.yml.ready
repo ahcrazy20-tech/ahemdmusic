@@ -948,6 +948,40 @@ jobs:
                   playlists.append(Playlist(id: UUID(), name: name, songIDs: []))
                   savePlaylists()
               }
+
+              /// Deletes ANY playlist except "Liked Songs". The songs themselves stay in
+              /// the Library — only the list goes away. If the playlist is a smart (✨)
+              /// one, its kind is also *retired* in `SmartPlaylistStore`, so the
+              /// auto-create pass never silently resurrects a list the user removed.
+              func deletePlaylist(_ playlist: Playlist) {
+                  guard playlist.name != "Liked Songs" else { return }
+                  playlists.removeAll { $0.id == playlist.id }
+                  savePlaylists()
+                  if let kind = SmartPlaylistStore.shared.kind(for: playlist.id) {
+                      SmartPlaylistStore.shared.remove(kind: kind)
+                      SmartPlaylistStore.shared.retire(kind: kind)
+                  }
+                  objectWillChange.send()
+              }
+
+              func renamePlaylist(_ playlist: Playlist, to name: String) {
+                  let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !clean.isEmpty, playlist.name != "Liked Songs" else { return }
+                  guard let idx = playlists.firstIndex(where: { $0.id == playlist.id }) else { return }
+                  playlists[idx].name = clean
+                  savePlaylists()
+                  if let kind = SmartPlaylistStore.shared.kind(for: playlist.id) {
+                      SmartPlaylistStore.shared.set(kind: kind, playlistID: playlist.id,
+                                                    name: clean, count: playlists[idx].songIDs.count)
+                  }
+                  objectWillChange.send()
+              }
+
+              /// Empties the "Up Next" queue (one tap from the Library header).
+              func clearUpNext() {
+                  upNextQueue.removeAll()
+                  objectWillChange.send()
+              }
               func addSongToPlaylist(song: Song, playlist: Playlist) {
                   if let idx = playlists.firstIndex(where: { $0.id == playlist.id }) {
                       if !playlists[idx].songIDs.contains(song.id) {
@@ -2519,16 +2553,89 @@ jobs:
           // ---------------------------------------------------------------------------
           // MARK: - Library
           // ---------------------------------------------------------------------------
+
+          /// How the All-Songs section is ordered. Persisted, applied live.
+          enum LibrarySort: String, CaseIterable, Identifiable {
+              case title = "Title"
+              case artist = "Artist"
+              case recent = "Recently added"
+              case mostPlayed = "Most played"
+
+              var id: String { rawValue }
+              var icon: String {
+                  switch self {
+                  case .title: return "textformat"
+                  case .artist: return "person"
+                  case .recent: return "clock"
+                  case .mostPlayed: return "flame"
+                  }
+              }
+          }
+
           struct LibraryView: View {
               @EnvironmentObject var musicManager: MusicManager
+              @ObservedObject private var doctor = LibraryDoctor.shared
               @State private var showingOptionsFor: Song?
               @State private var showingRenameFor: Song?
               @State private var newNameInput = ""
               @State private var searchText = ""
+              @State private var showDuplicateDoctor = false
+              @AppStorage("asmusic_lib_sort") private var sortRaw: String = LibrarySort.title.rawValue
 
+              /// Searches title AND artist AND genre, ranked by where the match is —
+              /// a title hit beats an artist hit beats a genre hit.
               var filteredSongs: [Song] {
-                  if searchText.trimmingCharacters(in: .whitespaces).isEmpty { return musicManager.songs }
-                  return musicManager.songs.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+                  let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+                  guard !q.isEmpty else { return sorted(musicManager.songs) }
+                  func score(_ s: Song) -> Int {
+                      let t = s.title.lowercased()
+                      let a = s.artist.lowercased()
+                      let g = (s.genre ?? "").lowercased()
+                      if t.hasPrefix(q) { return 4 }
+                      if t.contains(q) { return 3 }
+                      if a.contains(q) { return 2 }
+                      if g.contains(q) { return 1 }
+                      return 0
+                  }
+                  return musicManager.songs
+                      .compactMap { s -> (song: Song, rank: Int)? in
+                          let r = score(s)
+                          return r > 0 ? (s, r) : nil
+                      }
+                      .sorted { l, r in
+                          if l.rank != r.rank { return l.rank > r.rank }
+                          return l.song.title.localizedCaseInsensitiveCompare(r.song.title) == .orderedAscending
+                      }
+                      .map { $0.song }
+              }
+
+              private func sorted(_ list: [Song]) -> [Song] {
+                  switch LibrarySort(rawValue: sortRaw) ?? .title {
+                  case .title:
+                      return list.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+                  case .artist:
+                      return list.sorted {
+                          let cmp = $0.artist.localizedCaseInsensitiveCompare($1.artist)
+                          if cmp == .orderedSame {
+                              return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+                          }
+                          return cmp == .orderedAscending
+                      }
+                  case .recent:
+                      return list.sorted { modDate($0.url) > modDate($1.url) }
+                  case .mostPlayed:
+                      return list.sorted {
+                          let lp = ListenHistory.shared.playCount(for: $0)
+                          let rp = ListenHistory.shared.playCount(for: $1)
+                          if lp != rp { return lp > rp }
+                          return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+                      }
+                  }
+              }
+
+              private func modDate(_ url: URL) -> Date {
+                  (try? url.resourceValues(forKeys: [.contentModificationDate]))?.contentModificationDate
+                      ?? .distantPast
               }
 
               private var recentlyPlayed: [Song] {
@@ -2562,9 +2669,29 @@ jobs:
                                   }
                               }
                           } header: {
-                              if !musicManager.upNextQueue.isEmpty { Text("Up Next") }
+                              if !musicManager.upNextQueue.isEmpty {
+                                  HStack {
+                                      Text("Up Next")
+                                      Spacer()
+                                      Button("Clear") { musicManager.clearUpNext() }
+                                          .font(.caption.bold())
+                                          .foregroundColor(AppTheme.accent)
+                                  }
+                              }
                           }
                           Section {
+                              if filteredSongs.isEmpty && !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+                                  VStack(spacing: 8) {
+                                      Image(systemName: "magnifyingglass")
+                                          .font(.title2).foregroundColor(.secondary)
+                                      Text("No matches for “\(searchText)”")
+                                          .font(.subheadline).foregroundColor(.secondary)
+                                      Text("Search finds titles, artists and genres.")
+                                          .font(.caption2).foregroundColor(.secondary)
+                                  }
+                                  .frame(maxWidth: .infinity)
+                                  .padding(.vertical, 24)
+                              }
                               ForEach(filteredSongs) { song in
                                   songRow(song, isQueued: false)
                                       .swipeActions(edge: .trailing, allowsFullSwipe: true) {
@@ -2600,17 +2727,51 @@ jobs:
                               }
                           } header: {
                               if !musicManager.songs.isEmpty {
-                                  Text("\(musicManager.songs.count) songs")
+                                  let q = searchText.trimmingCharacters(in: .whitespaces)
+                                  if q.isEmpty {
+                                      Text("\(musicManager.songs.count) songs · by \(LibrarySort(rawValue: sortRaw)?.rawValue ?? "Title")")
+                                  } else {
+                                      Text("\(filteredSongs.count) of \(musicManager.songs.count) songs")
+                                  }
                               }
                           }
                       }
-                      .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search your library")
+                      .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search titles, artists, genres")
                       .navigationTitle("Your Library").onAppear {
                           musicManager.loadSongs()
                           ITunesEnricher.shared.enrichLibrary()
+                          // Cheap background pass: badge the duplicate button when the
+                          // library visibly contains double downloads.
+                          LibraryDoctor.shared.autoScan()
                       }
-                      .refreshable { musicManager.loadSongs(); ITunesEnricher.shared.enrichLibrary() }
+                      .refreshable {
+                          musicManager.loadSongs()
+                          ITunesEnricher.shared.enrichLibrary()
+                          LibraryDoctor.shared.scan()
+                      }
+                      .sheet(isPresented: $showDuplicateDoctor) {
+                          DuplicateReviewView().environmentObject(musicManager)
+                      }
                       .toolbar {
+                          ToolbarItem(placement: .navigationBarLeading) {
+                              Button { showDuplicateDoctor = true } label: {
+                                  Image(systemName: "doc.on.doc")
+                                      .overlay(alignment: .topTrailing) {
+                                          if doctor.redundantCount > 0 {
+                                              Text("\(min(doctor.redundantCount, 99))")
+                                                  .font(.system(size: 9, weight: .black))
+                                                  .foregroundColor(.white)
+                                                  .padding(3)
+                                                  .background(Color.red)
+                                                  .clipShape(Circle())
+                                                  .offset(x: 9, y: -9)
+                                          }
+                                      }
+                              }
+                              .accessibilityLabel(doctor.redundantCount > 0
+                                                  ? "Find duplicate songs (\(doctor.redundantCount) found)"
+                                                  : "Find duplicate songs")
+                          }
                           ToolbarItem(placement: .navigationBarTrailing) {
                               VoiceSearchButton(placeholderHint: "a song in your library") { heard in
                                   searchText = heard
@@ -2625,6 +2786,26 @@ jobs:
                                   Button { musicManager.toggleSmartRadio() } label: {
                                       Label(musicManager.smartRadioMode ? "Smart Radio ON" : "Smart Radio (recommended)",
                                             systemImage: "dot.radiowaves.left.and.right")
+                                  }
+                                  Divider()
+                                  Text("Sort by")
+                                  ForEach(LibrarySort.allCases) { mode in
+                                      Button {
+                                          sortRaw = mode.rawValue
+                                      } label: {
+                                          if sortRaw == mode.rawValue {
+                                              Label(mode.rawValue, systemImage: "checkmark")
+                                          } else {
+                                              Label(mode.rawValue, systemImage: mode.icon)
+                                          }
+                                      }
+                                  }
+                                  Divider()
+                                  Button { showDuplicateDoctor = true } label: {
+                                      Label(doctor.redundantCount > 0
+                                            ? "Find Duplicates (\(doctor.redundantCount) found)"
+                                            : "Find Duplicates",
+                                            systemImage: "doc.on.doc")
                                   }
                               } label: {
                                   Image(systemName: "slider.horizontal.3")
@@ -2686,15 +2867,46 @@ jobs:
           struct PlaylistDetailView: View {
               @EnvironmentObject var musicManager: MusicManager
               var playlist: Playlist
-              var songsInPlaylist: [Song] { musicManager.songs.filter { playlist.songIDs.contains($0.id) } }
+              @Environment(\.presentationMode) var pm
+              @State private var confirmDelete = false
+              @State private var showRename = false
+              @State private var renameText = ""
+
+              /// Live copy from the manager, so renames/deletes reflect immediately.
+              private var live: Playlist {
+                  musicManager.playlists.first(where: { $0.id == playlist.id }) ?? playlist
+              }
+              /// Ordered by the playlist itself — smart playlists are DJ-ordered, so
+              /// re-sorting them by title would throw the flow away.
+              var songsInPlaylist: [Song] {
+                  live.songIDs.compactMap { id in musicManager.songs.first(where: { $0.id == id }) }
+              }
+              private var isProtected: Bool { live.name == "Liked Songs" }
+
+              private var totalMinutes: Int? {
+                  var total = 0.0
+                  var known = 0
+                  for s in songsInPlaylist {
+                      if let d = AudioLab.shared.features(for: s)?.duration, d > 0 {
+                          total += d
+                          known += 1
+                      }
+                  }
+                  guard known > 0 else { return nil }
+                  return Int((total / 60).rounded())
+              }
+
               var body: some View {
                   List {
                       if songsInPlaylist.isEmpty {
                           Text("No songs yet. Add from Library.").foregroundColor(.secondary).padding()
                       }
-                      ForEach(songsInPlaylist) { song in
+                      ForEach(Array(songsInPlaylist.enumerated()), id: \.element.id) { index, song in
                           Button { musicManager.playSong(song) } label: {
-                              HStack {
+                              HStack(spacing: 10) {
+                                  Text("\(index + 1)")
+                                      .font(.caption2).foregroundColor(.secondary)
+                                      .frame(width: 18, alignment: .trailing)
                                   ArtworkView(song: song, size: 40, cornerRadius: 5, fallbackSystemName: "music.note")
                                   VStack(alignment: .leading) {
                                       Text(song.title).foregroundColor(.primary).lineLimit(1)
@@ -2703,41 +2915,113 @@ jobs:
                                   Spacer()
                               }
                           }
+                          .contextMenu {
+                              Button { musicManager.playNext(song) } label: { Label("Play Next", systemImage: "text.insert") }
+                              Button { musicManager.playLater(song) } label: { Label("Play Later", systemImage: "text.append") }
+                          }
                       }
                       .onDelete { indexSet in
-                          if let pIndex = musicManager.playlists.firstIndex(where: { $0.id == playlist.id }) {
-                              indexSet.forEach { musicManager.playlists[pIndex].songIDs.remove(at: $0) }
+                          if let pIndex = musicManager.playlists.firstIndex(where: { $0.id == live.id }) {
+                              let ids = indexSet.compactMap { i -> UUID? in
+                                  i < songsInPlaylist.count ? songsInPlaylist[i].id : nil
+                              }
+                              musicManager.playlists[pIndex].songIDs.removeAll { ids.contains($0) }
                               musicManager.savePlaylists()
                           }
                       }
                   }
-                  .navigationTitle(playlist.name)
+                  .navigationTitle(live.name)
                   .toolbar {
-                      if !songsInPlaylist.isEmpty {
-                          Button {
-                              // Play all shuffled
-                              if let first = songsInPlaylist.first { musicManager.playSong(first) }
-                              musicManager.isShuffle = true
-                          } label: { Image(systemName: "shuffle") }
+                      ToolbarItem(placement: .navigationBarTrailing) {
+                          HStack(spacing: 14) {
+                              if !songsInPlaylist.isEmpty {
+                                  Button {
+                                      musicManager.playPlaylist(live)
+                                  } label: { Image(systemName: "play.fill") }
+                                  .accessibilityLabel("Play playlist in order")
+                                  Button {
+                                      musicManager.isShuffle = true
+                                      musicManager.playPlaylist(live)
+                                  } label: { Image(systemName: "shuffle") }
+                                  .accessibilityLabel("Shuffle playlist")
+                              }
+                              if !isProtected {
+                                  Menu {
+                                      Button {
+                                          renameText = live.name
+                                          showRename = true
+                                      } label: { Label("Rename Playlist", systemImage: "pencil") }
+                                      Button(role: .destructive) {
+                                          confirmDelete = true
+                                      } label: { Label("Delete Playlist", systemImage: "trash") }
+                                  } label: {
+                                      Image(systemName: "ellipsis.circle")
+                                  }
+                              }
+                          }
                       }
+                  }
+                  .safeAreaInset(edge: .bottom) {
+                      if !songsInPlaylist.isEmpty {
+                          HStack(spacing: 6) {
+                              Text("\(songsInPlaylist.count) songs")
+                              if let mins = totalMinutes {
+                                  Text("· about \(mins) min")
+                              }
+                              if SmartPlaylistStore.shared.isSmart(live.id) {
+                                  Label("smart order", systemImage: "sparkles")
+                              }
+                              Spacer()
+                          }
+                          .font(.caption2).foregroundColor(.secondary)
+                          .padding(.horizontal, 16).padding(.vertical, 6)
+                          .background(.bar)
+                      }
+                  }
+                  .alert("Delete Playlist?", isPresented: $confirmDelete) {
+                      Button("Delete", role: .destructive) {
+                          musicManager.deletePlaylist(live)
+                          pm.wrappedValue.dismiss()
+                      }
+                      Button("Cancel", role: .cancel) { }
+                  } message: {
+                      Text("“\(live.name)” (\(songsInPlaylist.count) songs) will be removed. The songs themselves stay in your Library.")
+                  }
+                  .alert("Rename Playlist", isPresented: $showRename) {
+                      TextField("Playlist Name", text: $renameText)
+                      Button("Save") {
+                          if !renameText.isEmpty { musicManager.renamePlaylist(live, to: renameText) }
+                      }
+                      Button("Cancel", role: .cancel) { }
                   }
               }
           }
 
           struct PlaylistsView: View {
               @EnvironmentObject var musicManager: MusicManager
+              @ObservedObject private var engine = SmartPlaylistEngine.shared
               @State private var showingNewPlaylist = false
               @State private var newPlaylistName = ""
               @State private var showAsk = false
               @State private var askText = ""
+              @State private var playlistToDelete: Playlist? = nil
+              @State private var playlistToRename: Playlist? = nil
+              @State private var renameText = ""
+
+              /// Every playlist except the protected "Liked Songs" — looked up by name,
+              /// never by position, so deleting lists can't shift the wrong one in.
+              private var userPlaylists: [Playlist] {
+                  musicManager.playlists.filter { $0.name != "Liked Songs" }
+              }
 
               /// Explains the ✨ badges and gives a manual "rebuild now" escape hatch.
               private var smartFooter: some View {
                   VStack(alignment: .leading, spacing: 6) {
-                      Text("✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off.")
+                      Text("✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off. Swipe any playlist to delete it — deleted smart playlists stay deleted.")
                           .font(.caption2).foregroundColor(.secondary)
                       HStack(spacing: 10) {
                           Button("Rebuild smart playlists now") {
+                              SmartPlaylistStore.shared.unretireAll()
                               SmartPlaylistEngine.shared.rebuild(force: true)
                               _ = SmartPlaylistEngine.shared.applyAll()
                           }
@@ -2746,10 +3030,10 @@ jobs:
                               .font(.caption.bold())
                       }
                       .foregroundColor(AppTheme.accent)
-                      if let note = SmartPlaylistEngine.shared.lastNote {
+                      if let note = engine.lastNote {
                           Text(note).font(.caption2).foregroundColor(.green)
                       }
-                      if let err = SmartPlaylistEngine.shared.lastError {
+                      if let err = engine.lastError {
                           Text(err).font(.caption2).foregroundColor(.orange)
                       }
                   }
@@ -2765,27 +3049,47 @@ jobs:
                                       Image(systemName: "heart.fill").foregroundColor(.pink).font(.title2).frame(width:36)
                                       VStack(alignment:.leading) {
                                           Text("Liked Songs").font(.headline)
-                                          let liked = musicManager.playlists.first?.songIDs.count ?? 0
+                                          let liked = musicManager.playlists
+                                              .first(where: { $0.name == "Liked Songs" })?.songIDs.count ?? 0
                                           Text("\(liked) songs").font(.caption).foregroundColor(.secondary)
                                       }
                                   }
                               }
                           }
+
+                          Section(header: Label("AI Playlist Generator", systemImage: "wand.and.stars")) {
+                              PlaylistAICard()
+                          }
+
                           Section(header: Text("My Playlists"),
                                   footer: smartFooter) {
-                              ForEach(musicManager.playlists.dropFirst()) { playlist in
+                              if userPlaylists.isEmpty {
+                                  Text("No playlists yet — let the AI build one above, or tap +.")
+                                      .font(.subheadline).foregroundColor(.secondary)
+                              }
+                              ForEach(userPlaylists) { playlist in
                                   NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
-                                      HStack(spacing: 8) {
-                                          if SmartPlaylistStore.shared.isSmart(playlist.id) {
-                                              Image(systemName: "sparkles")
-                                                  .font(.caption2).foregroundColor(AppTheme.accent)
-                                                  .accessibilityLabel("Smart playlist — refreshed automatically")
-                                          }
-                                          Text(playlist.name).font(.headline).padding(.vertical, 5)
-                                          Spacer()
-                                          Text("\(playlist.songIDs.count)")
-                                              .font(.caption2).foregroundColor(.secondary)
+                                      playlistRow(playlist)
+                                  }
+                                  .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                      Button(role: .destructive) {
+                                          playlistToDelete = playlist
+                                      } label: {
+                                          Label("Delete", systemImage: "trash")
                                       }
+                                  }
+                                  .contextMenu {
+                                      Button {
+                                          musicManager.playPlaylist(playlist)
+                                      } label: { Label("Play", systemImage: "play.fill") }
+                                      Button {
+                                          playlistToRename = playlist
+                                          renameText = playlist.name
+                                      } label: { Label("Rename", systemImage: "pencil") }
+                                      Divider()
+                                      Button(role: .destructive) {
+                                          playlistToDelete = playlist
+                                      } label: { Label("Delete Playlist", systemImage: "trash") }
                                   }
                               }
                           }
@@ -2802,6 +3106,31 @@ jobs:
                           Button("Cancel", role: .cancel) { askText = "" }
                       } message: {
                           Text("Built from the songs already in your Library — offline if you have no AI key set.")
+                      }
+                      .alert("Delete Playlist?",
+                             isPresented: Binding(get: { playlistToDelete != nil },
+                                                  set: { if !$0 { playlistToDelete = nil } })) {
+                          Button("Delete", role: .destructive) {
+                              if let p = playlistToDelete { musicManager.deletePlaylist(p) }
+                              playlistToDelete = nil
+                          }
+                          Button("Cancel", role: .cancel) { playlistToDelete = nil }
+                      } message: {
+                          if let p = playlistToDelete {
+                              Text("“\(p.name)” (\(p.songIDs.count) songs) will be removed. Your songs stay in the Library — only the list is deleted.")
+                          }
+                      }
+                      .alert("Rename Playlist",
+                             isPresented: Binding(get: { playlistToRename != nil },
+                                                  set: { if !$0 { playlistToRename = nil } })) {
+                          TextField("Playlist Name", text: $renameText)
+                          Button("Save") {
+                              if let p = playlistToRename, !renameText.isEmpty {
+                                  musicManager.renamePlaylist(p, to: renameText)
+                              }
+                              playlistToRename = nil
+                          }
+                          Button("Cancel", role: .cancel) { playlistToRename = nil }
                       }
                       .navigationTitle("Playlists")
                       .toolbar {
@@ -2826,14 +3155,157 @@ jobs:
                   }
                   .navigationViewStyle(StackNavigationViewStyle())
               }
+
+              private func playlistRow(_ playlist: Playlist) -> some View {
+                  HStack(spacing: 8) {
+                      if SmartPlaylistStore.shared.isSmart(playlist.id) {
+                          Image(systemName: "sparkles")
+                              .font(.caption2).foregroundColor(AppTheme.accent)
+                              .accessibilityLabel("Smart playlist — refreshed automatically")
+                      }
+                      Text(playlist.name).font(.headline).padding(.vertical, 5).lineLimit(1)
+                      Spacer()
+                      Text("\(playlist.songIDs.count)")
+                          .font(.caption2).foregroundColor(.secondary)
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------------------
+          // MARK: - AI Playlist Generator (the card at the top of the Playlists tab)
+          //
+          // One field + one button: describe the vibe ("quiet arabic for a drive",
+          // "جيم حماسية", "90s road trip") and the SmartPlaylistEngine builds it from
+          // the user's OWN library — with Gemini when a key is set, with the local
+          // Arabic/English parser when not. Quick mood chips and a time-of-day
+          // "Surprise me" give zero-typing paths to the same engine.
+          // ---------------------------------------------------------------------------
+          struct PlaylistAICard: View {
+              @ObservedObject private var engine = SmartPlaylistEngine.shared
+              @ObservedObject private var ai = GeminiAI.shared
+              @State private var request = ""
+              @State private var busy = false
+
+              /// Chip label → the phrase actually sent to the generator.
+              private let moods: [(String, String)] = [
+                  ("Gym", "gym hype workout fast"),
+                  ("Party", "farah party dance"),
+                  ("Chill", "chill quiet relaxing"),
+                  ("Focus", "focus study no vocals"),
+                  ("Drive", "road trip drive"),
+                  ("Sleep", "sleep calm slow"),
+                  ("Arabic", "arabic night classics"),
+              ]
+
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 10) {
+                      HStack(spacing: 8) {
+                          TextField("Describe the vibe… “sad arabic for a rainy night”", text: $request)
+                              .font(.subheadline)
+                              .autocorrectionDisabled(false)
+                              .onSubmit { generate(request) }
+                          Button {
+                              generate(request)
+                          } label: {
+                              Image(systemName: busy ? "hourglass" : "wand.and.stars")
+                                  .font(.body.bold())
+                                  .foregroundColor(.white)
+                                  .padding(9)
+                                  .background(canGenerate(request) ? AppTheme.accent : Color.gray.opacity(0.4))
+                                  .clipShape(Circle())
+                          }
+                          .disabled(!canGenerate(request))
+                          .accessibilityLabel("Generate AI playlist")
+                      }
+
+                      ScrollView(.horizontal, showsIndicators: false) {
+                          HStack(spacing: 8) {
+                              chip("Surprise me", icon: "die.face.5") {
+                                  surprise()
+                              }
+                              ForEach(moods, id: \.0) { mood in
+                                  chip(mood.0, icon: nil) {
+                                      generate(mood.1)
+                                  }
+                              }
+                          }
+                      }
+
+                      if busy {
+                          HStack(spacing: 8) {
+                              ProgressView().scaleEffect(0.8)
+                              Text(ai.isConfigured
+                                   ? "AI is listening to your library…"
+                                   : "Building from your library (on-device)…")
+                                  .font(.caption).foregroundColor(.secondary)
+                          }
+                      } else {
+                          Text(ai.isConfigured
+                               ? "Gemini AI picks & names it · no key = works offline"
+                               : "On-device AI · add a free Gemini key in Audio Settings for smarter picks")
+                              .font(.caption2).foregroundColor(.secondary)
+                      }
+                      if let note = engine.lastNote {
+                          Text(note).font(.caption).foregroundColor(.green)
+                              .fixedSize(horizontal: false, vertical: true)
+                      }
+                      if let err = engine.lastError {
+                          Text(err).font(.caption).foregroundColor(.orange)
+                              .fixedSize(horizontal: false, vertical: true)
+                      }
+                  }
+              }
+
+              private func canGenerate(_ text: String) -> Bool {
+                  !busy && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }
+
+              private func generate(_ text: String) {
+                  let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard canGenerate(clean) else { return }
+                  busy = true
+                  hideKeyboard()
+                  engine.lastError = nil
+                  engine.generate(from: clean) { err in
+                      DispatchQueue.main.async {
+                          busy = false
+                          if err == nil { request = "" }
+                      }
+                  }
+              }
+
+              private func surprise() {
+                  guard !busy else { return }
+                  busy = true
+                  engine.lastError = nil
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                      engine.surpriseMix()
+                      busy = false
+                  }
+              }
+
+              private func chip(_ label: String, icon: String?, action: @escaping () -> Void) -> some View {
+                  Button(action: action) {
+                      HStack(spacing: 4) {
+                          if let icon = icon { Image(systemName: icon).font(.caption2) }
+                          Text(label).font(.caption.bold())
+                      }
+                      .padding(.horizontal, 12).padding(.vertical, 6)
+                      .background(AppTheme.accent.opacity(0.14))
+                      .foregroundColor(AppTheme.accent)
+                      .cornerRadius(14)
+                  }
+                  .buttonStyle(.plain)
+                  .disabled(busy)
+              }
           }
 
           struct LikedSongsView: View {
               @EnvironmentObject var musicManager: MusicManager
               var likedSongs: [Song] {
-                  guard !musicManager.playlists.isEmpty else { return [] }
-                  let ids = musicManager.playlists[0].songIDs
-                  return musicManager.songs.filter { ids.contains($0.id) }
+                  guard let liked = musicManager.playlists.first(where: { $0.name == "Liked Songs" }) else { return [] }
+                  let ids = liked.songIDs
+                  return ids.compactMap { id in musicManager.songs.first(where: { $0.id == id }) }
               }
               var body: some View {
                   List {
@@ -8749,21 +9221,31 @@ jobs:
               }
 
               private(set) var entries: [Entry] = []
+              /// Kinds the user deleted by hand. Auto-create must never resurrect these;
+              /// only an explicit user action (Create / Rebuild) un-retires a kind.
+              private(set) var retired: Set<String> = []
               private let key = "asmusic_smart_playlists"
+              private let retiredKey = "asmusic_smart_retired"
               private let lock = NSLock()
 
               private init() { load() }
 
               private func load() {
-                  guard let d = UserDefaults.standard.data(forKey: key),
-                        let arr = try? JSONDecoder().decode([Entry].self, from: d) else { return }
-                  entries = arr
+                  if let d = UserDefaults.standard.data(forKey: key),
+                     let arr = try? JSONDecoder().decode([Entry].self, from: d) {
+                      entries = arr
+                  }
+                  if let arr = UserDefaults.standard.stringArray(forKey: retiredKey) {
+                      retired = Set(arr)
+                  }
               }
 
               private func save() {
                   let snapshot = entries
-                  guard let d = try? JSONEncoder().encode(snapshot) else { return }
-                  UserDefaults.standard.set(d, forKey: key)
+                  if let d = try? JSONEncoder().encode(snapshot) {
+                      UserDefaults.standard.set(d, forKey: key)
+                  }
+                  UserDefaults.standard.set(Array(retired), forKey: retiredKey)
               }
 
               func entry(for kind: String) -> Entry? { entries.first { $0.kind == kind } }
@@ -8786,6 +9268,33 @@ jobs:
               func remove(kind: String) {
                   lock.lock(); defer { lock.unlock() }
                   entries.removeAll { $0.kind == kind }
+                  save()
+              }
+
+              // MARK: Retirement (deleted-by-user protection)
+
+              func isRetired(_ kind: String) -> Bool {
+                  lock.lock(); defer { lock.unlock() }
+                  return retired.contains(kind)
+              }
+
+              func retire(kind: String) {
+                  lock.lock(); defer { lock.unlock() }
+                  retired.insert(kind)
+                  save()
+              }
+
+              func unretire(kind: String) {
+                  lock.lock(); defer { lock.unlock() }
+                  retired.remove(kind)
+                  save()
+              }
+
+              /// Used by the explicit "Rebuild smart playlists now" action — a fresh
+              /// start the user asked for, so previously deleted lists may come back.
+              func unretireAll() {
+                  lock.lock(); defer { lock.unlock() }
+                  retired.removeAll()
                   save()
               }
 
@@ -8905,12 +9414,19 @@ jobs:
                   return made
               }
 
-              /// Create or refresh one suggestion.
+              /// Create or refresh one suggestion. Kinds the user deleted ("retired")
+              /// are skipped by background automation; only an explicit user tap
+              /// (`userInitiated`) brings them back.
               @discardableResult
-              func apply(_ s: SmartPlaylistSuggestion) -> Bool {
+              func apply(_ s: SmartPlaylistSuggestion, userInitiated: Bool = false) -> Bool {
                   guard !s.songIDs.isEmpty else { return false }
+                  let store = SmartPlaylistStore.shared
+                  if store.isRetired(s.kind) {
+                      guard userInitiated else { return false }
+                      store.unretire(kind: s.kind)
+                  }
                   let mm = MusicManager.shared
-                  let id = SmartPlaylistStore.shared.playlistID(for: s.kind)
+                  let id = store.playlistID(for: s.kind)
                   if let id = id, let idx = mm.playlists.firstIndex(where: { $0.id == id }) {
                       mm.playlists[idx].songIDs = s.songIDs
                       mm.savePlaylists()
@@ -8995,7 +9511,7 @@ jobs:
                   if suggestions.isEmpty { rebuild(force: true) }
                   let target = suggestions.first { $0.kind == kind }
                       ?? suggestions.max(by: { $0.count < $1.count })
-                  guard let target = target, target.count > 0, apply(target) else {
+                  guard let target = target, target.count > 0, apply(target, userInitiated: true) else {
                       MusicManager.shared.shuffleAll()
                       return "your library"
                   }
@@ -9004,6 +9520,31 @@ jobs:
                       MusicManager.shared.playPlaylist(pl)
                   }
                   return target.title
+              }
+
+              /// The "Surprise me" button in the Playlists tab: builds (without playing)
+              /// one playlist that fits the current hour of day, and saves it to the
+              /// library. Returns the created playlist's title, or nil when nothing fit.
+              @discardableResult
+              func surpriseMix() -> String? {
+                  if suggestions.isEmpty { rebuild(force: true) }
+                  let hour = Calendar.current.component(.hour, from: Date())
+                  let pool: [String]
+                  switch hour {
+                  case 5..<11:  pool = ["gym", "fresh", "party", "vibe1", "vibe2"]
+                  case 11..<17: pool = ["drive", "arabic", "party", "fresh"]
+                  case 17..<22: pool = ["party", "arabic", "drive", "repeat"]
+                  default:      pool = ["night", "sleep", "calm", "gems"]
+                  }
+                  var candidates = suggestions.filter { pool.contains($0.kind) && $0.count >= 5 }
+                  if candidates.isEmpty { candidates = suggestions.filter { $0.count >= 5 } }
+                  guard let s = candidates.randomElement(), apply(s, userInitiated: true) else {
+                      lastError = "Not enough songs to build a surprise mix yet."
+                      return nil
+                  }
+                  lastNote = "Surprise! “\(s.title)” · \(s.count) songs, ready in My Playlists."
+                  UINotificationFeedbackGenerator().notificationOccurred(.success)
+                  return s.title
               }
 
               /// Stable across launches on purpose: `String.hashValue` is randomized
@@ -9448,7 +9989,7 @@ jobs:
                                                          icon: "wand.and.stars",
                                                          songIDs: ordered.map { $0.song.id },
                                                          usesAI: aiOn)
-                      if self.apply(sug) {
+                      if self.apply(sug, userInitiated: true) {
                           self.suggestions.insert(sug, at: 0)
                           self.lastNote = "“\(title)” — \(ordered.count) songs, ready in Playlists."
                           UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -9502,7 +10043,7 @@ jobs:
                                                                  icon: "wand.and.stars",
                                                                  songIDs: ordered.map { $0.song.id },
                                                                  usesAI: true)
-                              if self.apply(sug) {
+                              if self.apply(sug, userInitiated: true) {
                                   self.suggestions.insert(sug, at: 0)
                                   self.lastNote = "AI built “\(b.title)” · \(ordered.count) songs"
                                   completion?(nil)
@@ -9695,7 +10236,7 @@ jobs:
                       }
                       Spacer()
                       Button {
-                          if engine.apply(s) {
+                          if engine.apply(s, userInitiated: true) {
                               engine.lastNote = "“\(s.title)” · \(s.count) songs"
                           }
                       } label: {
@@ -11540,6 +12081,612 @@ jobs:
                   f.append(Data([0x00, 0x00]))
                   f.append(payload)
                   return f
+              }
+          }
+          SWIFT
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/LibraryDoctor.swift
+          import Foundation
+          import SwiftUI
+          import UIKit
+
+          // ===========================================================================
+          // MARK: - Library Doctor (AI duplicate finder)
+          //
+          // The "check my library for duplicate songs" brain, one button in the Library
+          // tab. It works in two layers and never deletes anything on its own:
+          //
+          //   1. DETECT (always on-device, no key, no network)
+          //      Songs are grouped by a normalized artist+title key, so
+          //      "Amr Diab - Tamally Maak (Official)" and "tamally maak 1" land in the
+          //      same group. Each group is then split by measured duration (±8 s) using
+          //      the AudioLab cache, so a duplicated rip is separated from a genuinely
+          //      different live/remix version of the same song.
+          //
+          //   2. DECIDE (local recommendation + optional AI)
+          //      Every copy gets a keeper score: liked > most played > best measured
+          //      sound quality > higher bitrate > has artwork. The best copy is
+          //      pre-selected to KEEP. With a Gemini key configured, the model reviews
+          //      the same facts and may override the pick (with a short reason) — it
+          //      only ever chooses between files you already own.
+          //
+          // The user reviews each group and presses Delete explicitly; a full-library
+          // "delete all redundant copies" is always confirmed first.
+          // ===========================================================================
+
+          // MARK: - Models
+
+          /// One copy of a duplicated song, with the facts the UI (and the AI) decide on.
+          struct DuplicateSong: Identifiable, Equatable {
+              let song: Song
+              let fileSize: Int64          // bytes on disk
+              let bitrateKbps: Int         // fileSize / duration estimate
+              let duration: Double         // seconds (0 = not measured yet)
+              let quality: Int             // 0…100, from the on-device audio analysis
+              let lowQualityRip: Bool
+              let plays: Int
+              let isLiked: Bool
+
+              var id: UUID { song.id }
+
+              static func == (l: DuplicateSong, r: DuplicateSong) -> Bool { l.id == r.id }
+          }
+
+          /// A set of files the app believes are the same song.
+          struct DuplicateGroup: Identifiable, Equatable {
+              let id: String               // stable key of the group
+              let title: String
+              let artist: String
+              var songs: [DuplicateSong]   // sorted best-copy first
+              /// True when durations were measured and match (±8 s): a duplicated rip.
+              /// False = same song, different version/length — check before deleting.
+              var sameRecording: Bool
+              var recommendedKeepID: UUID
+              var aiNote: String? = nil
+              var aiReviewed: Bool = false
+
+              var keep: DuplicateSong? { songs.first { $0.id == recommendedKeepID } }
+              var redundant: [DuplicateSong] { songs.filter { $0.id != recommendedKeepID } }
+              var reclaimableBytes: Int64 { redundant.reduce(0) { $0 + $1.fileSize } }
+
+              static func == (l: DuplicateGroup, r: DuplicateGroup) -> Bool {
+                  l.id == r.id && l.songs == r.songs && l.recommendedKeepID == r.recommendedKeepID
+                      && l.aiNote == r.aiNote && l.aiReviewed == r.aiReviewed
+              }
+          }
+
+          // MARK: - The doctor
+
+          final class LibraryDoctor: ObservableObject {
+              static let shared = LibraryDoctor()
+
+              @Published private(set) var groups: [DuplicateGroup] = []
+              @Published private(set) var isScanning = false
+              @Published private(set) var lastScan: Date? = nil
+              @Published private(set) var aiBusy = false
+              @Published var lastError: String? = nil
+              @Published var lastNote: String? = nil
+
+              private var lastAutoScan = Date.distantPast
+              private init() {}
+
+              /// Bytes that would be freed by deleting every non-kept copy.
+              var totalReclaimable: Int64 { groups.reduce(0) { $0 + $1.reclaimableBytes } }
+              /// How many files are redundant across all groups.
+              var redundantCount: Int { groups.reduce(0) { $0 + $1.redundant.count } }
+
+              // MARK: Scanning
+
+              /// Passive scan used when the Library tab appears: throttled to once per
+              /// 10 minutes so it never costs anything the user can feel.
+              func autoScan() {
+                  guard Date().timeIntervalSince(lastAutoScan) > 600 else { return }
+                  scan()
+              }
+
+              func scan() {
+                  guard !isScanning else { return }
+                  isScanning = true
+                  lastError = nil
+                  lastNote = nil
+                  lastAutoScan = Date()
+                  // Snapshot everything on the main thread; the heavy lifting then runs
+                  // in the background without touching @Published arrays.
+                  let mm = MusicManager.shared
+                  let songs = mm.songs
+                  let likedIDs = Set(mm.playlists.first(where: { $0.name == "Liked Songs" })?.songIDs ?? [])
+                  DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                      let found = self?.buildGroups(from: songs, likedIDs: likedIDs) ?? []
+                      DispatchQueue.main.async {
+                          guard let self = self else { return }
+                          self.groups = found
+                          self.lastScan = Date()
+                          self.isScanning = false
+                      }
+                  }
+              }
+
+              /// Normalized identity: lowercase, diacritics off, parenthetical junk
+              /// ("(Official Video)", "[HD]") removed, trailing copy markers (" 2",
+              /// " copy") stripped — so the same song lands in one group no matter how
+              /// the file was named.
+              static func identityKey(artist: String, title: String) -> String {
+                  func clean(_ raw: String, stripTrailingMarkers: Bool) -> String {
+                      var x = raw.lowercased()
+                      x = x.folding(options: .diacriticInsensitive, locale: .current)
+                      x = x.replacingOccurrences(of: #"\([^)]*\)"#, with: " ", options: .regularExpression)
+                      x = x.replacingOccurrences(of: #"\[[^\]]*\]"#, with: " ", options: .regularExpression)
+                      x = x.replacingOccurrences(of: #"[^a-z0-9\u0600-\u06FF ]"#, with: " ", options: .regularExpression)
+                      var tokens = x.split(separator: " ").map(String.init)
+                      if stripTrailingMarkers {
+                          while let last = tokens.last,
+                                last == "copy" || last.allSatisfy({ $0.isNumber }) {
+                              tokens.removeLast()
+                              if tokens.isEmpty { break }
+                          }
+                      }
+                      return tokens.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+                  }
+                  var t = clean(title, stripTrailingMarkers: true)
+                  if t.isEmpty { t = clean(title, stripTrailingMarkers: false) }   // titles that ARE numbers
+                  var a = clean(artist, stripTrailingMarkers: false)
+                  // Placeholder artists carry no identity — group those by title only.
+                  let placeholders = ["", "as music", "youtube", "soundcloud", "unknown", "unknown artist"]
+                  if placeholders.contains(a) { a = "~" }
+                  return a + "|" + t
+              }
+
+              private func buildGroups(from songs: [Song], likedIDs: Set<UUID>) -> [DuplicateGroup] {
+                  var byKey: [String: [Song]] = [:]
+                  for s in songs {
+                      let key = Self.identityKey(artist: s.artist, title: s.title)
+                      byKey[key, default: []].append(s)
+                  }
+
+                  let lab = AudioLab.shared
+                  let history = ListenHistory.shared
+                  let fm = FileManager.default
+                  var out: [DuplicateGroup] = []
+
+                  for (key, list) in byKey where list.count > 1 {
+                      // Split the group by measured duration so "same rip twice" and
+                      // "same song, different (live/short) version" don't mix.
+                      var buckets: [[Song]] = []
+                      var unmeasured: [Song] = []
+                      for s in list {
+                          guard let d = lab.features(for: s)?.duration, d > 0 else {
+                              unmeasured.append(s)
+                              continue
+                          }
+                          let matched = buckets.firstIndex(where: { bucket in
+                              guard let ref = lab.features(for: bucket[0])?.duration else { return false }
+                              return abs(ref - d) <= 8
+                          })
+                          if let i = matched { buckets[i].append(s) } else { buckets.append([s]) }
+                      }
+                      // Never measured → still flag by name, marked for extra caution.
+                      if unmeasured.count > 1 { buckets.append(unmeasured) }
+
+                      for bucket in buckets where bucket.count > 1 {
+                          var facts: [DuplicateSong] = bucket.map { s in
+                              let f = lab.features(for: s)
+                              let size = ((try? fm.attributesOfItem(atPath: s.url.path)[.size]) as? Int64) ?? 0
+                              let dur = f?.duration ?? 0
+                              let kbps = dur > 1 ? Int(Double(size) * 8.0 / (dur * 1000.0)) : 0
+                              return DuplicateSong(song: s,
+                                                   fileSize: size,
+                                                   bitrateKbps: kbps,
+                                                   duration: dur,
+                                                   quality: Int((Self.qualityNorm(f) * 100).rounded()),
+                                                   lowQualityRip: f?.isLowQualityRip ?? false,
+                                                   plays: history.playCount(for: s),
+                                                   isLiked: likedIDs.contains(s.id))
+                          }
+                          facts.sort { keeperScore($0) > keeperScore($1) }
+                          let measured = bucket.compactMap { lab.features(for: $0)?.duration }
+                          let sameRecording = measured.count == bucket.count
+                              && ((measured.max() ?? 0) - (measured.min() ?? 0)) <= 8
+                          guard let best = facts.first else { continue }
+                          let displayArtist = list.first(where: { !$0.artist.isEmpty && $0.artist != "AS Music" })?.artist
+                              ?? bucket[0].artist
+                          out.append(DuplicateGroup(id: key + "#" + String(bucket.count) + "-" + best.id.uuidString,
+                                                    title: bucket[0].title,
+                                                    artist: displayArtist,
+                                                    songs: facts,
+                                                    sameRecording: sameRecording,
+                                                    recommendedKeepID: best.id))
+                      }
+                  }
+                  // Biggest space savings first.
+                  return out.sorted { $0.reclaimableBytes > $1.reclaimableBytes }
+              }
+
+              /// 0…1 estimate of how clean a master sounds — same formula the smart
+              /// playlists use, so "keep the best sounding copy" means the same thing
+              /// everywhere in the app.
+              static func qualityNorm(_ f: TrackFeatures?) -> Double {
+                  guard let f = f else { return 0.5 }
+                  let clipPenalty = min(0.5, f.clipRatio * 60)
+                  let tooQuiet = f.loudness < -24 ? min(0.4, (-24 - f.loudness) / 22) : 0
+                  let crushed = f.dynRange < 3.5 ? 0.25 : (f.dynRange < 6 ? 0.1 : 0)
+                  let bonus = f.dynRange > 8 ? 0.1 : 0
+                  return FeatureMath.clamp01(0.75 + bonus - clipPenalty - tooQuiet - crushed)
+              }
+
+              /// Which copy deserves to survive. Liked beats plays, plays beat quality,
+              /// quality beats size; a known-bad rip is pushed to the bottom.
+              private func keeperScore(_ d: DuplicateSong) -> Double {
+                  var s = 0.0
+                  if d.isLiked { s += 2.2 }
+                  s += min(1.6, Double(d.plays) * 0.15)
+                  s += (Double(d.quality) / 100.0) * 1.5
+                  s += min(1.0, Double(d.bitrateKbps) / 250.0)
+                  if d.song.artworkURL != nil { s += 0.3 }
+                  if d.lowQualityRip { s -= 0.9 }
+                  return s
+              }
+
+              // MARK: AI review (optional — only with the user's own Gemini key)
+
+              /// Sends each group's FACTS (never the audio) to the model and lets it
+              /// pick the copy to keep, with a short reason. On any failure the local
+              /// recommendation simply stays.
+              func aiReview(completion: (() -> Void)? = nil) {
+                  guard GeminiAI.shared.isConfigured else {
+                      lastError = "Add your free Gemini key in the player's Audio Settings to let AI pick the best copies — without a key the app still recommends locally."
+                      completion?()
+                      return
+                  }
+                  guard !groups.isEmpty else { completion?(); return }
+                  aiBusy = true
+                  lastError = nil
+                  lastNote = nil
+
+                  let reviewed = Array(groups.prefix(12))
+                  var lines: [String] = []
+                  for (gi, g) in reviewed.enumerated() {
+                      lines.append("Group \(gi + 1):")
+                      for (si, d) in g.songs.prefix(6).enumerated() {
+                          let dur = d.duration > 0 ? "\(Int(d.duration))s" : "?s"
+                          let mb = String(format: "%.1fMB", Double(d.fileSize) / 1_048_576)
+                          lines.append("\(si)|\(d.song.title)|\(d.song.artist)|\(dur)|\(mb)|\(d.bitrateKbps)kbps|plays \(d.plays)|liked \(d.isLiked ? "yes" : "no")|quality \(d.quality)/100|sameRecording \(g.sameRecording ? "yes" : "no")")
+                      }
+                  }
+                  let system = """
+                  You are the library-cleaner inside a personal offline music player.
+                  The user has groups of duplicate audio files. For EACH group choose the ONE copy to KEEP.
+                  Prefer, in this order: a copy the user liked, the most played copy, the best sounding copy (higher quality score, higher bitrate), then the complete take.
+                  Reply with ONLY valid JSON, no markdown:
+                  {"decisions":[{"keep":<index>,"note":"max 8 words why"}]}
+                  One decision per group, in the order the groups were given.
+                  """
+                  GeminiAI.shared.completeJSON(system: system, user: lines.joined(separator: "\n")) { [weak self] obj in
+                      guard let self = self else { return }
+                      self.aiBusy = false
+                      guard let decisions = obj?["decisions"] as? [[String: Any]] else {
+                          self.lastError = "The AI didn't answer with a usable list — the app's own recommendation is still shown."
+                          completion?()
+                          return
+                      }
+                      var changed = 0
+                      for (gi, decision) in decisions.enumerated() where gi < reviewed.count {
+                          let anyIdx = decision["keep"]
+                          let idx: Int?
+                          if let n = anyIdx as? Int { idx = n }
+                          else if let s = anyIdx as? String, let n = Int(s) { idx = n }
+                          else { idx = nil }
+                          guard let i = idx, i >= 0, i < reviewed[gi].songs.count else { continue }
+                          let pick = reviewed[gi].songs[i].id
+                          guard let giFull = self.groups.firstIndex(where: { $0.id == reviewed[gi].id }) else { continue }
+                          if self.groups[giFull].recommendedKeepID != pick { changed += 1 }
+                          self.groups[giFull].recommendedKeepID = pick
+                          self.groups[giFull].aiReviewed = true
+                          if let note = decision["note"] as? String, !note.isEmpty {
+                              self.groups[giFull].aiNote = String(note.prefix(80))
+                          }
+                      }
+                      self.lastNote = changed == 0
+                          ? "AI agrees with the app's picks."
+                          : "AI re-picked \(changed) group\(changed == 1 ? "" : "s") — check the AI PICK badges."
+                      completion?()
+                  }
+              }
+
+              // MARK: Deleting (always user-confirmed, done through MusicManager)
+
+              /// Deletes every copy in `group` except `keepID`. Returns files removed.
+              @discardableResult
+              func deleteRedundant(in group: DuplicateGroup, keeping keepID: UUID) -> Int {
+                  let mm = MusicManager.shared
+                  var removed = 0
+                  for d in group.songs where d.id != keepID {
+                      if let live = mm.songs.first(where: { $0.id == d.id }) {
+                          mm.deleteSong(live)
+                          removed += 1
+                      }
+                  }
+                  if removed > 0 {
+                      UINotificationFeedbackGenerator().notificationOccurred(.success)
+                  }
+                  return removed
+              }
+          }
+
+          // MARK: - Formatting helpers
+
+          enum DoctorFormat {
+              static func mb(_ bytes: Int64) -> String {
+                  String(format: "%.1f MB", Double(bytes) / 1_048_576)
+              }
+              static func time(_ seconds: Double) -> String {
+                  guard seconds > 0 else { return "—" }
+                  let m = Int(seconds) / 60, s = Int(seconds) % 60
+                  return String(format: "%d:%02d", m, s)
+              }
+          }
+
+          // MARK: - Review UI
+
+          /// The sheet opened from the duplicate button in the Library tab.
+          struct DuplicateReviewView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              @ObservedObject private var doctor = LibraryDoctor.shared
+              @ObservedObject private var ai = GeminiAI.shared
+              @Environment(\.presentationMode) var pm
+
+              /// group id → the copy the user chose to keep (falls back to the
+              /// recommendation).
+              @State private var keepSelection: [String: UUID] = [:]
+              @State private var confirmDeleteAll = false
+              @State private var groupToClean: DuplicateGroup? = nil
+              @State private var freedNote: String? = nil
+
+              var body: some View {
+                  NavigationView {
+                      Group {
+                          if doctor.isScanning && doctor.groups.isEmpty {
+                              VStack(spacing: 12) {
+                                  ProgressView()
+                                  Text("Comparing your songs…").font(.subheadline).foregroundColor(.secondary)
+                              }
+                          } else if doctor.groups.isEmpty {
+                              emptyState
+                          } else {
+                              resultsList
+                          }
+                      }
+                      .navigationTitle("Duplicate Finder")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar {
+                          ToolbarItem(placement: .navigationBarLeading) {
+                              Button("Rescan") { doctor.scan() }
+                                  .disabled(doctor.isScanning)
+                          }
+                          ToolbarItem(placement: .navigationBarTrailing) {
+                              Button("Done") { pm.wrappedValue.dismiss() }
+                          }
+                      }
+                      .alert("Delete all redundant copies?", isPresented: $confirmDeleteAll) {
+                          Button("Delete \(doctor.redundantCount) file(s)", role: .destructive) {
+                              deleteAllRedundant()
+                          }
+                          Button("Cancel", role: .cancel) { }
+                      } message: {
+                          Text("The app keeps the best copy of every group (your likes, plays and sound quality decide) and deletes the rest. Songs can't be restored afterwards.")
+                      }
+                      .alert("Clean this group?",
+                             isPresented: Binding(get: { groupToClean != nil },
+                                                  set: { if !$0 { groupToClean = nil } })) {
+                          Button("Delete extra copies", role: .destructive) {
+                              if let g = groupToClean { cleanGroup(g) }
+                          }
+                          Button("Cancel", role: .cancel) { }
+                      } message: {
+                          if let g = groupToClean {
+                              let keepTitle = g.songs.first(where: { $0.id == selectedKeep(in: g) })?.song.title ?? "the best copy"
+                              Text("Keeps “\(keepTitle)” and deletes \(g.songs.count - 1) other file(s) of this song.")
+                          }
+                      }
+                  }
+                  .navigationViewStyle(StackNavigationViewStyle())
+                  .onAppear {
+                      if doctor.groups.isEmpty && !doctor.isScanning { doctor.scan() }
+                  }
+              }
+
+              // MARK: Empty / clean state
+
+              private var emptyState: some View {
+                  VStack(spacing: 12) {
+                      Image(systemName: "checkmark.seal.fill")
+                          .font(.system(size: 52)).foregroundColor(.green)
+                      Text("No duplicates found").font(.title3).bold()
+                      Text("Your library looks clean. Songs are matched by name and artist, then by how long they play — so re-downloads and double rips get caught.")
+                          .font(.subheadline).foregroundColor(.secondary)
+                          .multilineTextAlignment(.center).padding(.horizontal, 30)
+                      Button { doctor.scan() } label: {
+                          Label("Scan again", systemImage: "arrow.clockwise")
+                              .font(.subheadline.bold())
+                              .padding(.horizontal, 16).padding(.vertical, 8)
+                              .background(AppTheme.accent.opacity(0.15))
+                              .foregroundColor(AppTheme.accent)
+                              .cornerRadius(18)
+                      }
+                      if let last = doctor.lastScan {
+                          Text("Last scan \(timeAgo(last))").font(.caption2).foregroundColor(.secondary)
+                      }
+                  }
+              }
+
+              // MARK: Results
+
+              private var resultsList: some View {
+                  List {
+                      Section {
+                          HStack(spacing: 12) {
+                              Image(systemName: "doc.on.doc")
+                                  .font(.title3).foregroundColor(AppTheme.accent)
+                              VStack(alignment: .leading, spacing: 2) {
+                                  Text("\(doctor.groups.count) duplicate group\(doctor.groups.count == 1 ? "" : "s") · \(doctor.redundantCount) extra file(s)")
+                                      .font(.subheadline).bold()
+                                  Text("Delete the extras to free \(DoctorFormat.mb(doctor.totalReclaimable))")
+                                      .font(.caption).foregroundColor(.secondary)
+                              }
+                              Spacer()
+                              if doctor.isScanning { ProgressView() }
+                          }
+                          if let note = freedNote ?? doctor.lastNote {
+                              Text(note).font(.caption).foregroundColor(.green)
+                          }
+                          if let err = doctor.lastError {
+                              Text(err).font(.caption).foregroundColor(.orange)
+                          }
+                      }
+
+                      ForEach(doctor.groups) { g in
+                          groupSection(g)
+                      }
+
+                      Section(footer: Text("Nothing is deleted automatically — you pick the copy to keep (the app pre-selects the best one) and press Delete yourself.")) {
+                          if ai.isConfigured {
+                              Button {
+                                  hideKeyboard()
+                                  doctor.aiReview()
+                              } label: {
+                                  Label(doctor.aiBusy ? "AI is comparing your copies…" : "Ask AI which copy to keep",
+                                        systemImage: "wand.and.stars")
+                                      .foregroundColor(AppTheme.accent)
+                              }
+                              .disabled(doctor.aiBusy || doctor.groups.isEmpty)
+                          }
+                          Button(role: .destructive) {
+                              confirmDeleteAll = true
+                          } label: {
+                              Label("Delete \(doctor.redundantCount) redundant file(s) · free \(DoctorFormat.mb(doctor.totalReclaimable))",
+                                    systemImage: "trash")
+                          }
+                          .disabled(doctor.redundantCount == 0)
+                      }
+                  }
+              }
+
+              private func groupSection(_ g: DuplicateGroup) -> some View {
+                  Section {
+                      ForEach(g.songs) { d in
+                          dupRow(g, d)
+                      }
+                      Button(role: .destructive) {
+                          groupToClean = g
+                      } label: {
+                          Label("Keep only the selected copy (delete \(g.songs.count - 1))",
+                                systemImage: "trash")
+                              .font(.caption)
+                      }
+                  } header: {
+                      HStack(spacing: 6) {
+                          Text("\(g.title) — \(g.artist)").lineLimit(1)
+                          Spacer()
+                          if !g.sameRecording {
+                              Text("DIFFERENT VERSIONS")
+                                  .font(.system(size: 8, weight: .black))
+                                  .padding(.horizontal, 5).padding(.vertical, 2)
+                                  .background(Color.orange.opacity(0.2))
+                                  .foregroundColor(.orange)
+                                  .cornerRadius(4)
+                          }
+                          Text("+\(DoctorFormat.mb(g.reclaimableBytes))")
+                              .font(.system(size: 9, weight: .bold))
+                              .foregroundColor(.secondary)
+                      }
+                  } footer: {
+                      if let note = g.aiNote {
+                          Text("AI: \(note)").font(.caption2).foregroundColor(AppTheme.accent)
+                      } else if !g.sameRecording {
+                          Text("Lengths differ — could be a live/remix version. Double-check before deleting.")
+                      }
+                  }
+              }
+
+              private func dupRow(_ g: DuplicateGroup, _ d: DuplicateSong) -> some View {
+                  let selected = selectedKeep(in: g) == d.id
+                  return Button {
+                      keepSelection[g.id] = d.id
+                  } label: {
+                      HStack(spacing: 10) {
+                          Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                              .font(.title3)
+                              .foregroundColor(selected ? AppTheme.accent : .secondary.opacity(0.6))
+                          ArtworkView(song: d.song, size: 40, cornerRadius: 6)
+                          VStack(alignment: .leading, spacing: 2) {
+                              HStack(spacing: 6) {
+                                  Text(d.song.title).font(.subheadline).foregroundColor(.primary).lineLimit(1)
+                                  if d.id == g.recommendedKeepID {
+                                      Text(d.aiReviewed ? "AI PICK" : "BEST")
+                                          .font(.system(size: 8, weight: .black))
+                                          .padding(.horizontal, 5).padding(.vertical, 2)
+                                          .background(AppTheme.accent.opacity(0.18))
+                                          .foregroundColor(AppTheme.accent)
+                                          .cornerRadius(4)
+                                  }
+                              }
+                              Text(detailLine(d)).font(.caption2).foregroundColor(.secondary).lineLimit(2)
+                          }
+                          Spacer()
+                          if d.isLiked {
+                              Image(systemName: "heart.fill").font(.caption).foregroundColor(.pink)
+                          }
+                      }
+                      .contentShape(Rectangle())
+                  }
+                  .buttonStyle(.plain)
+              }
+
+              private func detailLine(_ d: DuplicateSong) -> String {
+                  var parts: [String] = [DoctorFormat.time(d.duration)]
+                  parts.append(DoctorFormat.mb(d.fileSize))
+                  if d.bitrateKbps > 0 { parts.append("\(d.bitrateKbps) kbps") }
+                  if d.plays > 0 { parts.append("\(d.plays) plays") }
+                  parts.append("quality \(d.quality)/100")
+                  if d.lowQualityRip { parts.append("rough rip") }
+                  return parts.joined(separator: " · ")
+              }
+
+              private func selectedKeep(in g: DuplicateGroup) -> UUID {
+                  keepSelection[g.id] ?? g.recommendedKeepID
+              }
+
+              // MARK: Actions
+
+              private func cleanGroup(_ g: DuplicateGroup) {
+                  let freed = doctor.deleteRedundant(in: g, keeping: selectedKeep(in: g))
+                  freedNote = "Removed \(freed) file\(freed == 1 ? "" : "s")."
+                  groupToClean = nil
+                  rescanSoon()
+              }
+
+              private func deleteAllRedundant() {
+                  let before = doctor.totalReclaimable
+                  var removed = 0
+                  for g in doctor.groups {
+                      removed += doctor.deleteRedundant(in: g, keeping: selectedKeep(in: g))
+                  }
+                  freedNote = removed == 0
+                      ? "Nothing to delete — every group already keeps its best copy."
+                      : "Removed \(removed) duplicate file\(removed == 1 ? "" : "s") · freed about \(DoctorFormat.mb(before))."
+                  rescanSoon()
+              }
+
+              /// Gives MusicManager's file re-scan a beat to land before re-grouping.
+              private func rescanSoon() {
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                      doctor.scan()
+                  }
+              }
+
+              private func timeAgo(_ d: Date) -> String {
+                  let secs = Int(Date().timeIntervalSince(d))
+                  if secs < 60 { return "just now" }
+                  if secs < 3600 { return "\(secs / 60) min ago" }
+                  return "\(secs / 3600) h ago"
               }
           }
           SWIFT

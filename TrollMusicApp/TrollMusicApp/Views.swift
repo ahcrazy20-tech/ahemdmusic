@@ -1002,16 +1002,89 @@ struct ThemePickerView: View {
 // ---------------------------------------------------------------------------
 // MARK: - Library
 // ---------------------------------------------------------------------------
+
+/// How the All-Songs section is ordered. Persisted, applied live.
+enum LibrarySort: String, CaseIterable, Identifiable {
+    case title = "Title"
+    case artist = "Artist"
+    case recent = "Recently added"
+    case mostPlayed = "Most played"
+
+    var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .title: return "textformat"
+        case .artist: return "person"
+        case .recent: return "clock"
+        case .mostPlayed: return "flame"
+        }
+    }
+}
+
 struct LibraryView: View {
     @EnvironmentObject var musicManager: MusicManager
+    @ObservedObject private var doctor = LibraryDoctor.shared
     @State private var showingOptionsFor: Song?
     @State private var showingRenameFor: Song?
     @State private var newNameInput = ""
     @State private var searchText = ""
+    @State private var showDuplicateDoctor = false
+    @AppStorage("asmusic_lib_sort") private var sortRaw: String = LibrarySort.title.rawValue
 
+    /// Searches title AND artist AND genre, ranked by where the match is —
+    /// a title hit beats an artist hit beats a genre hit.
     var filteredSongs: [Song] {
-        if searchText.trimmingCharacters(in: .whitespaces).isEmpty { return musicManager.songs }
-        return musicManager.songs.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return sorted(musicManager.songs) }
+        func score(_ s: Song) -> Int {
+            let t = s.title.lowercased()
+            let a = s.artist.lowercased()
+            let g = (s.genre ?? "").lowercased()
+            if t.hasPrefix(q) { return 4 }
+            if t.contains(q) { return 3 }
+            if a.contains(q) { return 2 }
+            if g.contains(q) { return 1 }
+            return 0
+        }
+        return musicManager.songs
+            .compactMap { s -> (song: Song, rank: Int)? in
+                let r = score(s)
+                return r > 0 ? (s, r) : nil
+            }
+            .sorted { l, r in
+                if l.rank != r.rank { return l.rank > r.rank }
+                return l.song.title.localizedCaseInsensitiveCompare(r.song.title) == .orderedAscending
+            }
+            .map { $0.song }
+    }
+
+    private func sorted(_ list: [Song]) -> [Song] {
+        switch LibrarySort(rawValue: sortRaw) ?? .title {
+        case .title:
+            return list.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        case .artist:
+            return list.sorted {
+                let cmp = $0.artist.localizedCaseInsensitiveCompare($1.artist)
+                if cmp == .orderedSame {
+                    return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+                }
+                return cmp == .orderedAscending
+            }
+        case .recent:
+            return list.sorted { modDate($0.url) > modDate($1.url) }
+        case .mostPlayed:
+            return list.sorted {
+                let lp = ListenHistory.shared.playCount(for: $0)
+                let rp = ListenHistory.shared.playCount(for: $1)
+                if lp != rp { return lp > rp }
+                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+        }
+    }
+
+    private func modDate(_ url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDate]))?.contentModificationDate
+            ?? .distantPast
     }
 
     private var recentlyPlayed: [Song] {
@@ -1045,9 +1118,29 @@ struct LibraryView: View {
                         }
                     }
                 } header: {
-                    if !musicManager.upNextQueue.isEmpty { Text("Up Next") }
+                    if !musicManager.upNextQueue.isEmpty {
+                        HStack {
+                            Text("Up Next")
+                            Spacer()
+                            Button("Clear") { musicManager.clearUpNext() }
+                                .font(.caption.bold())
+                                .foregroundColor(AppTheme.accent)
+                        }
+                    }
                 }
                 Section {
+                    if filteredSongs.isEmpty && !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.title2).foregroundColor(.secondary)
+                            Text("No matches for “\(searchText)”")
+                                .font(.subheadline).foregroundColor(.secondary)
+                            Text("Search finds titles, artists and genres.")
+                                .font(.caption2).foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 24)
+                    }
                     ForEach(filteredSongs) { song in
                         songRow(song, isQueued: false)
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
@@ -1083,17 +1176,51 @@ struct LibraryView: View {
                     }
                 } header: {
                     if !musicManager.songs.isEmpty {
-                        Text("\(musicManager.songs.count) songs")
+                        let q = searchText.trimmingCharacters(in: .whitespaces)
+                        if q.isEmpty {
+                            Text("\(musicManager.songs.count) songs · by \(LibrarySort(rawValue: sortRaw)?.rawValue ?? "Title")")
+                        } else {
+                            Text("\(filteredSongs.count) of \(musicManager.songs.count) songs")
+                        }
                     }
                 }
             }
-            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search your library")
+            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search titles, artists, genres")
             .navigationTitle("Your Library").onAppear {
                 musicManager.loadSongs()
                 ITunesEnricher.shared.enrichLibrary()
+                // Cheap background pass: badge the duplicate button when the
+                // library visibly contains double downloads.
+                LibraryDoctor.shared.autoScan()
             }
-            .refreshable { musicManager.loadSongs(); ITunesEnricher.shared.enrichLibrary() }
+            .refreshable {
+                musicManager.loadSongs()
+                ITunesEnricher.shared.enrichLibrary()
+                LibraryDoctor.shared.scan()
+            }
+            .sheet(isPresented: $showDuplicateDoctor) {
+                DuplicateReviewView().environmentObject(musicManager)
+            }
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button { showDuplicateDoctor = true } label: {
+                        Image(systemName: "doc.on.doc")
+                            .overlay(alignment: .topTrailing) {
+                                if doctor.redundantCount > 0 {
+                                    Text("\(min(doctor.redundantCount, 99))")
+                                        .font(.system(size: 9, weight: .black))
+                                        .foregroundColor(.white)
+                                        .padding(3)
+                                        .background(Color.red)
+                                        .clipShape(Circle())
+                                        .offset(x: 9, y: -9)
+                                }
+                            }
+                    }
+                    .accessibilityLabel(doctor.redundantCount > 0
+                                        ? "Find duplicate songs (\(doctor.redundantCount) found)"
+                                        : "Find duplicate songs")
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     VoiceSearchButton(placeholderHint: "a song in your library") { heard in
                         searchText = heard
@@ -1108,6 +1235,26 @@ struct LibraryView: View {
                         Button { musicManager.toggleSmartRadio() } label: {
                             Label(musicManager.smartRadioMode ? "Smart Radio ON" : "Smart Radio (recommended)",
                                   systemImage: "dot.radiowaves.left.and.right")
+                        }
+                        Divider()
+                        Text("Sort by")
+                        ForEach(LibrarySort.allCases) { mode in
+                            Button {
+                                sortRaw = mode.rawValue
+                            } label: {
+                                if sortRaw == mode.rawValue {
+                                    Label(mode.rawValue, systemImage: "checkmark")
+                                } else {
+                                    Label(mode.rawValue, systemImage: mode.icon)
+                                }
+                            }
+                        }
+                        Divider()
+                        Button { showDuplicateDoctor = true } label: {
+                            Label(doctor.redundantCount > 0
+                                  ? "Find Duplicates (\(doctor.redundantCount) found)"
+                                  : "Find Duplicates",
+                                  systemImage: "doc.on.doc")
                         }
                     } label: {
                         Image(systemName: "slider.horizontal.3")
@@ -1169,15 +1316,46 @@ struct LibraryView: View {
 struct PlaylistDetailView: View {
     @EnvironmentObject var musicManager: MusicManager
     var playlist: Playlist
-    var songsInPlaylist: [Song] { musicManager.songs.filter { playlist.songIDs.contains($0.id) } }
+    @Environment(\.presentationMode) var pm
+    @State private var confirmDelete = false
+    @State private var showRename = false
+    @State private var renameText = ""
+
+    /// Live copy from the manager, so renames/deletes reflect immediately.
+    private var live: Playlist {
+        musicManager.playlists.first(where: { $0.id == playlist.id }) ?? playlist
+    }
+    /// Ordered by the playlist itself — smart playlists are DJ-ordered, so
+    /// re-sorting them by title would throw the flow away.
+    var songsInPlaylist: [Song] {
+        live.songIDs.compactMap { id in musicManager.songs.first(where: { $0.id == id }) }
+    }
+    private var isProtected: Bool { live.name == "Liked Songs" }
+
+    private var totalMinutes: Int? {
+        var total = 0.0
+        var known = 0
+        for s in songsInPlaylist {
+            if let d = AudioLab.shared.features(for: s)?.duration, d > 0 {
+                total += d
+                known += 1
+            }
+        }
+        guard known > 0 else { return nil }
+        return Int((total / 60).rounded())
+    }
+
     var body: some View {
         List {
             if songsInPlaylist.isEmpty {
                 Text("No songs yet. Add from Library.").foregroundColor(.secondary).padding()
             }
-            ForEach(songsInPlaylist) { song in
+            ForEach(Array(songsInPlaylist.enumerated()), id: \.element.id) { index, song in
                 Button { musicManager.playSong(song) } label: {
-                    HStack {
+                    HStack(spacing: 10) {
+                        Text("\(index + 1)")
+                            .font(.caption2).foregroundColor(.secondary)
+                            .frame(width: 18, alignment: .trailing)
                         ArtworkView(song: song, size: 40, cornerRadius: 5, fallbackSystemName: "music.note")
                         VStack(alignment: .leading) {
                             Text(song.title).foregroundColor(.primary).lineLimit(1)
@@ -1186,41 +1364,113 @@ struct PlaylistDetailView: View {
                         Spacer()
                     }
                 }
+                .contextMenu {
+                    Button { musicManager.playNext(song) } label: { Label("Play Next", systemImage: "text.insert") }
+                    Button { musicManager.playLater(song) } label: { Label("Play Later", systemImage: "text.append") }
+                }
             }
             .onDelete { indexSet in
-                if let pIndex = musicManager.playlists.firstIndex(where: { $0.id == playlist.id }) {
-                    indexSet.forEach { musicManager.playlists[pIndex].songIDs.remove(at: $0) }
+                if let pIndex = musicManager.playlists.firstIndex(where: { $0.id == live.id }) {
+                    let ids = indexSet.compactMap { i -> UUID? in
+                        i < songsInPlaylist.count ? songsInPlaylist[i].id : nil
+                    }
+                    musicManager.playlists[pIndex].songIDs.removeAll { ids.contains($0) }
                     musicManager.savePlaylists()
                 }
             }
         }
-        .navigationTitle(playlist.name)
+        .navigationTitle(live.name)
         .toolbar {
-            if !songsInPlaylist.isEmpty {
-                Button {
-                    // Play all shuffled
-                    if let first = songsInPlaylist.first { musicManager.playSong(first) }
-                    musicManager.isShuffle = true
-                } label: { Image(systemName: "shuffle") }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                HStack(spacing: 14) {
+                    if !songsInPlaylist.isEmpty {
+                        Button {
+                            musicManager.playPlaylist(live)
+                        } label: { Image(systemName: "play.fill") }
+                        .accessibilityLabel("Play playlist in order")
+                        Button {
+                            musicManager.isShuffle = true
+                            musicManager.playPlaylist(live)
+                        } label: { Image(systemName: "shuffle") }
+                        .accessibilityLabel("Shuffle playlist")
+                    }
+                    if !isProtected {
+                        Menu {
+                            Button {
+                                renameText = live.name
+                                showRename = true
+                            } label: { Label("Rename Playlist", systemImage: "pencil") }
+                            Button(role: .destructive) {
+                                confirmDelete = true
+                            } label: { Label("Delete Playlist", systemImage: "trash") }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                    }
+                }
             }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if !songsInPlaylist.isEmpty {
+                HStack(spacing: 6) {
+                    Text("\(songsInPlaylist.count) songs")
+                    if let mins = totalMinutes {
+                        Text("· about \(mins) min")
+                    }
+                    if SmartPlaylistStore.shared.isSmart(live.id) {
+                        Label("smart order", systemImage: "sparkles")
+                    }
+                    Spacer()
+                }
+                .font(.caption2).foregroundColor(.secondary)
+                .padding(.horizontal, 16).padding(.vertical, 6)
+                .background(.bar)
+            }
+        }
+        .alert("Delete Playlist?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) {
+                musicManager.deletePlaylist(live)
+                pm.wrappedValue.dismiss()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("“\(live.name)” (\(songsInPlaylist.count) songs) will be removed. The songs themselves stay in your Library.")
+        }
+        .alert("Rename Playlist", isPresented: $showRename) {
+            TextField("Playlist Name", text: $renameText)
+            Button("Save") {
+                if !renameText.isEmpty { musicManager.renamePlaylist(live, to: renameText) }
+            }
+            Button("Cancel", role: .cancel) { }
         }
     }
 }
 
 struct PlaylistsView: View {
     @EnvironmentObject var musicManager: MusicManager
+    @ObservedObject private var engine = SmartPlaylistEngine.shared
     @State private var showingNewPlaylist = false
     @State private var newPlaylistName = ""
     @State private var showAsk = false
     @State private var askText = ""
+    @State private var playlistToDelete: Playlist? = nil
+    @State private var playlistToRename: Playlist? = nil
+    @State private var renameText = ""
+
+    /// Every playlist except the protected "Liked Songs" — looked up by name,
+    /// never by position, so deleting lists can't shift the wrong one in.
+    private var userPlaylists: [Playlist] {
+        musicManager.playlists.filter { $0.name != "Liked Songs" }
+    }
 
     /// Explains the ✨ badges and gives a manual "rebuild now" escape hatch.
     private var smartFooter: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off.")
+            Text("✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off. Swipe any playlist to delete it — deleted smart playlists stay deleted.")
                 .font(.caption2).foregroundColor(.secondary)
             HStack(spacing: 10) {
                 Button("Rebuild smart playlists now") {
+                    SmartPlaylistStore.shared.unretireAll()
                     SmartPlaylistEngine.shared.rebuild(force: true)
                     _ = SmartPlaylistEngine.shared.applyAll()
                 }
@@ -1229,10 +1479,10 @@ struct PlaylistsView: View {
                     .font(.caption.bold())
             }
             .foregroundColor(AppTheme.accent)
-            if let note = SmartPlaylistEngine.shared.lastNote {
+            if let note = engine.lastNote {
                 Text(note).font(.caption2).foregroundColor(.green)
             }
-            if let err = SmartPlaylistEngine.shared.lastError {
+            if let err = engine.lastError {
                 Text(err).font(.caption2).foregroundColor(.orange)
             }
         }
@@ -1248,27 +1498,47 @@ struct PlaylistsView: View {
                             Image(systemName: "heart.fill").foregroundColor(.pink).font(.title2).frame(width:36)
                             VStack(alignment:.leading) {
                                 Text("Liked Songs").font(.headline)
-                                let liked = musicManager.playlists.first?.songIDs.count ?? 0
+                                let liked = musicManager.playlists
+                                    .first(where: { $0.name == "Liked Songs" })?.songIDs.count ?? 0
                                 Text("\(liked) songs").font(.caption).foregroundColor(.secondary)
                             }
                         }
                     }
                 }
+
+                Section(header: Label("AI Playlist Generator", systemImage: "wand.and.stars")) {
+                    PlaylistAICard()
+                }
+
                 Section(header: Text("My Playlists"),
                         footer: smartFooter) {
-                    ForEach(musicManager.playlists.dropFirst()) { playlist in
+                    if userPlaylists.isEmpty {
+                        Text("No playlists yet — let the AI build one above, or tap +.")
+                            .font(.subheadline).foregroundColor(.secondary)
+                    }
+                    ForEach(userPlaylists) { playlist in
                         NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
-                            HStack(spacing: 8) {
-                                if SmartPlaylistStore.shared.isSmart(playlist.id) {
-                                    Image(systemName: "sparkles")
-                                        .font(.caption2).foregroundColor(AppTheme.accent)
-                                        .accessibilityLabel("Smart playlist — refreshed automatically")
-                                }
-                                Text(playlist.name).font(.headline).padding(.vertical, 5)
-                                Spacer()
-                                Text("\(playlist.songIDs.count)")
-                                    .font(.caption2).foregroundColor(.secondary)
+                            playlistRow(playlist)
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                playlistToDelete = playlist
+                            } label: {
+                                Label("Delete", systemImage: "trash")
                             }
+                        }
+                        .contextMenu {
+                            Button {
+                                musicManager.playPlaylist(playlist)
+                            } label: { Label("Play", systemImage: "play.fill") }
+                            Button {
+                                playlistToRename = playlist
+                                renameText = playlist.name
+                            } label: { Label("Rename", systemImage: "pencil") }
+                            Divider()
+                            Button(role: .destructive) {
+                                playlistToDelete = playlist
+                            } label: { Label("Delete Playlist", systemImage: "trash") }
                         }
                     }
                 }
@@ -1285,6 +1555,31 @@ struct PlaylistsView: View {
                 Button("Cancel", role: .cancel) { askText = "" }
             } message: {
                 Text("Built from the songs already in your Library — offline if you have no AI key set.")
+            }
+            .alert("Delete Playlist?",
+                   isPresented: Binding(get: { playlistToDelete != nil },
+                                        set: { if !$0 { playlistToDelete = nil } })) {
+                Button("Delete", role: .destructive) {
+                    if let p = playlistToDelete { musicManager.deletePlaylist(p) }
+                    playlistToDelete = nil
+                }
+                Button("Cancel", role: .cancel) { playlistToDelete = nil }
+            } message: {
+                if let p = playlistToDelete {
+                    Text("“\(p.name)” (\(p.songIDs.count) songs) will be removed. Your songs stay in the Library — only the list is deleted.")
+                }
+            }
+            .alert("Rename Playlist",
+                   isPresented: Binding(get: { playlistToRename != nil },
+                                        set: { if !$0 { playlistToRename = nil } })) {
+                TextField("Playlist Name", text: $renameText)
+                Button("Save") {
+                    if let p = playlistToRename, !renameText.isEmpty {
+                        musicManager.renamePlaylist(p, to: renameText)
+                    }
+                    playlistToRename = nil
+                }
+                Button("Cancel", role: .cancel) { playlistToRename = nil }
             }
             .navigationTitle("Playlists")
             .toolbar {
@@ -1309,14 +1604,157 @@ struct PlaylistsView: View {
         }
         .navigationViewStyle(StackNavigationViewStyle())
     }
+
+    private func playlistRow(_ playlist: Playlist) -> some View {
+        HStack(spacing: 8) {
+            if SmartPlaylistStore.shared.isSmart(playlist.id) {
+                Image(systemName: "sparkles")
+                    .font(.caption2).foregroundColor(AppTheme.accent)
+                    .accessibilityLabel("Smart playlist — refreshed automatically")
+            }
+            Text(playlist.name).font(.headline).padding(.vertical, 5).lineLimit(1)
+            Spacer()
+            Text("\(playlist.songIDs.count)")
+                .font(.caption2).foregroundColor(.secondary)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MARK: - AI Playlist Generator (the card at the top of the Playlists tab)
+//
+// One field + one button: describe the vibe ("quiet arabic for a drive",
+// "جيم حماسية", "90s road trip") and the SmartPlaylistEngine builds it from
+// the user's OWN library — with Gemini when a key is set, with the local
+// Arabic/English parser when not. Quick mood chips and a time-of-day
+// "Surprise me" give zero-typing paths to the same engine.
+// ---------------------------------------------------------------------------
+struct PlaylistAICard: View {
+    @ObservedObject private var engine = SmartPlaylistEngine.shared
+    @ObservedObject private var ai = GeminiAI.shared
+    @State private var request = ""
+    @State private var busy = false
+
+    /// Chip label → the phrase actually sent to the generator.
+    private let moods: [(String, String)] = [
+        ("Gym", "gym hype workout fast"),
+        ("Party", "farah party dance"),
+        ("Chill", "chill quiet relaxing"),
+        ("Focus", "focus study no vocals"),
+        ("Drive", "road trip drive"),
+        ("Sleep", "sleep calm slow"),
+        ("Arabic", "arabic night classics"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                TextField("Describe the vibe… “sad arabic for a rainy night”", text: $request)
+                    .font(.subheadline)
+                    .autocorrectionDisabled(false)
+                    .onSubmit { generate(request) }
+                Button {
+                    generate(request)
+                } label: {
+                    Image(systemName: busy ? "hourglass" : "wand.and.stars")
+                        .font(.body.bold())
+                        .foregroundColor(.white)
+                        .padding(9)
+                        .background(canGenerate(request) ? AppTheme.accent : Color.gray.opacity(0.4))
+                        .clipShape(Circle())
+                }
+                .disabled(!canGenerate(request))
+                .accessibilityLabel("Generate AI playlist")
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    chip("Surprise me", icon: "die.face.5") {
+                        surprise()
+                    }
+                    ForEach(moods, id: \.0) { mood in
+                        chip(mood.0, icon: nil) {
+                            generate(mood.1)
+                        }
+                    }
+                }
+            }
+
+            if busy {
+                HStack(spacing: 8) {
+                    ProgressView().scaleEffect(0.8)
+                    Text(ai.isConfigured
+                         ? "AI is listening to your library…"
+                         : "Building from your library (on-device)…")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            } else {
+                Text(ai.isConfigured
+                     ? "Gemini AI picks & names it · no key = works offline"
+                     : "On-device AI · add a free Gemini key in Audio Settings for smarter picks")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+            if let note = engine.lastNote {
+                Text(note).font(.caption).foregroundColor(.green)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let err = engine.lastError {
+                Text(err).font(.caption).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func canGenerate(_ text: String) -> Bool {
+        !busy && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func generate(_ text: String) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canGenerate(clean) else { return }
+        busy = true
+        hideKeyboard()
+        engine.lastError = nil
+        engine.generate(from: clean) { err in
+            DispatchQueue.main.async {
+                busy = false
+                if err == nil { request = "" }
+            }
+        }
+    }
+
+    private func surprise() {
+        guard !busy else { return }
+        busy = true
+        engine.lastError = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            engine.surpriseMix()
+            busy = false
+        }
+    }
+
+    private func chip(_ label: String, icon: String?, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                if let icon = icon { Image(systemName: icon).font(.caption2) }
+                Text(label).font(.caption.bold())
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(AppTheme.accent.opacity(0.14))
+            .foregroundColor(AppTheme.accent)
+            .cornerRadius(14)
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+    }
 }
 
 struct LikedSongsView: View {
     @EnvironmentObject var musicManager: MusicManager
     var likedSongs: [Song] {
-        guard !musicManager.playlists.isEmpty else { return [] }
-        let ids = musicManager.playlists[0].songIDs
-        return musicManager.songs.filter { ids.contains($0.id) }
+        guard let liked = musicManager.playlists.first(where: { $0.name == "Liked Songs" }) else { return [] }
+        let ids = liked.songIDs
+        return ids.compactMap { id in musicManager.songs.first(where: { $0.id == id }) }
     }
     var body: some View {
         List {

@@ -212,3 +212,73 @@ model — instead, match dictated words against the lyrics you already cache in
 what's playing around you → `AudioLab.compute` on a temp file → nearest vectors);
 and **voice memo → song idea** (dictation + `PlaylistBriefParser`, saved as a
 playlist draft).
+
+---
+
+# AS Music — Smart Pack 3 (Sept 2026): AI playlists in the tab + duplicate doctor
+
+## 1. 🎛 Playlists tab — AI generator front and center, every list deletable
+
+* **AI Playlist Generator card** sits at the top of the Playlists tab: one
+  field ("quiet arabic for a drive", "جيم حماسية") + a generate button, mood
+  chips (Gym / Party / Chill / Focus / Drive / Sleep / Arabic) and a
+  **"Surprise me"** die that builds a playlist fitting the hour of day.
+  With a Gemini key the model picks + names the list from your own library;
+  without one the on-device Arabic/English parser does the same job. Nothing
+  is ever invented — only songs you already own can enter a playlist.
+* **Delete ANY playlist**: swipe a playlist or long-press → Delete Playlist
+  (confirmation included; songs stay in the Library). Liked Songs is
+  protected. Renaming works from the same menu and inside the playlist.
+* **Deleted stays deleted**: `SmartPlaylistStore` now keeps a *retired* set.
+  When you delete a smart (✨) playlist its kind is retired, so auto-create
+  never silently resurrects it. Explicit actions still win: the For-You
+  "Create" button, re-generating the same request, or "Rebuild smart
+  playlists now" (which clears the retired list) bring lists back.
+* **Playlist detail upgrades**: songs are now shown in *playlist order* (the
+  DJ flow ordering used to be thrown away by a re-sort), numbered, with
+  Play-all and Shuffle buttons, total duration, and rename/delete in the ⋯
+  menu.
+
+## 2. 🩺 Library Doctor — AI duplicate finder (`LibraryDoctor.swift`)
+
+One button in the Library toolbar (badge shows how many redundant files were
+detected; a passive scan runs when the tab opens, throttled to 10 min).
+
+* **Detect** (fully on-device, no key): songs are grouped by a normalized
+  artist+title key — "(Official Video)", "[HD]", trailing " 1"/"copy"
+  markers, diacritics and case are all stripped — then each group is split
+  by measured duration (±8 s, from the `AudioLab` cache), so a double rip is
+  separated from a genuinely different live/short version (those get an
+  orange **DIFFERENT VERSIONS** badge and a caution note).
+* **Decide**: every copy gets a keeper score (liked > plays > measured sound
+  quality > bitrate > artwork, rough rips penalised) and the best copy is
+  pre-selected to KEEP. With a Gemini key, one extra tap ("Ask AI which copy
+  to keep") sends each group's *facts only* (never audio) to the model,
+  which may re-pick the keeper and explain why ("AI PICK" badge + reason).
+  Without a key the local recommendation stands.
+* **You always decide**: per-group "keep only the selected copy" and a
+  global "delete N redundant files · free X MB", both behind confirmations.
+  Deletions go through the normal `MusicManager.deleteSong` path, so
+  playlists, history and the artwork cache stay consistent.
+
+## 3. ✨ Smoothness & strength extras
+
+* **Library search is real search now**: matches title, artist and genre,
+  ranked by where the hit is (title prefix > title > artist > genre), with a
+  proper "no matches" state and live result counts.
+* **Sort menu** for the Library: Title / Artist / Recently added / Most
+  played — persisted, also in the ⋯ menu.
+* **Up Next** got a one-tap **Clear** in its header.
+* Playlist math no longer assumes positions: everything looks "Liked Songs"
+  up by name, so deleting lists can never shift the wrong playlist.
+
+## 4. Tooling
+
+Same commands as before — and the workflow was regenerated from the repo in
+this pack (it had drifted: AudioAnalysis / SmartPlaylists / VocalStudio /
+VoiceRemote were missing from CI entirely):
+
+```bash
+python3 scripts/check_swift_syntax.py   # structure pre-flight (green)
+python3 scripts/sync_build_yaml.py      # repo → .github/workflows/build.yml
+```
