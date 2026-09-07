@@ -744,7 +744,9 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
 
     /// Probe a URL quickly: send a small Range request and return true if it
     /// looks like a real audio response (right content-type or magic bytes).
-    private func probeForAudio(url: URL, referer: String, completion: @escaping (Bool) -> Void) {
+    /// Internal (not private) so NEW race contenders in ExtractorKit can
+    /// validate their URLs too — zero behavior change to existing callers.
+    func probeForAudio(url: URL, referer: String, completion: @escaping (Bool) -> Void) {
         var req = URLRequest(url: url, timeoutInterval: 8)
         req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
         req.setValue(referer, forHTTPHeaderField: "Referer")
@@ -2244,6 +2246,28 @@ class SmartDownloaderManager: NSObject, ObservableObject {
             .split(separator: " ").map(String.init).filter { $0.count > 2 }
         func score(_ r: SearchResult) -> Int {
             let k = TasteEngine.normKey(artist: r.artist, title: r.title)
+            if k == want { return 100 }
+            let hay = "\(r.artist) \(r.title)".lowercased()
+                .folding(options: .diacriticInsensitive, locale: .current)
+            var s = 0
+            for tok in wantTitleTokens where hay.contains(tok) { s += 5 }
+            if hay.contains(artist.lowercased().folding(options: .diacriticInsensitive, locale: .current)) { s += 10 }
+            return s
+        }
+        return results.max { score($0) < score($1) }
+    }
+}
+
+extension Notification.Name {
+    static let downloadCenterChanged = Notification.Name("downloadCenterChanged")
+    static let smartRadioAutoSearch = Notification.Name("smartRadioAutoSearch")
+}
+
+atic let downloadCenterChanged = Notification.Name("downloadCenterChanged")
+    static let smartRadioAutoSearch = Notification.Name("smartRadioAutoSearch")
+}
+
+           let k = TasteEngine.normKey(artist: r.artist, title: r.title)
             if k == want { return 100 }
             let hay = "\(r.artist) \(r.title)".lowercased()
                 .folding(options: .diacriticInsensitive, locale: .current)

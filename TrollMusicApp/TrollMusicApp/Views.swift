@@ -1508,6 +1508,13 @@ struct SmartDownloaderView: View {
                 }
             }
             .navigationTitle("Magic DL").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink(destination: EngineSettingsView()) {
+                        Image(systemName: "gearshape").font(.body)
+                    }
+                }
+            }
             .alert("Save As", isPresented: $downloader.showNamePrompt) {
                 TextField("Song name", text: $downloader.nameInput)
                 Button("Download") { downloader.confirmNamedDownload() }
@@ -1541,6 +1548,21 @@ struct TrendingCard: View {
                         }
                     }
                     .frame(width: 130, height: 100).clipped().cornerRadius(10)
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.title2).foregroundColor(.white)
+                        .padding(6).shadow(radius: 3)
+                }
+                Text(result.title).font(.caption2.bold())
+                    .foregroundColor(.white).lineLimit(2)
+                    .frame(width: 130, alignment: .leading)
+                Text(result.artist).font(.caption2).foregroundColor(.gray)
+                    .lineLimit(1).frame(width:130, alignment:.leading)
+            }
+        }.buttonStyle(.plain)
+    }
+}
+
+ht: 100).clipped().cornerRadius(10)
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.title2).foregroundColor(.white)
                         .padding(6).shadow(radius: 3)

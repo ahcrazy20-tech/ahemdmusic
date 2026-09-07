@@ -48,8 +48,9 @@ step).
    by the For You tab).
 4. **Google Gemini free tier** — optional; the key belongs to the user and is
    stored only in the app's UserDefaults on their device. Default model:
-   `gemini-2.5-flash` (free tier: ~10 req/min, 500 req/day). Changeable in
-   settings.
+   `gemini-3.5-flash` (2.5-flash was retired by Google in Oct 2026).
+   The app now self-heals model retirements automatically — see
+   "Resilience pack" below.
 
 ## ✅ CI FIX — INSTALLED (Sept 7, 2026)
 

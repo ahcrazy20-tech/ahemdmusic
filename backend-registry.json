@@ -1,0 +1,43 @@
+{
+  "_readme": "AS Music live backend registry. The app fetches this file (raw.githubusercontent.com/.../main/backend-registry.json) at most once a day and overlays it on its bundled defaults. Every field is optional: missing/empty fields keep the app's built-in values. Update this file to heal the app WITHOUT shipping a new build.",
+  "version": 1,
+  "updated": "2026-09-07",
+  "preferredGeminiModel": "gemini-3.5-flash",
+  "geminiFallbacks": [
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash"
+  ],
+  "pipedMirrors": [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi-libre.kavin.rocks",
+    "https://pipedapi.leptons.xyz",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.nosebs.ru",
+    "https://piped-api.privacy.com.de",
+    "https://api.piped.yt",
+    "https://pipedapi.drgns.space",
+    "https://pipedapi.owo.si",
+    "https://pipedapi.ducks.party",
+    "https://piped-api.codespace.cz",
+    "https://pipedapi.reallyaweso.me",
+    "https://pipedapi.darkness.services",
+    "https://pipedapi.orangenet.cc"
+  ],
+  "invidiousInstances": [
+    "https://inv.nadeko.net",
+    "https://yewtu.be",
+    "https://vid.puffyan.us",
+    "https://invidious.snopyta.org",
+    "https://inv.in.projectsegfau.lt"
+  ],
+  "cobaltInstances": [],
+  "pipedEnabled": true,
+  "invidiousEnabled": true,
+  "cobaltEnabled": false,
+  "notes": "Cobalt stays dormant (no keyless public instance confirmed). Enable by adding instances + setting cobaltEnabled=true."
+}

@@ -361,7 +361,9 @@ final class GeminiAI: ObservableObject {
     var isConfigured: Bool { !key.trimmingCharacters(in: .whitespaces).isEmpty }
 
     /// Asks the model for song suggestions matching the user's request.
-    func ask(_ prompt: String, completion: (([DiscoTrack]) -> Void)? = nil) {
+    /// `attempt` is 0 for user asks; the self-heal retry uses 1 (one rotation
+    /// max per ask, so we can never loop).
+    func ask(_ prompt: String, completion: (([DiscoTrack]) -> Void)? = nil, attempt: Int = 0) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isConfigured else {
             lastError = "Add your free Gemini key in player settings first."
@@ -369,6 +371,15 @@ final class GeminiAI: ObservableObject {
             return
         }
         guard !trimmed.isEmpty else { completion?([]); return }
+        // Proactive heal (fire-and-forget): if our stored model already
+        // vanished from Google's list, silently adopt a verified newer one.
+        if autoModel && attempt == 0 {
+            GeminiDiscovery.preSwitchIfGone(key: key, current: model) { [weak self] m in
+                if let m = m {
+                    DispatchQueue.main.async { self?.model = m }
+                }
+            }
+        }
         isThinking = true
         lastError = nil
         suggestions = []
