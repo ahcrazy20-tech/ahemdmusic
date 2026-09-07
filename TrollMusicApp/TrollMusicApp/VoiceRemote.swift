@@ -321,7 +321,7 @@ struct PlayMomentIntent: AppIntent {
 
     @Parameter(title: "Moment") var moment: MusicMoment
 
-    static var parameterSummary: some ParameterSummary { Summary("Play \.$moment") }
+    static var parameterSummary: some ParameterSummary { Summary("Play \(\.$moment)") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let kind = moment.recipeKind
@@ -340,7 +340,7 @@ struct PlayPlaylistIntent: AppIntent {
 
     @Parameter(title: "Playlist") var name: String
 
-    static var parameterSummary: some ParameterSummary { Summary("Play \.$name") }
+    static var parameterSummary: some ParameterSummary { Summary("Play \(\.$name)") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let asked = name
@@ -376,7 +376,7 @@ struct QueueControlIntent: AppIntent {
 
     @Parameter(title: "Action") var action: PlaybackAction
 
-    static var parameterSummary: some ParameterSummary { Summary("\.$action") }
+    static var parameterSummary: some ParameterSummary { Summary("\(\.$action)") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let said = await MainActor.run { () -> String in
@@ -414,7 +414,7 @@ struct SleepTimerIntent: AppIntent {
 
     @Parameter(title: "Minutes") var minutes: Int
 
-    static var parameterSummary: some ParameterSummary { Summary("Sleep in \.$minutes minutes") }
+    static var parameterSummary: some ParameterSummary { Summary("Sleep in \(\.$minutes) minutes") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let m = max(1, min(180, minutes))
@@ -432,7 +432,7 @@ struct GeneratePlaylistIntent: AppIntent {
 
     @Parameter(title: "Description") var request: String
 
-    static var parameterSummary: some ParameterSummary { Summary("Build a playlist for \.$request") }
+    static var parameterSummary: some ParameterSummary { Summary("Build a playlist for \(\.$request)") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let text = request

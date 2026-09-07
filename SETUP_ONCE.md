@@ -155,9 +155,35 @@ gh api repos/ahcrazy20-tech/ahemdmusic/actions/workflows --jq '.total_count'   #
 Expected-ish: **no build in this repo's history ever compiled the repo's own
 sources** (I checked the last 30 runs — all of them ran the embedded copies), so
 Pack 4 (`ExtrasKit.swift`, artists browser, library lenses, AI name tidy) has
-never met a Swift compiler. `scripts/check_swift_syntax.py` says the structure is
-clean, but only Xcode can really judge it. The workflow posts the compile errors
-on the commit and in the job summary — say **"it's red"** and they get fixed and pushed.
+never met a Swift compiler. The workflow posts the compile errors on the commit
+and in the job summary — say **"it's red"** and they get fixed and pushed.
+
+Two things make that round trip cheaper:
+
+1. **A 2-second pre-flight.** Step `1/6` runs `scripts/check_swift_syntax.py`, and
+   if it rejects a file the run stops *before* the 8-minute archive and says
+   which line. It catches unbalanced braces, unterminated strings, stray
+   `SWIFT`/`YAML` heredoc markers and invalid escapes — which is exactly how the
+   first real build failed, on five lines like
+
+   ```swift
+   static var parameterSummary: some ParameterSummary { Summary("Play \.$moment") }   // ✗
+   static var parameterSummary: some ParameterSummary { Summary("Play \(\.$moment)") } // ✓
+   ```
+
+   App Intents still needs Swift's own interpolation parens around the `$name`.
+2. **The log is not truncated.** A full archive log is uploaded as the
+   *build-log* artifact, so the 20-error cap on-screen is not the end of it.
+
+Running it locally (any machine, no Xcode needed):
+
+```bash
+python3 scripts/check_swift_syntax.py          # "structure OK in 21 file(s)."
+python3 scripts/check_swift_syntax.py -v       # + the type map it built
+```
+
+It is a structural gate, not a type checker — `cannot find 'foo' in scope` and
+friends still need CI. If it ever cries wolf, the fix belongs in that script.
 
 ---
 
