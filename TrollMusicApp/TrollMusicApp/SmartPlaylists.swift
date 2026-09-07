@@ -721,7 +721,8 @@ enum PlaylistBriefParser {
         (["party", "farah", "wedding", "dance", "حفلة", "فرح", "عرس", "رقص", "دلع"], { b in
             b.title = "Party Mix"
             b.weights["energy"] = 1.2; b.weights["beat"] = 1.0; b.weights["hype"] = 0.7
-            b.minTempo = 100; b.wantArabic = true
+            b.weights["arabic"] = 0.5          // prefer Arabic, don't require it
+            b.minTempo = 100
         }),
         (["chill", "relax", "calm", "quiet", "cozy", "tea", "هادي", "هدوء", "استرخاء", "شاي", "قهاوة"], { b in
             b.title = "Chill"

@@ -389,7 +389,7 @@ struct QueueControlIntent: AppIntent {
             case .like:
                 if let s = mm.currentSong { mm.toggleFavorite(song: s); SpokenFeedback.shared.say("Saved to your liked songs.") }
                 return mm.currentSong == nil ? "Nothing is playing." : "Liked."
-            case .shuffle: mm.toggleShuffle(); return mm.isShuffle ? "Shuffle on." : "Shuffle off."
+            case .shuffle: mm.isShuffle.toggle(); return mm.isShuffle ? "Shuffle on." : "Shuffle off."
             }
         }
         return .result(dialog: said.isEmpty ? "Done." : said)
