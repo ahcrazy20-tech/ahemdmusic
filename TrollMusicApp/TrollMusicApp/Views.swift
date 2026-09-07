@@ -661,7 +661,7 @@ struct FullPlayerView: View {
                             .font(.subheadline).bold().foregroundColor(.white).lineLimit(1)
                     }
                     Spacer()
-                    if let song = musicManager.currentSong {
+                    if musicManager.currentSong != nil {
                         Button { showArtistInfo = true } label: {
                             Image(systemName: "info.circle").font(.title3).foregroundColor(.white)
                         }
@@ -892,6 +892,7 @@ struct AirPlayButton: UIViewRepresentable {
 struct EQView: View {
     @EnvironmentObject var mm: MusicManager
     @Environment(\.presentationMode) var pm
+    @ObservedObject private var ai = GeminiAI.shared
     @AppStorage("asmusic_autoresume") private var autoResume: Bool = false
     var body: some View {
         List {
