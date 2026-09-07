@@ -15,13 +15,11 @@ no duplicate finder, no Recently Deleted, no lyrics. The build goes green and
 ships old code. (The same drift also cost the app its microphone/speech
 `Info.plist` keys, which the repo has and the workflow's copy does not.)
 
-**The fix is in the repo at `ci/build.yml`** — a 140-line workflow that simply
-compiles what is in `TrollMusicApp/TrollMusicApp/`. GitHub blocks the Arena app
-from writing anything under `.github/workflows/`, so you install it once:
-
-> Open `.github/workflows/build.yml` on GitHub → **Delete file** → commit.
-> Open `ci/build.yml` → **✏️ Edit** → change the file name at the top to
-> `.github/workflows/build.yml` → commit.
+> ⚠️ **The recipe that used to be here ("delete the workflow, then rename
+> `ci/build.yml` to `.github/workflows/build.yml`") was wrong and it broke CI
+> outright on 2026-09-07:** GitHub's rename box left the copy in a root-level
+> `workflows/` folder, so the repo ended with **zero** workflows and no push
+> starts a build at all (no run, no red X — silence).
 
 Step-by-step (with Arabic) in **`READ_ME_FIRST_CI_FIX.md`**. After that one
 time, every future change reaches the app automatically and this pack's 20

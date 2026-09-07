@@ -135,7 +135,7 @@ the files; the audio is untouched.
 | File | Role |
 |---|---|
 | `scripts/ci_build.sh` *(new)* | **the real CI**: source pre-flight, project/icon generation, archive, IPA, and clear compile-error reporting (annotations + job summary + commit comment) |
-| `workflows/build.yml`, `workflows/build.min.yml`, `ci/build.yml`, `build.yml.ready` | the 38-line workflow to install once at `.github/workflows/build.yml` |
+| `workflows/build.yml` | the short workflow to install once at `.github/workflows/build.yml`. **One copy only now** — `workflows/build.min.yml`, `ci/build.yml` and `build.yml.ready` were deleted, because having four near-identical files is what led to renaming the wrong one into the wrong folder. `bash scripts/install_ci_fix.sh --link` prints the ready-made "create file" URL. |
 | `ExtrasKit.swift` *(new)* | AcousticRadio, Artists browser, Library lenses, NameTidy, Song info editor |
 | `Views.swift` | labelled duplicate row + Library tools, filter chips, new menu/sheet wiring, empty states |
 | `MusicManager.swift` | `setSongInfo` / `safeFileName` — rename without losing the song's identity |

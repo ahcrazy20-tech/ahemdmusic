@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-restore_sources_from_workflow.py — the REVERSE of sync_build_yaml.py.
+restore_sources_from_workflow.py — recovery tool for the OLD embedded-copy
+workflow (it reads the heredocs out of a copy of that build.yml). The
+`sync_build_yaml.py` it used to be the reverse of has been deleted.
 
 The CI workflow (.github/workflows/build.yml) builds from .swift sources that
 are EMBEDDED inside it (it deletes the repo files and rewrites them from
 heredocs). That means the workflow can end up holding code the repo has never
 seen — exactly what happened with ExtractorKit.swift, which existed ONLY inside
-build.yml. Without this script, running sync_build_yaml.py at that moment would
+build.yml. Without this script, running the old sync step at that moment would
 have silently deleted the extra download engines from the next IPA.
 
 What it does, by default (safe):
@@ -103,7 +105,7 @@ def main() -> int:
             continue
         print(f"  WARNING   {name} is in the repo but NOT in the workflow — "
               f"CI deletes it before building, so it is not in the shipped app. "
-              f"Run: python3 scripts/sync_build_yaml.py")
+              "Restore them from git — the embedded-copy workflow is retired.")
 
     plist = PLIST.read_text().rstrip("\n") if PLIST.exists() else ""
     pm = re.search(r"cat << 'PLIST' > TrollMusicApp/TrollMusicApp/Info\.plist\n"
@@ -120,7 +122,7 @@ def main() -> int:
 
     if restored:
         print(f"\nRestored {len(restored)} missing file(s): {', '.join(restored)}.")
-        print("Commit them, then run scripts/sync_build_yaml.py so both match.")
+        print("Commit them — CI now compiles the repo directly (see SETUP_ONCE.md).")
     if diverging:
         print("\nDiverging files (repo was kept — inspect .ci-copy/, then merge by hand):")
         for n in diverging:

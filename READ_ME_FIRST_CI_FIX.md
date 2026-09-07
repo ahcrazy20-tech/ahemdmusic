@@ -25,9 +25,15 @@ That embedded copy was frozen months ago. So the build went **green** and the
 IPA it produced was an old app. Editing the Swift files changed nothing —
 which is exactly what you experienced.
 
+**And as of 2026-09-07 13:32 UTC it is worse:** that file was deleted and the
+replacement copies were renamed around inside a root-level `workflows/` folder
+instead of `.github/workflows/`. GitHub now has **0 workflows registered**, so a
+push starts *nothing* — no run, no failure, just silence. That is the state
+`SETUP_ONCE.md` tells you how to clear.
+
 ## The fix
 
-Replace it with the 38-line workflow that just compiles what is in the repo:
+Replace it with the short workflow that just compiles what is in the repo:
 
 **→ open [`SETUP_ONCE.md`](SETUP_ONCE.md)** — Option A (grant the Arena app the
 *workflows* permission, then I do everything) or Option B (paste the file
