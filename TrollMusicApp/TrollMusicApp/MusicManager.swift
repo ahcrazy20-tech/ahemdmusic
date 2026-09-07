@@ -875,8 +875,8 @@ class MusicManager: NSObject, ObservableObject {
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.2) {
                     var artData: Data? = nil
                     if let d = try? Data(contentsOf: tagSidecar), d.count > 500 { artData = d }
-                    ID3TagWriter.tagIfNeeded(at: tagURL, title: tagTitle,
-                                             artist: tagArtist, album: "", artworkJPEG: artData)
+                    _ = ID3TagWriter.tagIfNeeded(at: tagURL, title: tagTitle,
+                                                 artist: tagArtist, album: "", artworkJPEG: artData)
                 }
             }
         }
@@ -944,7 +944,7 @@ class MusicManager: NSObject, ObservableObject {
                                          repeats: true) { [weak self] t in
             guard let self = self else { t.invalidate(); return }
             i += 1
-            let frac = Double(i) / Double(steps)
+            let frac = Float(i) / Float(steps)
             self.preampDB = self.preFadeDB * (1.0 - frac)
             if i >= steps {
                 t.invalidate()

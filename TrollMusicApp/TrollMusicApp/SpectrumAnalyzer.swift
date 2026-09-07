@@ -39,26 +39,45 @@ final class SpectrumMeter {
 
 /// Pre-allocated FFT state owned by MusicManager.
 final class FFTProcessor {
-    static let fftSize = 1024          // samples per frame
-    static let bins = fftSize / 2      // unique DFT bins
+    static let fftSize = 1024          // real samples per frame
+    static let bins = fftSize / 2      // unique DFT bins (DC + Nyquist included)
 
-    var window: [Float] = []
-    var buffer: [Float] = []           // [re(1024) | im(1024)] — vDSP zrip layout
+    /// Hann-window taps, split into the even/odd halves the packed real-FFT
+    /// input expects, so the render thread only does strided multiplies.
+    private let windowEven: [Float]    // w(2i)
+    private let windowOdd: [Float]     // w(2i + 1)
+    /// Split-complex scratch buffers, pre-allocated once (never on the audio
+    /// render thread). The forward transform is real-input packed:
+    ///   input  = split(windowed even samples, windowed odd samples)
+    ///   output = split(X(0..<bins)) with DC in re[0] and Nyquist in im[0].
+    private var inputReal: [Float]
+    private var inputImag: [Float]
+    private var outputReal: [Float]
+    private var outputImag: [Float]
+    private let fft: vDSP.FFT?
     var bandRanges: [(Int, Int)] = []  // (binLo, binHi) per visual band
-    private(set) var setup: UnsafeMutablePointer<vDSP_FFT_ZEROPHASE_STAGGERED_DIT64_INPLACEDescriptor>?
 
     init() {
-        window = Array(repeating: 0, count: Self.fftSize)
-        buffer = Array(repeating: 0, count: 2 * Self.fftSize)
-        vDSP.window(ofType: Float.self, usingSequence: nil, count: Self.fftSize,
-                    isHalfWindow: false, to: &window)
-
-        let log2n = UInt(log2(Double(Self.fftSize)))
-        guard let s = vDSP_create_fftsetup(vDSP_Length(log2n), FFTRADIX2) else {
-            // FFT setup failed — the spectrum simply stays flat; playback is unaffected.
-            return
+        // Hann window: w(i) = 0.5 * (1 - cos(2πi / (n - 1))), endpoints 0.
+        let n = Self.fftSize
+        let half = Self.bins
+        let scale = 2 * Float.pi / Float(n - 1)
+        var wEven = [Float](repeating: 0, count: half)
+        var wOdd = [Float](repeating: 0, count: half)
+        for i in 0..<half {
+            let twoI = 2 * i
+            wEven[i] = 0.5 * (1 - cos(scale * Float(twoI)))
+            wOdd[i] = 0.5 * (1 - cos(scale * Float(twoI + 1)))
         }
-        setup = s
+        windowEven = wEven
+        windowOdd = wOdd
+        inputReal = [Float](repeating: 0, count: half)
+        inputImag = [Float](repeating: 0, count: half)
+        outputReal = [Float](repeating: 0, count: half)
+        outputImag = [Float](repeating: 0, count: half)
+        fft = vDSP.FFT(log2n: vDSP_Length(log2(Double(Self.fftSize))),
+                       radix: .radix2,
+                       ofType: DSPSplitComplex.self)
 
         // Log-spaced bands from 30 Hz to 16 kHz. The engine output rate is
         // normally 44.1 kHz — close enough for any other negotiated rate.
@@ -75,25 +94,31 @@ final class FFTProcessor {
         bandRanges = ranges
     }
 
-    deinit {
-        if let s = setup { vDSP_destroy_fftsetup(s) }
-    }
-
     /// Runs on the audio render thread. Fills `out` (must have
-    /// `SpectrumMeter.bands` elements) with band levels in dB.
+    /// `SpectrumMeter.bands` elements) with band levels in dB. All buffers are
+    /// pre-allocated: no allocations on the real-time thread.
     func process(buffer pcm: AVAudioPCMBuffer, into out: inout [Float]) {
-        guard setup != nil, let data = pcm.floatChannelData else { return }
+        guard let fft = fft, let data = pcm.floatChannelData else { return }
         let n = Self.fftSize
+        let half = Self.bins
         guard Int(pcm.frameLength) >= n else { return }
 
-        // re = windowed samples, im = 0 (the FFT overwrites im, so clear first)
-        vDSP_vclr(&buffer, 1, vDSP_Length(2 * n))
-        vDSP_vmul(data[0], 1, &window, 1, &buffer, 1, vDSP_Length(n))
+        // Pack the windowed frame into the split-complex input layout the
+        // real-input FFT expects: real = x(2i)·w(2i), imag = x(2i+1)·w(2i+1).
+        vDSP_vmul(data[0], 2, windowEven, 1, &inputReal, 1, vDSP_Length(half))
+        vDSP_vmul(data[0] + 1, 2, windowOdd, 1, &inputImag, 1, vDSP_Length(half))
 
-        if let s = setup {
-            withUnsafeMutableBufferPointer(of: &buffer) { buf in
-                guard let base = buf.baseAddress else { return }
-                vDSP_fft_zrip(s, base, 1, 1)
+        inputReal.withUnsafeMutableBufferPointer { reBuf in
+            inputImag.withUnsafeMutableBufferPointer { imBuf in
+                outputReal.withUnsafeMutableBufferPointer { outReBuf in
+                    outputImag.withUnsafeMutableBufferPointer { outImBuf in
+                        guard let re = reBuf.baseAddress, let im = imBuf.baseAddress,
+                              let or = outReBuf.baseAddress, let oi = outImBuf.baseAddress else { return }
+                        var input = DSPSplitComplex(realp: re, imagp: im)
+                        var output = DSPSplitComplex(realp: or, imagp: oi)
+                        fft.forward(input: input, output: &output)
+                    }
+                }
             }
         }
 
@@ -101,8 +126,8 @@ final class FFTProcessor {
             var e: Float = 0
             var k = range.0
             while k < range.1 {
-                let re = buffer[k]
-                let im = buffer[n + k]
+                let re = outputReal[k]
+                let im = outputImag[k]
                 e += re * re + im * im
                 k += 1
             }
