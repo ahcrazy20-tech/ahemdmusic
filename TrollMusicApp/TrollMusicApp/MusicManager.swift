@@ -29,6 +29,8 @@ struct Song: Identifiable, Codable, Equatable {
     var artist: String = "AS Music"
     var artworkURL: String? = nil
     var sourceVid: String? = nil
+    /// Optional genre, filled by the iTunes enrichment (free API, no key).
+    var genre: String? = nil
 }
 
 struct Playlist: Identifiable, Codable {
@@ -113,6 +115,20 @@ class MusicManager: NSObject, ObservableObject {
     @Published var spatialEnhance: Bool = false {
         didSet { applySpatial(); UserDefaults.standard.set(spatialEnhance, forKey: "asmusic_spatial") }
     }
+    /// Sleep behavior: when on, the sleep timer waits for the song to finish
+    /// instead of fading mid-track.
+    @Published var stopAtSongEnd: Bool = false {
+        didSet { UserDefaults.standard.set(stopAtSongEnd, forKey: "asmusic_stopend") }
+    }
+    /// Live FFT spectrum (24 log-spaced bands in dB), written by the audio
+    /// render thread, read by the player UI.
+    let spectrum = SpectrumMeter()
+    private var fft = FFTProcessor()
+    private var fftScratch: [Float] = Array(repeating: -100, count: SpectrumMeter.bands)
+    private var pendingStopAtEnd = false
+    private var fadeTimer: Timer?
+    private var preFadeDB: Float = 0
+    private let sleepFadeSeconds: TimeInterval = 45
 
     // Signal chain: playerNode -> eqNode -> preampMixer -> reverb -> timePitch -> mainMixerNode
     private var engine: AVAudioEngine!
@@ -169,6 +185,11 @@ class MusicManager: NSObject, ObservableObject {
         loadPrefs()
         setupRemoteCommandCenter()
         startLevelMeter()
+        // Kick off background artwork enrichment once the first library scan
+        // has landed (it is also called from the Library tab on appear).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            ITunesEnricher.shared.enrichLibrary()
+        }
     }
 
     deinit {
@@ -243,6 +264,7 @@ class MusicManager: NSObject, ObservableObject {
         engine.mainMixerNode.outputVolume = 1.0
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buf, _ in
             self?.updatePowerLevel(buffer: buf)
+            self?.updateSpectrum(buffer: buf)
         }
         do {
             try engine.start()
@@ -417,6 +439,13 @@ class MusicManager: NSObject, ObservableObject {
         let dbR = rmsR > 0 ? 20 * log10(rmsR) : -60
         levelL.store(max(0, min(1, (dbL + 50) / 50)))
         levelR.store(max(0, min(1, (dbR + 50) / 50)))
+    }
+
+    /// Runs on the real-time audio render thread: Hann window + in-place FFT
+    /// + log-band reduction into pre-allocated buffers (no allocations).
+    private func updateSpectrum(buffer: AVAudioPCMBuffer) {
+        fft.process(buffer: buffer, into: &fftScratch)
+        spectrum.store(fftScratch)
     }
 
     // MARK: - Playback primitives
@@ -640,6 +669,7 @@ class MusicManager: NSObject, ObservableObject {
             updateNowPlayingInfo()
         }
         songs.removeAll { $0.id == s.id }
+        ListenHistory.shared.remove(songID: s.id)
         saveSongMeta()
         loadSongs()
     }
@@ -747,6 +777,7 @@ class MusicManager: NSObject, ObservableObject {
         smartRadioMode = UserDefaults.standard.bool(forKey: "asmusic_radio")
         preampDB = UserDefaults.standard.object(forKey: "asmusic_preamp") as? Float ?? 0.0
         spatialEnhance = UserDefaults.standard.bool(forKey: "asmusic_spatial")
+        stopAtSongEnd = UserDefaults.standard.bool(forKey: "asmusic_stopend")
         if let lastIdStr = UserDefaults.standard.string(forKey: "asmusic_last_song"),
            let lastId = UUID(uuidString: lastIdStr) {
             lastSongId = lastId
@@ -829,6 +860,25 @@ class MusicManager: NSObject, ObservableObject {
                     }.resume()
                 }
             }
+            // No cover came with the download — let iTunes (free, key-less)
+            // find the real artwork, artist name and genre.
+            if artworkURL == nil {
+                ITunesEnricher.shared.enrich(song: song)
+            }
+            // Write proper MP3 tags (title/artist/cover) once the sidecar
+            // artwork has had a moment to land. Pre-tagged files are skipped.
+            if url.pathExtension.lowercased() == "mp3" {
+                let tagURL = url
+                let tagSidecar = url.deletingPathExtension().appendingPathExtension("jpg")
+                let tagTitle = t
+                let tagArtist = (a.isEmpty ? "AS Music" : a)
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.2) {
+                    var artData: Data? = nil
+                    if let d = try? Data(contentsOf: tagSidecar), d.count > 500 { artData = d }
+                    ID3TagWriter.tagIfNeeded(at: tagURL, title: tagTitle,
+                                             artist: tagArtist, album: "", artworkJPEG: artData)
+                }
+            }
         }
     }
 
@@ -856,16 +906,66 @@ class MusicManager: NSObject, ObservableObject {
     }
 
     func setSleepTimer(minutes: Int) {
-        sleepTimerMinutes = minutes; sleepTimer?.invalidate()
+        sleepTimer?.invalidate(); sleepTimer = nil
+        fadeTimer?.invalidate(); fadeTimer = nil
+        sleepTimerMinutes = minutes
         if minutes > 0 {
-            sleepTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes*60), repeats: false) { [weak self] _ in
+            if stopAtSongEnd {
+                // The stop happens at the natural end of the song (see
+                // songFinished); this timer is only a failsafe for very long
+                // tracks that outlast the requested sleep duration.
+                pendingStopAtEnd = true
+            }
+            let fireDelay: TimeInterval = stopAtSongEnd
+                ? TimeInterval(minutes * 60)
+                : max(60, TimeInterval(minutes * 60) - sleepFadeSeconds)
+            sleepTimer = Timer.scheduledTimer(withTimeInterval: fireDelay, repeats: false) { [weak self] _ in
                 guard let self = self else { return }
-                DispatchQueue.main.async {
-                    self.pausePlayback()
-                    self.sleepTimerMinutes = 0
-                }
+                DispatchQueue.main.async { self.beginFadeThenPause() }
+            }
+        } else {
+            pendingStopAtEnd = false
+        }
+    }
+
+    /// Smoothly fades the output down over `sleepFadeSeconds`, pauses, then
+    /// restores the user's preamp level. Much gentler than the old hard stop.
+    private func beginFadeThenPause() {
+        guard isPlaying else {
+            pendingStopAtEnd = false
+            sleepTimerMinutes = 0
+            return
+        }
+        sleepTimer?.invalidate(); sleepTimer = nil
+        preFadeDB = preampDB
+        let steps = 30
+        var i = 0
+        let timer = Timer.scheduledTimer(withTimeInterval: sleepFadeSeconds / Double(steps),
+                                         repeats: true) { [weak self] t in
+            guard let self = self else { t.invalidate(); return }
+            i += 1
+            let frac = Double(i) / Double(steps)
+            self.preampDB = self.preFadeDB * (1.0 - frac)
+            if i >= steps {
+                t.invalidate()
+                self.fadeTimer = nil
+                self.pausePlayback()
+                self.preampDB = self.preFadeDB
+                self.sleepTimerMinutes = 0
+                self.pendingStopAtEnd = false
             }
         }
+        fadeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// Cancels an in-progress sleep fade (the user took back control).
+    private func cancelSleepFade() {
+        guard fadeTimer != nil else { return }
+        fadeTimer?.invalidate(); fadeTimer = nil
+        preampDB = preFadeDB
+        sleepTimerMinutes = 0
+        pendingStopAtEnd = false
     }
 
     func playSong(_ song: Song) {
@@ -899,6 +999,7 @@ class MusicManager: NSObject, ObservableObject {
                     self.isPlaying = true
                     self.lastSongId = song.id
                     self.lastSongTime = 0
+                    ListenHistory.shared.recordPlay(song)
                     self.updateDisplayLinkState()
                     self.updateNowPlayingInfo()
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -941,6 +1042,18 @@ class MusicManager: NSObject, ObservableObject {
 
     @objc func songFinished() {
         DispatchQueue.main.async {
+            // Sleep timer with "stop at song end" — rest after this track.
+            if self.pendingStopAtEnd {
+                self.pendingStopAtEnd = false
+                self.sleepTimer?.invalidate(); self.sleepTimer = nil
+                self.sleepTimerMinutes = 0
+                playerQueue.async { [weak self] in self?.playerNode.pause() }
+                self.isPlaying = false
+                self.saveResumePosition()
+                self.updateDisplayLinkState()
+                self.updateNowPlayingInfo()
+                return
+            }
             if self.repeatMode == .one, let cur = self.currentSong {
                 self.playSong(cur); return
             }
@@ -961,6 +1074,7 @@ class MusicManager: NSObject, ObservableObject {
         if isPlaying {
             pausePlayback()
         } else {
+            cancelSleepFade()
             if audioFile == nil, let cur = currentSong {
                 playSong(cur); return
             }

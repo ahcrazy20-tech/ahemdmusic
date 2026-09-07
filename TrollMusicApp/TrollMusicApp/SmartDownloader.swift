@@ -1803,6 +1803,8 @@ class SmartDownloaderManager: NSObject, ObservableObject {
 
     @Published var trendingResults: [SearchResult] = []
     @Published var isLoadingTrending: Bool = false
+    /// Trending region for the Magic DL tab (Deezer/Piped country code).
+    @Published var trendRegion: String = UserDefaults.standard.string(forKey: "asmusic_trend") ?? "eg"
 
     private var radioSearchCancellable: AnyCancellable?
     private var lastRadioSearchAt: Date = .distantPast
@@ -1918,15 +1920,22 @@ class SmartDownloaderManager: NSObject, ObservableObject {
         ("Cairokee", "كايروكي"),
     ]
 
-    func loadTrending() {
+    func loadTrending(region: String? = nil) {
+        if let r = region, r != trendRegion {
+            trendRegion = r
+            UserDefaults.standard.set(r, forKey: "asmusic_trend")
+        }
         guard trendingResults.isEmpty else { return }
         isLoadingTrending = true
         let ua = DownloadCenter.mobileUA
+        let code = trendRegion.uppercased()
+        let regionName = ChartRegion(rawValue: trendRegion)?.displayName ?? "your region"
         var mirrors = Array(pipedMirrors)
         func tryTrending() {
             guard let base = mirrors.first else {
                 mirrors = []
-                guard let raw = "Amr Diab best hits".data(using: .utf8)?.base64EncodedString(),
+                let fbQuery = trendRegion == "eg" ? "Amr Diab best hits" : "top \(regionName) hits"
+                guard let raw = fbQuery.data(using: .utf8)?.base64EncodedString(),
                       let b64enc = raw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
                     DispatchQueue.main.async { self.isLoadingTrending = false }
                     return
@@ -1938,7 +1947,7 @@ class SmartDownloaderManager: NSObject, ObservableObject {
                 return
             }
             mirrors.removeFirst()
-            guard let url = URL(string: "\(base)/trending?region=EG") else { tryTrending(); return }
+            guard let url = URL(string: "\(base)/trending?region=\(code)") else { tryTrending(); return }
             var req = URLRequest(url: url, timeoutInterval: 12)
             req.setValue(ua, forHTTPHeaderField: "User-Agent")
             URLSession.shared.dataTask(with: req) { data, _, err in
