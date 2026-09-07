@@ -51,6 +51,27 @@ step).
    `gemini-2.5-flash` (free tier: ~10 req/min, 500 req/day). Changeable in
    settings.
 
+## ONE-TIME CI FIX (do this once — 2 minutes)
+
+The app build (`.github/workflows/build.yml`) embeds copies of the source
+files. Those copies were stale, so the GitHub build was shipping an app that
+pre-dated the For You tab. The synced file is ready in this repo as
+`build.yml.ready`. To install it:
+
+```bash
+cp build.yml.ready .github/workflows/build.yml
+git add .github/workflows/build.yml
+git commit -m "Sync CI build with current sources"
+git push
+```
+
+(Alternatively: pull the repo and run `python3 scripts/sync_build_yaml.py` —
+it generates the same file from the real sources.)
+
+After that you can delete `build.yml.ready`. **Even better:** give the Arena
+GitHub App *workflows* permission for this repo — then every code push
+auto-syncs the build and nothing can drift again.
+
 ## Files
 
 | File | What it is |
