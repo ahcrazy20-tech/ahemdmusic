@@ -748,34 +748,100 @@ class MusicManager: NSObject, ObservableObject {
     }
 
     func renameSong(song: Song, newName: String) {
+        let (t, a) = TitleCleaner.clean(newName)
+        setSongInfo(song: song, title: t, artist: a)
+    }
+
+    /// Changes the visible title/artist of a song and renames the file to match,
+    /// so the change is still there after a relaunch.
+    ///
+    /// The important half of this method is what it *keeps*: a song's id is a
+    /// hash of its file name, so the old implementation silently orphaned
+    /// everything attached to it — the song fell out of every playlist, out of
+    /// Liked Songs, and lost its play counts. Writing the new name into the
+    /// in-memory list and persisting it BEFORE the reload is what carries the
+    /// id (and therefore the playlists, the likes and the history) across.
+    func setSongInfo(song: Song, title: String, artist: String) {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         let ext = song.url.pathExtension
-        let (t,a) = TitleCleaner.clean(newName)
-        let finalTitle = t
-        var newUrl = documentsDirectory.appendingPathComponent(finalTitle + "." + ext)
-        var i = 2
-        while fileManager.fileExists(atPath: newUrl.path) {
-            newUrl = documentsDirectory.appendingPathComponent("\(finalTitle) \(i)." + ext)
-            i += 1
-        }
-        do {
-            try fileManager.moveItem(at: song.url, to: newUrl)
-            let oldSide = song.url.deletingPathExtension().appendingPathExtension("jpg")
-            let newSide = newUrl.deletingPathExtension().appendingPathExtension("jpg")
-            if fileManager.fileExists(atPath: oldSide.path) { try? fileManager.moveItem(at: oldSide, to: newSide) }
-            loadSongs()
-            if let idx = songs.firstIndex(where: { $0.id == song.id }) {
-                songs[idx].url = newUrl
-                songs[idx].title = finalTitle
-                songs[idx].artist = a
-                saveSongMeta()
+        let base = Self.safeFileName(cleanArtist.isEmpty ? cleanTitle : "\(cleanArtist) - \(cleanTitle)")
+        guard !base.isEmpty else { return }
+
+        var newURL = documentsDirectory.appendingPathComponent(base + "." + ext)
+        if newURL.lastPathComponent.caseInsensitiveCompare(song.url.lastPathComponent) == .orderedSame {
+            // Only the casing / metadata changed — keep the file exactly where
+            // it is so we never fight ourselves over the same name.
+            newURL = song.url
+        } else {
+            var i = 2
+            while fileManager.fileExists(atPath: newURL.path) {
+                newURL = documentsDirectory.appendingPathComponent("\(base) \(i)." + ext)
+                i += 1
             }
+        }
+
+        do {
+            if newURL != song.url {
+                try fileManager.moveItem(at: song.url, to: newURL)
+                let oldSide = song.url.deletingPathExtension().appendingPathExtension("jpg")
+                let newSide = newURL.deletingPathExtension().appendingPathExtension("jpg")
+                if fileManager.fileExists(atPath: oldSide.path) {
+                    try? fileManager.moveItem(at: oldSide, to: newSide)
+                }
+            }
+
+            let finalArtist = cleanArtist.isEmpty ? "AS Music" : cleanArtist
+            if let idx = songs.firstIndex(where: { $0.id == song.id }) {
+                songs[idx].url = newURL
+                songs[idx].title = cleanTitle.isEmpty ? songs[idx].title : cleanTitle
+                songs[idx].artist = finalArtist
+            } else {
+                var s = song
+                s.url = newURL
+                s.title = cleanTitle.isEmpty ? song.title : cleanTitle
+                s.artist = finalArtist
+                songs.append(s)
+            }
+            // Persist FIRST: the meta file is keyed by file name and is the only
+            // place the id is stored, so this is what keeps the identity alive.
+            saveSongMeta()
+
             if currentSong?.id == song.id {
-                currentSong?.title = finalTitle
-                currentSong?.url = newUrl
-                currentSong?.artist = a
+                currentSong = songs.first(where: { $0.id == song.id }) ?? currentSong
                 updateNowPlayingInfo()
             }
-        } catch {}
+            if let qi = upNextQueue.firstIndex(where: { $0.id == song.id }),
+               let fresh = songs.first(where: { $0.id == song.id }) {
+                upNextQueue[qi] = fresh
+            }
+            loadSongs()
+
+            // Keep the MP3 tag in step so other players show the new name too.
+            if newURL.pathExtension.lowercased() == "mp3" {
+                let tagURL = newURL
+                let tagTitle = cleanTitle
+                DispatchQueue.global(qos: .utility).async {
+                    _ = ID3TagWriter.tagIfNeeded(at: tagURL, title: tagTitle,
+                                                 artist: finalArtist, album: "",
+                                                 artworkJPEG: nil)
+                }
+            }
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        } catch {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+        }
+    }
+
+    /// File names come from user text, so strip the characters that would send
+    /// the file into another folder or confuse the importers.
+    static func safeFileName(_ s: String) -> String {
+        var out = s
+        for bad in ["/", ":", "\\", "?", "*", "\"", "<", ">", "|"] {
+            out = out.replacingOccurrences(of: bad, with: "-")
+        }
+        out = out.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        return out.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
     }
 
     func shareSong(_ song: Song) {

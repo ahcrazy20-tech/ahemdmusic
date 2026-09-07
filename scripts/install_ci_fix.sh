@@ -8,12 +8,15 @@
 # itself: it deleted the real sources and rewrote them from those embedded
 # copies. Result: editing the app changed nothing in the IPA.
 #
-# `ci/build.yml` is the fixed workflow — it just compiles
-# TrollMusicApp/TrollMusicApp/*.swift. This script installs it.
+# `workflows/build.yml` is the fixed workflow — 38 lines that call
+# `scripts/ci_build.sh`, which compiles TrollMusicApp/TrollMusicApp/*.swift.
+# Nothing is embedded in the workflow any more, so it never needs regenerating.
 #
 # The Arena GitHub App is not allowed to write .github/workflows/, so this has
 # to be run by you — but only ONCE. After that the workflow never needs to be
 # touched again (no more sync step for new files).
+#
+# Prefer the phone-friendly route? See SETUP_ONCE.md.
 #
 # Usage
 #   bash scripts/install_ci_fix.sh            # install + commit
@@ -22,7 +25,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LEAN="ci/build.yml"
+LEAN="workflows/build.yml"
 LIVE=".github/workflows/build.yml"
 
 if [ "${1:-}" = "--check" ]; then
@@ -47,11 +50,13 @@ echo
 echo "→ 2/2: installing the lean workflow"
 mkdir -p .github/workflows
 cp "$LEAN" "$LIVE"
-# build.yml.ready used to be the generated fat workflow; keep it in step so
-# nobody re-installs the old self-contained one by accident.
+# build.yml.ready and ci/build.yml are the same file kept for the manual
+# (phone) install path documented in SETUP_ONCE.md — keep them in step.
 cp "$LEAN" build.yml.ready
+cp "$LEAN" ci/build.yml
+chmod +x scripts/ci_build.sh
 
-git add "$LIVE" build.yml.ready
+git add "$LIVE" build.yml.ready ci/build.yml scripts/ci_build.sh
 if git diff --cached --quiet -- "$LIVE"; then
   echo
   echo "Workflow already up to date — nothing to commit."
