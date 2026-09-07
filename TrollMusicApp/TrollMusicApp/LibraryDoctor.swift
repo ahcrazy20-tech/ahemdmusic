@@ -53,6 +53,10 @@ struct DuplicateGroup: Identifiable, Equatable {
     /// True when durations were measured and match (±8 s): a duplicated rip.
     /// False = same song, different version/length — check before deleting.
     var sameRecording: Bool
+    /// True when the files were matched by how they SOUND, not by their names
+    /// (same length, tempo, loudness and tone balance) — this is how a
+    /// re-download saved under a different title still gets caught.
+    var matchedByAudio: Bool = false
     var recommendedKeepID: UUID
     var aiNote: String? = nil
     var aiReviewed: Bool = false
@@ -64,6 +68,7 @@ struct DuplicateGroup: Identifiable, Equatable {
     static func == (l: DuplicateGroup, r: DuplicateGroup) -> Bool {
         l.id == r.id && l.songs == r.songs && l.recommendedKeepID == r.recommendedKeepID
             && l.aiNote == r.aiNote && l.aiReviewed == r.aiReviewed
+            && l.matchedByAudio == r.matchedByAudio
     }
 }
 
@@ -209,8 +214,96 @@ final class LibraryDoctor: ObservableObject {
                                           recommendedKeepID: best.id))
             }
         }
+        // ---------------------------------------------------------------
+        // Second pass: same AUDIO, different NAME.
+        // Anything the name matcher didn't catch is compared on measured
+        // sound: length, tempo, loudness, tone balance, stereo width and
+        // dynamics. Two files that agree on all of those are the same
+        // recording even when one is called "audio_2831" — the case the old
+        // matcher was blind to.
+        // ---------------------------------------------------------------
+        let alreadyGrouped = Set(out.flatMap { $0.songs.map { $0.id } })
+        let leftovers = songs.filter { !alreadyGrouped.contains($0.id) }
+        let twins = acousticGroups(from: leftovers, likedIDs: likedIDs)
+        out.append(contentsOf: twins)
+
         // Biggest space savings first.
         return out.sorted { $0.reclaimableBytes > $1.reclaimableBytes }
+    }
+
+    /// Are these two measurements the same recording? Deliberately strict:
+    /// a false positive here would offer to delete a song the user still
+    /// wants, so every axis has to agree.
+    static func soundsIdentical(_ a: TrackFeatures, _ b: TrackFeatures) -> Bool {
+        guard a.duration > 20, b.duration > 20 else { return false }   // ignore clips/jingles
+        guard abs(a.duration - b.duration) <= 1.5 else { return false }
+        guard abs(a.loudness - b.loudness) <= 1.5 else { return false }
+        guard abs(a.dynRange - b.dynRange) <= 1.5 else { return false }
+        guard abs(a.stereoWidth - b.stereoWidth) <= 0.06 else { return false }
+        if a.tempo > 0, b.tempo > 0, abs(a.tempo - b.tempo) > 2.5 { return false }
+        let profileA = [a.subBass, a.warmth, a.body, a.presence, a.air, a.vocalCenter]
+        let profileB = [b.subBass, b.warmth, b.body, b.presence, b.air, b.vocalCenter]
+        return FeatureMath.distance(profileA, profileB) <= 0.025
+    }
+
+    /// Groups un-matched songs by their measured sound.
+    private func acousticGroups(from songs: [Song], likedIDs: Set<UUID>) -> [DuplicateGroup] {
+        let lab = AudioLab.shared
+        let measured: [(Song, TrackFeatures)] = songs.compactMap { s in
+            guard let f = lab.features(for: s), f.duration > 20 else { return nil }
+            return (s, f)
+        }
+        guard measured.count > 1 else { return [] }
+        // Sorting by length keeps the comparison local: a song can only pair
+        // with neighbours inside the ±1.5 s window, so this stays ~O(n).
+        let ordered = measured.sorted { $0.1.duration < $1.1.duration }
+        var used = Set<UUID>()
+        var clusters: [[(Song, TrackFeatures)]] = []
+        for i in 0..<ordered.count {
+            let (song, f) = ordered[i]
+            if used.contains(song.id) { continue }
+            var cluster: [(Song, TrackFeatures)] = [(song, f)]
+            var j = i + 1
+            while j < ordered.count, ordered[j].1.duration - f.duration <= 1.5 {
+                let (other, of) = ordered[j]
+                if !used.contains(other.id), Self.soundsIdentical(f, of) {
+                    cluster.append((other, of))
+                    used.insert(other.id)
+                }
+                j += 1
+            }
+            if cluster.count > 1 {
+                used.insert(song.id)
+                clusters.append(cluster)
+            }
+        }
+
+        let history = ListenHistory.shared
+        let fm = FileManager.default
+        return clusters.compactMap { cluster in
+            var facts: [DuplicateSong] = cluster.map { pair in
+                let (s, f) = pair
+                let size = ((try? fm.attributesOfItem(atPath: s.url.path)[.size]) as? Int64) ?? 0
+                let kbps = f.duration > 1 ? Int(Double(size) * 8.0 / (f.duration * 1000.0)) : 0
+                return DuplicateSong(song: s,
+                                     fileSize: size,
+                                     bitrateKbps: kbps,
+                                     duration: f.duration,
+                                     quality: Int((Self.qualityNorm(f) * 100).rounded()),
+                                     lowQualityRip: f.isLowQualityRip,
+                                     plays: history.playCount(for: s),
+                                     isLiked: likedIDs.contains(s.id))
+            }
+            facts.sort { keeperScore($0) > keeperScore($1) }
+            guard let best = facts.first else { return nil }
+            return DuplicateGroup(id: "audio#" + best.id.uuidString,
+                                  title: best.song.title,
+                                  artist: best.song.artist,
+                                  songs: facts,
+                                  sameRecording: true,
+                                  matchedByAudio: true,
+                                  recommendedKeepID: best.id)
+        }
     }
 
     /// 0…1 estimate of how clean a master sounds — same formula the smart
@@ -261,13 +354,14 @@ final class LibraryDoctor: ObservableObject {
             for (si, d) in g.songs.prefix(6).enumerated() {
                 let dur = d.duration > 0 ? "\(Int(d.duration))s" : "?s"
                 let mb = String(format: "%.1fMB", Double(d.fileSize) / 1_048_576)
-                lines.append("\(si)|\(d.song.title)|\(d.song.artist)|\(dur)|\(mb)|\(d.bitrateKbps)kbps|plays \(d.plays)|liked \(d.isLiked ? "yes" : "no")|quality \(d.quality)/100|sameRecording \(g.sameRecording ? "yes" : "no")")
+                lines.append("\(si)|\(d.song.title)|\(d.song.artist)|\(dur)|\(mb)|\(d.bitrateKbps)kbps|plays \(d.plays)|liked \(d.isLiked ? "yes" : "no")|quality \(d.quality)/100|sameRecording \(g.sameRecording ? "yes" : "no")|matchedBy \(g.matchedByAudio ? "audio-fingerprint" : "name")")
             }
         }
         let system = """
         You are the library-cleaner inside a personal offline music player.
         The user has groups of duplicate audio files. For EACH group choose the ONE copy to KEEP.
         Prefer, in this order: a copy the user liked, the most played copy, the best sounding copy (higher quality score, higher bitrate), then the complete take.
+        When matchedBy is audio-fingerprint the files are byte-different but sound identical, so the better-named, better-tagged copy should win ties.
         Reply with ONLY valid JSON, no markdown:
         {"decisions":[{"keep":<index>,"note":"max 8 words why"}]}
         One decision per group, in the order the groups were given.
@@ -313,7 +407,9 @@ final class LibraryDoctor: ObservableObject {
         var removed = 0
         for d in group.songs where d.id != keepID {
             if let live = mm.songs.first(where: { $0.id == d.id }) {
-                mm.deleteSong(live)
+                // Goes to Recently Deleted (unless the user turned the safety
+                // net off), so an over-eager clean is always reversible.
+                mm.deleteSong(live, reason: "duplicate of “\(group.title)”")
                 removed += 1
             }
         }
@@ -352,6 +448,7 @@ struct DuplicateReviewView: View {
     @State private var confirmDeleteAll = false
     @State private var groupToClean: DuplicateGroup? = nil
     @State private var freedNote: String? = nil
+    @State private var showTrash = false
 
     var body: some View {
         NavigationView {
@@ -384,7 +481,9 @@ struct DuplicateReviewView: View {
                 }
                 Button("Cancel", role: .cancel) { }
             } message: {
-                Text("The app keeps the best copy of every group (your likes, plays and sound quality decide) and deletes the rest. Songs can't be restored afterwards.")
+                Text(LibraryTrash.shared.safeDelete
+                     ? "The app keeps the best copy of every group (your likes, plays and sound quality decide). The extras move to Recently Deleted, so you can bring any of them back."
+                     : "The app keeps the best copy of every group and erases the rest immediately — the safety net is switched off in Recently Deleted.")
             }
             .alert("Clean this group?",
                    isPresented: Binding(get: { groupToClean != nil },
@@ -396,11 +495,16 @@ struct DuplicateReviewView: View {
             } message: {
                 if let g = groupToClean {
                     let keepTitle = g.songs.first(where: { $0.id == selectedKeep(in: g) })?.song.title ?? "the best copy"
-                    Text("Keeps “\(keepTitle)” and deletes \(g.songs.count - 1) other file(s) of this song.")
+                    Text(LibraryTrash.shared.safeDelete
+                         ? "Keeps “\(keepTitle)” and moves \(g.songs.count - 1) other file(s) of this song to Recently Deleted."
+                         : "Keeps “\(keepTitle)” and erases \(g.songs.count - 1) other file(s) of this song.")
                 }
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .sheet(isPresented: $showTrash) {
+            RecentlyDeletedView()
+        }
         .onAppear {
             if doctor.groups.isEmpty && !doctor.isScanning { doctor.scan() }
         }
@@ -413,7 +517,7 @@ struct DuplicateReviewView: View {
             Image(systemName: "checkmark.seal.fill")
                 .font(.system(size: 52)).foregroundColor(.green)
             Text("No duplicates found").font(.title3).bold()
-            Text("Your library looks clean. Songs are matched by name and artist, then by how long they play — so re-downloads and double rips get caught.")
+            Text("Your library looks clean. Songs are matched by name and artist, by how long they play, and finally by how they actually sound — so even a re-download saved under a different name gets caught.")
                 .font(.subheadline).foregroundColor(.secondary)
                 .multilineTextAlignment(.center).padding(.horizontal, 30)
             Button { doctor.scan() } label: {
@@ -450,6 +554,16 @@ struct DuplicateReviewView: View {
                 if let note = freedNote ?? doctor.lastNote {
                     Text(note).font(.caption).foregroundColor(.green)
                 }
+                if LibraryTrash.shared.count > 0 {
+                    Button {
+                        showTrash = true
+                    } label: {
+                        Label("Recently Deleted (\(LibraryTrash.shared.count)) — restore anything",
+                              systemImage: "arrow.uturn.backward")
+                            .font(.caption)
+                            .foregroundColor(AppTheme.accent)
+                    }
+                }
                 if let err = doctor.lastError {
                     Text(err).font(.caption).foregroundColor(.orange)
                 }
@@ -459,7 +573,7 @@ struct DuplicateReviewView: View {
                 groupSection(g)
             }
 
-            Section(footer: Text("Nothing is deleted automatically — you pick the copy to keep (the app pre-selects the best one) and press Delete yourself.")) {
+            Section(footer: Text("Nothing is deleted automatically — you pick the copy to keep (the app pre-selects the best one) and press Delete yourself. Deleted files wait in Recently Deleted until you empty it.")) {
                 if ai.isConfigured {
                     Button {
                         hideKeyboard()
@@ -498,6 +612,14 @@ struct DuplicateReviewView: View {
             HStack(spacing: 6) {
                 Text("\(g.title) — \(g.artist)").lineLimit(1)
                 Spacer()
+                if g.matchedByAudio {
+                    Text("SAME AUDIO")
+                        .font(.system(size: 8, weight: .black))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(AppTheme.accent.opacity(0.18))
+                        .foregroundColor(AppTheme.accent)
+                        .cornerRadius(4)
+                }
                 if !g.sameRecording {
                     Text("DIFFERENT VERSIONS")
                         .font(.system(size: 8, weight: .black))
@@ -513,6 +635,8 @@ struct DuplicateReviewView: View {
         } footer: {
             if let note = g.aiNote {
                 Text("AI: \(note)").font(.caption2).foregroundColor(AppTheme.accent)
+            } else if g.matchedByAudio {
+                Text("Different file names, identical sound (same length, tempo, loudness and tone) — this is the same recording saved twice.")
             } else if !g.sameRecording {
                 Text("Lengths differ — could be a live/remix version. Double-check before deleting.")
             }

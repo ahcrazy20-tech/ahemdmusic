@@ -167,6 +167,11 @@ jobs:
                                       MusicManager.shared.resumeLastSongIfAvailable()
                                   }
                               }
+                              // Touch the trash once per launch so expired items are
+                              // swept up (and the folder never grows without bound).
+                              DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                  LibraryTrash.shared.purgeExpired()
+                              }
                           }
                   }
               }
@@ -274,6 +279,9 @@ jobs:
               @Published var currentTime: TimeInterval = 0.0
               @Published var duration: TimeInterval = 1.0
               @Published var upNextQueue: [Song] = []
+              /// The last playlist(s) removed — powers the one-tap Undo in the
+              /// Playlists tab. Cleared once the user restores or the banner times out.
+              @Published var recentlyDeletedPlaylists: [Playlist] = []
               @Published var smartRadioMode: Bool = false
               @Published var eqPreset: EQPreset = .flat {
                   didSet { applyEQ(); UserDefaults.standard.set(eqPreset.rawValue, forKey: "asmusic_eq") }
@@ -876,9 +884,25 @@ jobs:
                                      b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15]))
               }
 
-              func deleteSong(_ s: Song) {
-                  try? fileManager.removeItem(at: s.url)
-                  try? fileManager.removeItem(at: s.url.deletingPathExtension().appendingPathExtension("jpg"))
+              /// Deletes a song. By default the file is **moved to Recently Deleted**
+              /// (`LibraryTrash`) instead of being erased, so a wrong tap — or an
+              /// over-eager duplicate clean — is one button away from being undone.
+              /// Pass `permanently: true` (or turn the safety net off in Recently
+              /// Deleted) to erase the bytes immediately.
+              func deleteSong(_ s: Song, permanently: Bool = false, reason: String? = nil) {
+                  // Remember where this song lived so a restore can put it back.
+                  let memberships = playlists
+                      .filter { $0.name != "Liked Songs" && $0.songIDs.contains(s.id) }
+                      .map { $0.name }
+                  let liked = isFavorite(song: s)
+                  let archived = permanently
+                      ? false
+                      : LibraryTrash.shared.accept(song: s, liked: liked,
+                                                   playlistNames: memberships, reason: reason)
+                  if !archived {
+                      try? fileManager.removeItem(at: s.url)
+                      try? fileManager.removeItem(at: s.url.deletingPathExtension().appendingPathExtension("jpg"))
+                  }
                   try? fileManager.removeItem(at: artworkCacheDir.appendingPathComponent("\(s.id.uuidString).jpg"))
                   upNextQueue.removeAll { $0.id == s.id }
                   // Drop dangling references so playlists don't accumulate dead ids.
@@ -896,7 +920,10 @@ jobs:
                       updateNowPlayingInfo()
                   }
                   songs.removeAll { $0.id == s.id }
-                  ListenHistory.shared.remove(songID: s.id)
+                  // Play counts are kept while the song sits in Recently Deleted, so a
+                  // restore brings its history (and its weight in the smart playlists)
+                  // back with it.
+                  if !archived { ListenHistory.shared.remove(songID: s.id) }
                   saveSongMeta()
                   loadSongs()
               }
@@ -953,8 +980,12 @@ jobs:
               /// the Library — only the list goes away. If the playlist is a smart (✨)
               /// one, its kind is also *retired* in `SmartPlaylistStore`, so the
               /// auto-create pass never silently resurrects a list the user removed.
-              func deletePlaylist(_ playlist: Playlist) {
+              func deletePlaylist(_ playlist: Playlist, recordUndo: Bool = true) {
                   guard playlist.name != "Liked Songs" else { return }
+                  if recordUndo {
+                      recentlyDeletedPlaylists = [playlist]
+                      scheduleUndoExpiry()
+                  }
                   playlists.removeAll { $0.id == playlist.id }
                   savePlaylists()
                   if let kind = SmartPlaylistStore.shared.kind(for: playlist.id) {
@@ -964,8 +995,49 @@ jobs:
                   objectWillChange.send()
               }
 
-              func renamePlaylist(_ playlist: Playlist, to name: String) {
-                  let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+              /// Deletes several playlists at once (the Playlists tab's Select mode) and
+              /// keeps a copy so the whole batch can be undone with one tap.
+              @discardableResult
+              func deletePlaylists(ids: Set<UUID>) -> Int {
+                  let doomed = playlists.filter { ids.contains($0.id) && $0.name != "Liked Songs" }
+                  guard !doomed.isEmpty else { return 0 }
+                  recentlyDeletedPlaylists = doomed
+                  for p in doomed { deletePlaylist(p, recordUndo: false) }
+                  scheduleUndoExpiry()
+                  return doomed.count
+              }
+
+              /// The Undo banner is a safety net, not a permanent fixture: it fades ten
+              /// seconds after the delete unless the user acts on it.
+              private func scheduleUndoExpiry() {
+                  let snapshot = recentlyDeletedPlaylists.map { $0.id }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                      guard let self = self else { return }
+                      if self.recentlyDeletedPlaylists.map({ $0.id }) == snapshot {
+                          withAnimation { self.recentlyDeletedPlaylists = [] }
+                      }
+                  }
+              }
+
+              /// Puts the last deleted playlist(s) back, exactly as they were — including
+              /// un-retiring smart ✨ lists so the auto-DJ keeps refreshing them.
+              @discardableResult
+              func undoPlaylistDelete() -> Int {
+                  let back = recentlyDeletedPlaylists
+                  guard !back.isEmpty else { return 0 }
+                  for p in back where !playlists.contains(where: { $0.id == p.id }) {
+                      playlists.append(p)
+                      if let kind = SmartPlaylistStore.shared.kind(for: p.id) {
+                          SmartPlaylistStore.shared.unretire(kind: kind)
+                      }
+                  }
+                  savePlaylists()
+                  recentlyDeletedPlaylists = []
+                  objectWillChange.send()
+                  return back.count
+              }
+
+              func renamePlaylist(_ playlist: Playlist, to name: String) {        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
                   guard !clean.isEmpty, playlist.name != "Liked Songs" else { return }
                   guard let idx = playlists.firstIndex(where: { $0.id == playlist.id }) else { return }
                   playlists[idx].name = clean
@@ -1446,8 +1518,18 @@ jobs:
                   return list.count
               }
 
-              func playSmartPlaylist(kind: String) {
-                  guard let id = SmartPlaylistStore.shared.playlistID(for: kind),
+              /// Plays a playlist in random order without touching the global shuffle
+              /// switch — "shuffle this list once" is what people actually mean.
+              @discardableResult
+              func shufflePlaylist(_ pl: Playlist) -> Int {
+                  let list = pl.songIDs.compactMap { id in songs.first { $0.id == id } }.shuffled()
+                  guard let first = list.first else { return 0 }
+                  upNextQueue = Array(list.dropFirst())
+                  playSong(first)
+                  return list.count
+              }
+
+              func playSmartPlaylist(kind: String) {        guard let id = SmartPlaylistStore.shared.playlistID(for: kind),
                         let pl = playlists.first(where: { $0.id == id }) else { return }
                   playPlaylist(pl)
               }
@@ -2177,7 +2259,6 @@ jobs:
           struct FullPlayerView: View {
               @EnvironmentObject var musicManager: MusicManager
               @Environment(\.presentationMode) var presentationMode
-              @StateObject private var lyrics = LyricsStore.shared
               @State private var showTimerOptions = false
               @State private var showLyrics = false
               @State private var showEQ = false
@@ -2243,27 +2324,16 @@ jobs:
                               }
                           }.padding()
 
-                          if showLyrics {
-                              ScrollView(showsIndicators: false) {
-                                  VStack(alignment: lyricsAreRTL ? .trailing : .leading, spacing: 12) {
-                                      if lyrics.loading {
-                                          ProgressView().tint(.white)
-                                      } else {
-                                          Text(lyrics.lyrics)
-                                              .font(.system(size: isRTL(lyrics.lyrics) ? 20 : 18, weight: .medium))
-                                              .foregroundColor(.white)
-                                              .multilineTextAlignment(lyricsAreRTL ? .trailing : .leading)
-                                              .lineSpacing(6)
-                                              .environment(\.layoutDirection, lyricsAreRTL ? .rightToLeft : .leftToRight)
-                                      }
-                                  }
-                                  .padding(24)
-                                  .frame(maxWidth: .infinity, alignment: lyricsAreRTL ? .trailing : .leading)
-                              }
-                              .frame(maxHeight: 340)
-                              .background(Color.white.opacity(0.08))
-                              .cornerRadius(16)
-                              .padding(.horizontal)
+                          if showLyrics, let song = musicManager.currentSong {
+                              // Synced (karaoke) lyrics: the current line lights up and
+                              // tapping any line seeks the player there. Falls back to
+                              // plain text when the source has no timings.
+                              LiveLyricsView(song: song)
+                                  .environmentObject(musicManager)
+                          } else if showLyrics {
+                              Text("Play a song to see its lyrics.")
+                                  .font(.subheadline).foregroundColor(.white.opacity(0.7))
+                                  .frame(maxWidth: .infinity, minHeight: 120)
                           } else {
                               if let song = musicManager.currentSong {
                                   ArtworkView(song: song, size: 290, cornerRadius: 16, fallbackSystemName: "music.note.list")
@@ -2392,16 +2462,8 @@ jobs:
                           Spacer()
                       }
                   }
-                  .onAppear {
-                      if let t = musicManager.currentSong?.title {
-                          lyrics.fetch(for: t, artist: musicManager.currentSong?.artist ?? "")
-                      }
-                  }
-                  .onChange(of: musicManager.currentSong?.title) { _ in
-                      if let t = musicManager.currentSong?.title {
-                          lyrics.fetch(for: t, artist: musicManager.currentSong?.artist ?? "")
-                      }
-                  }
+                  // Lyrics are loaded by LiveLyricsView itself (offline cache first,
+                  // then lrclib) — no need to prefetch a second copy here.
                   .sheet(isPresented: $showEQ) {
                       NavigationView { EQView() }.environmentObject(musicManager)
                   }
@@ -2418,7 +2480,6 @@ jobs:
                   }
               }
 
-              private var lyricsAreRTL: Bool { isRTL(lyrics.lyrics) }
               private func isRTL(_ text: String) -> Bool {
                   var rtl = 0; var total = 0
                   for c in text.prefix(400) {
@@ -2575,11 +2636,15 @@ jobs:
           struct LibraryView: View {
               @EnvironmentObject var musicManager: MusicManager
               @ObservedObject private var doctor = LibraryDoctor.shared
+              @ObservedObject private var trash = LibraryTrash.shared
               @State private var showingOptionsFor: Song?
               @State private var showingRenameFor: Song?
               @State private var newNameInput = ""
               @State private var searchText = ""
               @State private var showDuplicateDoctor = false
+              @State private var showRecentlyDeleted = false
+              @State private var showHealth = false
+              @State private var showBackup = false
               @AppStorage("asmusic_lib_sort") private var sortRaw: String = LibrarySort.title.rawValue
 
               /// Searches title AND artist AND genre, ranked by where the match is —
@@ -2652,6 +2717,26 @@ jobs:
                                   Text("Use Magic DL or Web Hub to download songs")
                                       .font(.subheadline).foregroundColor(.secondary).multilineTextAlignment(.center)
                               }.padding(.vertical, 60).frame(maxWidth: .infinity)
+                          }
+                          // One-tap undo right after a delete — the file is still in
+                          // Recently Deleted, this just saves a trip to the menu.
+                          if let justDeleted = trash.items.first,
+                             Date().timeIntervalSince(justDeleted.deletedAt) < 30 {
+                              Section {
+                                  HStack(spacing: 10) {
+                                      Image(systemName: "trash.slash").foregroundColor(AppTheme.accent)
+                                      VStack(alignment: .leading, spacing: 1) {
+                                          Text("Deleted “\(justDeleted.title)”")
+                                              .font(.caption.bold()).lineLimit(1)
+                                          Text("It's in Recently Deleted — nothing is gone yet.")
+                                              .font(.caption2).foregroundColor(.secondary)
+                                      }
+                                      Spacer()
+                                      Button("Undo") { _ = trash.restore(justDeleted) }
+                                          .font(.caption.bold())
+                                          .foregroundColor(AppTheme.accent)
+                                  }
+                              }
                           }
                           if !recentlyPlayed.isEmpty {
                               Section {
@@ -2752,6 +2837,15 @@ jobs:
                       .sheet(isPresented: $showDuplicateDoctor) {
                           DuplicateReviewView().environmentObject(musicManager)
                       }
+                      .sheet(isPresented: $showRecentlyDeleted) {
+                          RecentlyDeletedView()
+                      }
+                      .sheet(isPresented: $showHealth) {
+                          LibraryHealthView().environmentObject(musicManager)
+                      }
+                      .sheet(isPresented: $showBackup) {
+                          BackupView().environmentObject(musicManager)
+                      }
                       .toolbar {
                           ToolbarItem(placement: .navigationBarLeading) {
                               Button { showDuplicateDoctor = true } label: {
@@ -2806,6 +2900,18 @@ jobs:
                                             ? "Find Duplicates (\(doctor.redundantCount) found)"
                                             : "Find Duplicates",
                                             systemImage: "doc.on.doc")
+                                  }
+                                  Button { showHealth = true } label: {
+                                      Label("Library Health", systemImage: "heart.text.square")
+                                  }
+                                  Button { showRecentlyDeleted = true } label: {
+                                      Label(trash.count > 0
+                                            ? "Recently Deleted (\(trash.count))"
+                                            : "Recently Deleted",
+                                            systemImage: "trash.slash")
+                                  }
+                                  Button { showBackup = true } label: {
+                                      Label("Backup & Restore", systemImage: "externaldrive.badge.timemachine")
                                   }
                               } label: {
                                   Image(systemName: "slider.horizontal.3")
@@ -3004,20 +3110,45 @@ jobs:
               @State private var newPlaylistName = ""
               @State private var showAsk = false
               @State private var askText = ""
-              @State private var playlistToDelete: Playlist? = nil
+              @State private var confirm: PlaylistConfirm? = nil
               @State private var playlistToRename: Playlist? = nil
               @State private var renameText = ""
+
+              // Multi-select ("Select" in the toolbar) — delete ten AI experiments in
+              // one go instead of swiping ten times.
+              @State private var selecting = false
+              @State private var selected: Set<UUID> = []
+              @AppStorage("asmusic_pl_sort") private var sortRaw: String = PlaylistSort.custom.rawValue
 
               /// Every playlist except the protected "Liked Songs" — looked up by name,
               /// never by position, so deleting lists can't shift the wrong one in.
               private var userPlaylists: [Playlist] {
-                  musicManager.playlists.filter { $0.name != "Liked Songs" }
+                  let base = musicManager.playlists.filter { $0.name != "Liked Songs" }
+                  switch PlaylistSort(rawValue: sortRaw) ?? .custom {
+                  case .custom: return base
+                  case .name:   return base.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                  case .size:   return base.sorted { $0.songIDs.count > $1.songIDs.count }
+                  case .smart:  return base.sorted { a, b in
+                      let sa = SmartPlaylistStore.shared.isSmart(a.id) ? 1 : 0
+                      let sb = SmartPlaylistStore.shared.isSmart(b.id) ? 1 : 0
+                      if sa != sb { return sa > sb }
+                      return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+                  }
+                  }
+              }
+
+              private var smartPlaylists: [Playlist] {
+                  userPlaylists.filter { SmartPlaylistStore.shared.isSmart($0.id) }
+              }
+
+              private var songByID: [UUID: Song] {
+                  Dictionary(musicManager.songs.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
               }
 
               /// Explains the ✨ badges and gives a manual "rebuild now" escape hatch.
               private var smartFooter: some View {
                   VStack(alignment: .leading, spacing: 6) {
-                      Text("✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off. Swipe any playlist to delete it — deleted smart playlists stay deleted.")
+                      Text("✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off. Swipe any playlist to delete it, or use Select to remove several at once — deleted smart playlists stay deleted.")
                           .font(.caption2).foregroundColor(.secondary)
                       HStack(spacing: 10) {
                           Button("Rebuild smart playlists now") {
@@ -3042,56 +3173,98 @@ jobs:
 
               var body: some View {
                   NavigationView {
-                      List {
-                          Section {
-                              NavigationLink(destination: LikedSongsView()) {
-                                  HStack {
-                                      Image(systemName: "heart.fill").foregroundColor(.pink).font(.title2).frame(width:36)
-                                      VStack(alignment:.leading) {
-                                          Text("Liked Songs").font(.headline)
-                                          let liked = musicManager.playlists
-                                              .first(where: { $0.name == "Liked Songs" })?.songIDs.count ?? 0
-                                          Text("\(liked) songs").font(.caption).foregroundColor(.secondary)
+                      ZStack(alignment: .bottom) {
+                          List {
+                              if !selecting {
+                                  Section {
+                                      NavigationLink(destination: LikedSongsView()) {
+                                          HStack {
+                                              Image(systemName: "heart.fill").foregroundColor(.pink).font(.title2).frame(width:36)
+                                              VStack(alignment:.leading) {
+                                                  Text("Liked Songs").font(.headline)
+                                                  let liked = musicManager.playlists
+                                                      .first(where: { $0.name == "Liked Songs" })?.songIDs.count ?? 0
+                                                  Text("\(liked) songs").font(.caption).foregroundColor(.secondary)
+                                              }
+                                          }
+                                      }
+                                  }
+
+                                  Section(header: Label("AI Playlist Generator", systemImage: "wand.and.stars")) {
+                                      PlaylistAICard()
+                                  }
+                              }
+
+                              Section(header: listHeader, footer: smartFooter) {
+                                  if userPlaylists.isEmpty {
+                                      Text("No playlists yet — let the AI build one above, or tap +.")
+                                          .font(.subheadline).foregroundColor(.secondary)
+                                  }
+                                  ForEach(userPlaylists) { playlist in
+                                      if selecting {
+                                          Button { toggle(playlist) } label: { playlistRow(playlist) }
+                                              .buttonStyle(.plain)
+                                      } else {
+                                          NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
+                                              playlistRow(playlist)
+                                          }
+                                          .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                              Button(role: .destructive) {
+                                                  confirm = .single(playlist)
+                                              } label: {
+                                                  Label("Delete", systemImage: "trash")
+                                              }
+                                              Button {
+                                                  playlistToRename = playlist
+                                                  renameText = playlist.name
+                                              } label: { Label("Rename", systemImage: "pencil") }
+                                                  .tint(.blue)
+                                          }
+                                          .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                              Button {
+                                                  musicManager.playPlaylist(playlist)
+                                              } label: { Label("Play", systemImage: "play.fill") }
+                                                  .tint(AppTheme.accent)
+                                              Button {
+                                                  musicManager.shufflePlaylist(playlist)
+                                              } label: { Label("Shuffle", systemImage: "shuffle") }
+                                                  .tint(.indigo)
+                                          }
+                                          .contextMenu {
+                                              Button {
+                                                  musicManager.playPlaylist(playlist)
+                                              } label: { Label("Play", systemImage: "play.fill") }
+                                              Button {
+                                                  musicManager.shufflePlaylist(playlist)
+                                              } label: { Label("Shuffle Play", systemImage: "shuffle") }
+                                              if let request = engine.request(forPlaylist: playlist.id) {
+                                                  Button {
+                                                      engine.generate(from: request) { _ in }
+                                                  } label: { Label("Regenerate with AI", systemImage: "arrow.triangle.2.circlepath") }
+                                              }
+                                              Button {
+                                                  playlistToRename = playlist
+                                                  renameText = playlist.name
+                                              } label: { Label("Rename", systemImage: "pencil") }
+                                              Button {
+                                                  selecting = true
+                                                  selected = [playlist.id]
+                                              } label: { Label("Select…", systemImage: "checkmark.circle") }
+                                              Divider()
+                                              Button(role: .destructive) {
+                                                  confirm = .single(playlist)
+                                              } label: { Label("Delete Playlist", systemImage: "trash") }
+                                          }
                                       }
                                   }
                               }
                           }
 
-                          Section(header: Label("AI Playlist Generator", systemImage: "wand.and.stars")) {
-                              PlaylistAICard()
+                          if !musicManager.recentlyDeletedPlaylists.isEmpty {
+                              undoBanner
                           }
-
-                          Section(header: Text("My Playlists"),
-                                  footer: smartFooter) {
-                              if userPlaylists.isEmpty {
-                                  Text("No playlists yet — let the AI build one above, or tap +.")
-                                      .font(.subheadline).foregroundColor(.secondary)
-                              }
-                              ForEach(userPlaylists) { playlist in
-                                  NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
-                                      playlistRow(playlist)
-                                  }
-                                  .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                      Button(role: .destructive) {
-                                          playlistToDelete = playlist
-                                      } label: {
-                                          Label("Delete", systemImage: "trash")
-                                      }
-                                  }
-                                  .contextMenu {
-                                      Button {
-                                          musicManager.playPlaylist(playlist)
-                                      } label: { Label("Play", systemImage: "play.fill") }
-                                      Button {
-                                          playlistToRename = playlist
-                                          renameText = playlist.name
-                                      } label: { Label("Rename", systemImage: "pencil") }
-                                      Divider()
-                                      Button(role: .destructive) {
-                                          playlistToDelete = playlist
-                                      } label: { Label("Delete Playlist", systemImage: "trash") }
-                                  }
-                              }
+                          if selecting {
+                              selectionBar
                           }
                       }
                       .alert("Describe a playlist", isPresented: $showAsk) {
@@ -3107,18 +3280,16 @@ jobs:
                       } message: {
                           Text("Built from the songs already in your Library — offline if you have no AI key set.")
                       }
-                      .alert("Delete Playlist?",
-                             isPresented: Binding(get: { playlistToDelete != nil },
-                                                  set: { if !$0 { playlistToDelete = nil } })) {
-                          Button("Delete", role: .destructive) {
-                              if let p = playlistToDelete { musicManager.deletePlaylist(p) }
-                              playlistToDelete = nil
-                          }
-                          Button("Cancel", role: .cancel) { playlistToDelete = nil }
+                      // One alert drives every destructive confirmation: SwiftUI only
+                      // reliably presents a single alert per view, and stacking five of
+                      // them is how "the delete button does nothing" bugs happen.
+                      .alert(confirmTitle,
+                             isPresented: Binding(get: { confirm != nil },
+                                                  set: { if !$0 { confirm = nil } })) {
+                          Button("Delete", role: .destructive) { runConfirm() }
+                          Button("Cancel", role: .cancel) { confirm = nil }
                       } message: {
-                          if let p = playlistToDelete {
-                              Text("“\(p.name)” (\(p.songIDs.count) songs) will be removed. Your songs stay in the Library — only the list is deleted.")
-                          }
+                          Text(confirmMessage)
                       }
                       .alert("Rename Playlist",
                              isPresented: Binding(get: { playlistToRename != nil },
@@ -3134,16 +3305,59 @@ jobs:
                       }
                       .navigationTitle("Playlists")
                       .toolbar {
-                          Button { showingNewPlaylist = true } label: { Image(systemName: "plus") }
-                          Button {
-                              SmartPlaylistEngine.shared.autoCreate.toggle()
-                          } label: {
-                              Image(systemName: SmartPlaylistEngine.shared.autoCreate ? "sparkles" : "sparkle")
-                                  .foregroundColor(SmartPlaylistEngine.shared.autoCreate ? AppTheme.accent : .secondary)
+                          ToolbarItem(placement: .navigationBarLeading) {
+                              if !userPlaylists.isEmpty {
+                                  Button(selecting ? "Done" : "Select") {
+                                      withAnimation {
+                                          selecting.toggle()
+                                          if !selecting { selected = [] }
+                                      }
+                                  }
+                                  .font(.subheadline.bold())
+                              }
                           }
-                          .accessibilityLabel(SmartPlaylistEngine.shared.autoCreate
-                                              ? "Auto-create playlists is on"
-                                              : "Auto-create playlists is off")
+                          ToolbarItem(placement: .navigationBarTrailing) {
+                              Button { showingNewPlaylist = true } label: { Image(systemName: "plus") }
+                                  .disabled(selecting)
+                          }
+                          ToolbarItem(placement: .navigationBarTrailing) {
+                              Menu {
+                                  Toggle(isOn: Binding(get: { engine.autoCreate },
+                                                       set: { engine.autoCreate = $0 })) {
+                                      Label("Auto-create ✨ playlists", systemImage: "sparkles")
+                                  }
+                                  Toggle(isOn: Binding(get: { engine.flowOrdering },
+                                                       set: { engine.flowOrdering = $0 })) {
+                                      Label("Order tracks like a DJ set", systemImage: "waveform.path.ecg")
+                                  }
+                                  Divider()
+                                  Text("Sort playlists")
+                                  ForEach(PlaylistSort.allCases) { mode in
+                                      Button {
+                                          sortRaw = mode.rawValue
+                                      } label: {
+                                          if sortRaw == mode.rawValue {
+                                              Label(mode.label, systemImage: "checkmark")
+                                          } else {
+                                              Label(mode.label, systemImage: mode.icon)
+                                          }
+                                      }
+                                  }
+                                  Divider()
+                                  Button {
+                                      SmartPlaylistStore.shared.unretireAll()
+                                      SmartPlaylistEngine.shared.rebuild(force: true)
+                                      _ = SmartPlaylistEngine.shared.applyAll()
+                                  } label: { Label("Rebuild ✨ playlists", systemImage: "arrow.clockwise") }
+                                  if !smartPlaylists.isEmpty {
+                                      Button(role: .destructive) {
+                                          confirm = .allSmart
+                                      } label: { Label("Delete all ✨ playlists", systemImage: "trash") }
+                                  }
+                              } label: {
+                                  Image(systemName: "ellipsis.circle")
+                              }
+                          }
                       }
                       .alert("New Playlist", isPresented: $showingNewPlaylist) {
                           TextField("Playlist Name", text: $newPlaylistName)
@@ -3156,17 +3370,186 @@ jobs:
                   .navigationViewStyle(StackNavigationViewStyle())
               }
 
+              // MARK: Pieces
+
+              private var listHeader: some View {
+                  HStack {
+                      Text(selecting ? "\(selected.count) selected" : "My Playlists")
+                      Spacer()
+                      if selecting {
+                          Button(selected.count == userPlaylists.count ? "None" : "All") {
+                              selected = selected.count == userPlaylists.count
+                                  ? []
+                                  : Set(userPlaylists.map { $0.id })
+                          }
+                          .font(.caption.bold())
+                          .foregroundColor(AppTheme.accent)
+                      }
+                  }
+              }
+
+              private var selectionBar: some View {
+                  HStack(spacing: 14) {
+                      Button(role: .destructive) {
+                          confirm = .bulk
+                      } label: {
+                          Label("Delete \(selected.count)", systemImage: "trash")
+                              .font(.subheadline.bold())
+                              .padding(.horizontal, 16).padding(.vertical, 10)
+                              .background(selected.isEmpty ? Color.gray.opacity(0.3) : Color.red.opacity(0.9))
+                              .foregroundColor(.white)
+                              .cornerRadius(22)
+                      }
+                      .disabled(selected.isEmpty)
+                      Button {
+                          withAnimation { selecting = false; selected = [] }
+                      } label: {
+                          Text("Cancel")
+                              .font(.subheadline.bold())
+                              .padding(.horizontal, 16).padding(.vertical, 10)
+                              .background(Color.secondary.opacity(0.2))
+                              .cornerRadius(22)
+                      }
+                  }
+                  .padding(.bottom, 14)
+                  .transition(.move(edge: .bottom))
+              }
+
+              private var undoBanner: some View {
+                  HStack(spacing: 10) {
+                      Image(systemName: "trash.slash").foregroundColor(.white)
+                      Text(musicManager.recentlyDeletedPlaylists.count == 1
+                           ? "“\(musicManager.recentlyDeletedPlaylists[0].name)” deleted"
+                           : "\(musicManager.recentlyDeletedPlaylists.count) playlists deleted")
+                          .font(.caption.bold()).foregroundColor(.white).lineLimit(1)
+                      Spacer()
+                      Button("Undo") { _ = musicManager.undoPlaylistDelete() }
+                          .font(.caption.bold())
+                          .foregroundColor(.white)
+                          .padding(.horizontal, 12).padding(.vertical, 6)
+                          .background(Color.white.opacity(0.25))
+                          .cornerRadius(14)
+                  }
+                  .padding(.horizontal, 14).padding(.vertical, 10)
+                  .background(AppTheme.accent.opacity(0.95))
+                  .cornerRadius(16)
+                  .padding(.horizontal, 16)
+                  .padding(.bottom, selecting ? 74 : 14)
+                  .transition(.move(edge: .bottom).combined(with: .opacity))
+              }
+
+              // MARK: Destructive confirmations
+
+              private var confirmTitle: String {
+                  guard let c = confirm else { return "" }
+                  switch c {
+                  case .single(let p): return "Delete “\(p.name)”?"
+                  case .bulk:          return "Delete \(selected.count) playlist\(selected.count == 1 ? "" : "s")?"
+                  case .allSmart:      return "Delete all \(smartPlaylists.count) ✨ playlists?"
+                  }
+              }
+
+              private var confirmMessage: String {
+                  guard let c = confirm else { return "" }
+                  switch c {
+                  case .single(let p):
+                      return "\(p.songIDs.count) song\(p.songIDs.count == 1 ? "" : "s") in this list. Your songs stay in the Library — only the list is deleted, and Undo appears right after."
+                  case .bulk:
+                      return "Only the lists go away — every song stays in your Library, and Undo appears right after."
+                  case .allSmart:
+                      return "Removes every playlist the app built for you. Your own playlists and all your songs are untouched, and the AI won't rebuild these unless you ask it to."
+                  }
+              }
+
+              private func runConfirm() {
+                  guard let c = confirm else { return }
+                  switch c {
+                  case .single(let p):
+                      musicManager.deletePlaylist(p)
+                  case .bulk:
+                      let n = musicManager.deletePlaylists(ids: selected)
+                      selected = []
+                      selecting = false
+                      if n > 0 { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+                  case .allSmart:
+                      musicManager.deletePlaylists(ids: Set(smartPlaylists.map { $0.id }))
+                  }
+                  confirm = nil
+              }
+
+              private func toggle(_ p: Playlist) {
+                  if selected.contains(p.id) { selected.remove(p.id) } else { selected.insert(p.id) }
+              }
+
+              /// "12 songs · 48 min" — the minutes come from the on-device analysis, so
+              /// they only appear for songs the lab has already measured.
+              private func subtitle(_ playlist: Playlist) -> String {
+                  let map = songByID
+                  var seconds = 0.0
+                  var measured = 0
+                  for id in playlist.songIDs {
+                      guard let s = map[id] else { continue }
+                      if let f = AudioLab.shared.features(for: s), f.duration > 0 {
+                          seconds += f.duration
+                          measured += 1
+                      }
+                  }
+                  var out = "\(playlist.songIDs.count) song\(playlist.songIDs.count == 1 ? "" : "s")"
+                  if measured > 0, seconds > 60 {
+                      let mins = Int(seconds / 60)
+                      out += measured == playlist.songIDs.count ? " · \(mins) min" : " · about \(mins) min"
+                  }
+                  return out
+              }
+
               private func playlistRow(_ playlist: Playlist) -> some View {
-                  HStack(spacing: 8) {
+                  HStack(spacing: 10) {
+                      if selecting {
+                          Image(systemName: selected.contains(playlist.id) ? "checkmark.circle.fill" : "circle")
+                              .font(.title3)
+                              .foregroundColor(selected.contains(playlist.id) ? AppTheme.accent : .secondary.opacity(0.6))
+                      }
                       if SmartPlaylistStore.shared.isSmart(playlist.id) {
                           Image(systemName: "sparkles")
                               .font(.caption2).foregroundColor(AppTheme.accent)
                               .accessibilityLabel("Smart playlist — refreshed automatically")
                       }
-                      Text(playlist.name).font(.headline).padding(.vertical, 5).lineLimit(1)
+                      VStack(alignment: .leading, spacing: 2) {
+                          Text(playlist.name).font(.headline).lineLimit(1)
+                          Text(subtitle(playlist)).font(.caption2).foregroundColor(.secondary)
+                      }
                       Spacer()
-                      Text("\(playlist.songIDs.count)")
-                          .font(.caption2).foregroundColor(.secondary)
+                  }
+                  .padding(.vertical, 3)
+                  .contentShape(Rectangle())
+              }
+          }
+
+          /// What the single confirmation alert in the Playlists tab is about.
+          enum PlaylistConfirm {
+              case single(Playlist)
+              case bulk
+              case allSmart
+          }
+
+          /// How the Playlists tab orders the list.
+          enum PlaylistSort: String, CaseIterable, Identifiable {
+              case custom, name, size, smart
+              var id: String { rawValue }
+              var label: String {
+                  switch self {
+                  case .custom: return "My order"
+                  case .name:   return "Name"
+                  case .size:   return "Most songs"
+                  case .smart:  return "AI playlists first"
+                  }
+              }
+              var icon: String {
+                  switch self {
+                  case .custom: return "list.bullet"
+                  case .name:   return "textformat.abc"
+                  case .size:   return "number"
+                  case .smart:  return "sparkles"
                   }
               }
           }
@@ -8009,6 +8392,34 @@ jobs:
                   save()
               }
 
+              /// Folds a restored backup into the live history. Never loses plays: the
+              /// higher count wins and the hour buckets are summed, so restoring an old
+              /// backup can only ever make the taste model better informed.
+              /// Returns how many songs were touched.
+              @discardableResult
+              func mergeImported(_ incoming: [UUID: ListenRecord]) -> Int {
+                  guard !incoming.isEmpty else { return 0 }
+                  var touched = 0
+                  for (id, inc) in incoming {
+                      guard var cur = records[id] else {
+                          records[id] = inc
+                          touched += 1
+                          continue
+                      }
+                      var changed = false
+                      if inc.playCount > cur.playCount { cur.playCount = inc.playCount; changed = true }
+                      if inc.lastPlayed > cur.lastPlayed { cur.lastPlayed = inc.lastPlayed; changed = true }
+                      if let hc = inc.hourCounts {
+                          var merged = cur.hourCounts ?? [:]
+                          for (h, n) in hc { merged[h] = max(merged[h] ?? 0, n) }
+                          if merged != cur.hourCounts { cur.hourCounts = merged; changed = true }
+                      }
+                      if changed { records[id] = cur; touched += 1 }
+                  }
+                  if touched > 0 { save() }
+                  return touched
+              }
+
               private func save() {
                   let snapshot = records
                   DispatchQueue.global(qos: .utility).async {
@@ -8682,7 +9093,9 @@ jobs:
               @Published private(set) var doneCount: Int = 0
               @Published private(set) var lastError: String? = nil
 
-              private let perSessionBudget = 60      // songs measured per app launch
+              /// Songs measured per app launch. A `var` because an explicit
+              /// "analyze everything" from the Library Health screen lifts it.
+              private var perSessionBudget = 60
               private let work = DispatchQueue(label: "asMusic.audioLab", qos: .utility)
               private let lock = NSLock()
 
@@ -8754,6 +9167,27 @@ jobs:
                   enqueue(ordered)
               }
 
+              /// The user explicitly asked for a full sweep (Library Health). Lifts the
+              /// per-launch budget, queues everything still unmeasured and restarts the
+              /// worker if it had parked itself.
+              func analyzeAll(_ songs: [Song]) {
+                  lock.lock()
+                  perSessionBudget = max(perSessionBudget, startedThisSession + songs.count + 8)
+                  lock.unlock()
+                  prime(songs)
+                  lock.lock()
+                  let needsKick = !working && !queue.isEmpty
+                  if needsKick { working = true }
+                  lock.unlock()
+                  if needsKick { drain() }
+              }
+
+              /// How many songs are still waiting to be measured.
+              func pending(of songs: [Song]) -> Int {
+                  lock.lock(); defer { lock.unlock() }
+                  return songs.reduce(0) { $0 + (store[$1.id.uuidString] == nil ? 1 : 0) }
+              }
+
               /// Measure one song soon (right after a download, or when the player opens
               /// a track we never analyzed).
               func ensureAnalyzed(_ song: Song) {
@@ -8802,11 +9236,21 @@ jobs:
                           DispatchQueue.main.async { self.queueDepth = depth; self.isWorking = true }
 
                           if overBudget {
+                              // Park the rest for the next launch and STOP. The old code
+                              // pushed the job back and `continue`d, which span this
+                              // background queue at 100% CPU forever once the budget ran
+                              // out on a big library.
                               self.lock.lock()
-                              self.queue.append(job)          // keep it for the next launch
+                              self.queue.insert(job, at: 0)
                               self.queued.insert(job.id)
+                              self.working = false
+                              let parked = self.queue.count
                               self.lock.unlock()
-                              continue
+                              DispatchQueue.main.async {
+                                  self.isWorking = false
+                                  self.queueDepth = parked
+                              }
+                              return
                           }
 
                           if let f = AudioLab.compute(job.url) {
@@ -9969,6 +10413,11 @@ jobs:
                       return
                   }
 
+                  // Remember the sentence behind this playlist so the Playlists tab can
+                  // offer "Regenerate with AI" later (the kind is derived from the text,
+                  // so the mapping stays valid across launches).
+                  rememberRequest(text, kind: "req-" + StableKey.make(text.lowercased()))
+
                   let vs = vectors()
                   let brief = PlaylistBriefParser.parse(text)
                   let aiOn = GeminiAI.shared.isConfigured
@@ -10286,6 +10735,39 @@ jobs:
                   var h: UInt64 = 5381
                   for b in s.utf8 { h = h &* 33 &+ UInt64(b) }
                   return String(h, radix: 36)
+              }
+          }
+
+          // MARK: - Remembering what the user asked for
+          //
+          // A generated playlist is only as good as the sentence behind it. Keeping that
+          // sentence lets the app re-run it later ("Regenerate with AI" in the Playlists
+          // tab) so a list built from "sad arabic for a rainy night" can be refreshed
+          // against a library that has grown since.
+
+          extension SmartPlaylistEngine {
+              private var requestsKey: String { "asmusic_smart_requests" }
+
+              var savedRequests: [String: String] {
+                  UserDefaults.standard.dictionary(forKey: requestsKey) as? [String: String] ?? [:]
+              }
+
+              func rememberRequest(_ text: String, kind: String) {
+                  var map = savedRequests
+                  map[kind] = text
+                  // Keep the store small; these are only convenience strings.
+                  if map.count > 80 {
+                      for key in map.keys.sorted().prefix(map.count - 80) { map[key] = nil }
+                  }
+                  UserDefaults.standard.set(map, forKey: requestsKey)
+              }
+
+              func request(forKind kind: String) -> String? { savedRequests[kind] }
+
+              /// The request behind a playlist, if the app generated it from a sentence.
+              func request(forPlaylist id: UUID) -> String? {
+                  guard let kind = SmartPlaylistStore.shared.kind(for: id) else { return nil }
+                  return savedRequests[kind]
               }
           }
           SWIFT
@@ -12084,6 +12566,474 @@ jobs:
               }
           }
           SWIFT
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/BackupKit.swift
+          import Foundation
+          import SwiftUI
+          import UIKit
+          import UniformTypeIdentifiers
+
+          // ===========================================================================
+          // MARK: - Backup & Restore
+          //
+          // A sideloaded app is one bad re-install away from losing everything that is
+          // NOT the audio files: playlists, likes, play counts, the AI's idea of your
+          // taste, your theme. This writes all of that into a single small JSON file you
+          // can AirDrop, put in iCloud Drive, or mail to yourself — and reads it back.
+          //
+          // Design decisions that matter:
+          //   • Songs are matched by FILE NAME, never by UUID, so a backup restores
+          //     correctly even on a fresh install where ids were re-derived.
+          //   • Restore MERGES by default (nothing you have today is thrown away);
+          //     "replace" is opt-in and only touches playlists/likes, never audio.
+          //   • Audio files are never inside the backup (they can be gigabytes) — the
+          //     file stays a few hundred KB and re-downloading a song puts it straight
+          //     back into the playlists that referenced it.
+          // ===========================================================================
+
+          struct BackupSongMeta: Codable {
+              var file: String
+              var title: String
+              var artist: String
+              var genre: String?
+              var artworkURL: String?
+              var sourceVid: String?
+          }
+
+          struct BackupPlaylist: Codable {
+              var name: String
+              var files: [String]
+          }
+
+          struct BackupHistoryEntry: Codable {
+              var file: String
+              var playCount: Int
+              var lastPlayed: Date
+              var hourCounts: [Int: Int]?
+          }
+
+          struct BackupPayload: Codable {
+              var app: String = "AS Music"
+              var format: Int = 1
+              var exportedAt: Date = Date()
+              var deviceName: String = UIDevice.current.name
+              var songCount: Int = 0
+              var songs: [BackupSongMeta] = []
+              var playlists: [BackupPlaylist] = []
+              var liked: [String] = []
+              var history: [BackupHistoryEntry] = []
+              var settings: [String: String] = [:]
+          }
+
+          struct RestoreReport {
+              var playlistsAdded = 0
+              var playlistsMerged = 0
+              var songsMatched = 0
+              var songsMissing = 0
+              var likesAdded = 0
+              var historyMerged = 0
+              var settingsApplied = 0
+
+              var summary: String {
+                  var parts: [String] = []
+                  if playlistsAdded > 0 { parts.append("\(playlistsAdded) playlist\(playlistsAdded == 1 ? "" : "s") added") }
+                  if playlistsMerged > 0 { parts.append("\(playlistsMerged) merged") }
+                  if likesAdded > 0 { parts.append("\(likesAdded) like\(likesAdded == 1 ? "" : "s") restored") }
+                  if historyMerged > 0 { parts.append("\(historyMerged) play counts") }
+                  if settingsApplied > 0 { parts.append("settings") }
+                  if songsMissing > 0 { parts.append("\(songsMissing) song\(songsMissing == 1 ? "" : "s") not on this device yet") }
+                  return parts.isEmpty ? "Nothing to restore — this backup matches what you already have." : parts.joined(separator: " · ")
+              }
+          }
+
+          final class BackupKit: ObservableObject {
+              static let shared = BackupKit()
+
+              @Published var busy = false
+              @Published var lastNote: String? = nil
+              @Published var lastError: String? = nil
+              @Published var lastBackupAt: Date? = nil
+
+              /// Settings worth carrying between installs (all cheap UserDefaults keys).
+              private static let settingKeys = [
+                  "asmusic_accent", "asmusic_eq", "asmusic_preamp", "asmusic_spatial",
+                  "asmusic_stopend", "asmusic_lib_sort", "asmusic_trash_on",
+                  "asmusic_trash_days", "asmusic_smart_auto", "asmusic_smart_flow",
+                  "asmusic_smart_clusters"
+              ]
+
+              private let fm = FileManager.default
+              private var documents: URL { fm.urls(for: .documentDirectory, in: .userDomainMask)[0] }
+
+              private init() {
+                  if let d = UserDefaults.standard.object(forKey: "asmusic_last_backup") as? Date {
+                      lastBackupAt = d
+                  }
+              }
+
+              // MARK: Build
+
+              func makePayload() -> BackupPayload {
+                  let mm = MusicManager.shared
+                  var p = BackupPayload()
+                  p.songCount = mm.songs.count
+                  p.songs = mm.songs.map {
+                      BackupSongMeta(file: $0.url.lastPathComponent,
+                                     title: $0.title,
+                                     artist: $0.artist,
+                                     genre: $0.genre,
+                                     artworkURL: $0.artworkURL,
+                                     sourceVid: $0.sourceVid)
+                  }
+                  let fileByID: [UUID: String] = Dictionary(
+                      mm.songs.map { ($0.id, $0.url.lastPathComponent) },
+                      uniquingKeysWith: { a, _ in a })
+
+                  for pl in mm.playlists where pl.name != "Liked Songs" {
+                      p.playlists.append(BackupPlaylist(name: pl.name,
+                                                        files: pl.songIDs.compactMap { fileByID[$0] }))
+                  }
+                  if let liked = mm.playlists.first(where: { $0.name == "Liked Songs" }) {
+                      p.liked = liked.songIDs.compactMap { fileByID[$0] }
+                  }
+                  for (id, rec) in ListenHistory.shared.records {
+                      guard let file = fileByID[id] else { continue }
+                      p.history.append(BackupHistoryEntry(file: file,
+                                                          playCount: rec.playCount,
+                                                          lastPlayed: rec.lastPlayed,
+                                                          hourCounts: rec.hourCounts))
+                  }
+                  let ud = UserDefaults.standard
+                  for k in Self.settingKeys {
+                      if let v = ud.object(forKey: k) {
+                          p.settings[k] = String(describing: v)
+                      }
+                  }
+                  return p
+              }
+
+              /// Writes the backup into Documents (so it is visible in the Files app) and
+              /// returns its URL.
+              func writeBackup() -> URL? {
+                  let payload = makePayload()
+                  let enc = JSONEncoder()
+                  enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+                  enc.dateEncodingStrategy = .iso8601
+                  guard let data = try? enc.encode(payload) else {
+                      lastError = "Could not build the backup file."
+                      return nil
+                  }
+                  let df = DateFormatter()
+                  df.dateFormat = "yyyy-MM-dd-HHmm"
+                  let url = documents.appendingPathComponent("ASMusic-Backup-\(df.string(from: Date())).json")
+                  do {
+                      try data.write(to: url, options: .atomic)
+                  } catch {
+                      lastError = "Could not save the backup: \(error.localizedDescription)"
+                      return nil
+                  }
+                  lastBackupAt = Date()
+                  UserDefaults.standard.set(lastBackupAt, forKey: "asmusic_last_backup")
+                  lastError = nil
+                  lastNote = "Backup saved · \(payload.playlists.count) playlists, \(payload.liked.count) likes, \(payload.songs.count) songs described."
+                  return url
+              }
+
+              /// Saves + opens the iOS share sheet (AirDrop / Files / Mail).
+              func exportAndShare() {
+                  guard let url = writeBackup() else { return }
+                  guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                        let root = scene.windows.first(where: \.isKeyWindow)?.rootViewController else { return }
+                  let ac = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+                  if let pop = ac.popoverPresentationController {
+                      pop.sourceView = root.view
+                      pop.sourceRect = CGRect(x: root.view.bounds.midX, y: root.view.bounds.midY, width: 0, height: 0)
+                      pop.permittedArrowDirections = []
+                  }
+                  var top = root
+                  while let presented = top.presentedViewController { top = presented }
+                  top.present(ac, animated: true)
+              }
+
+              /// Backups already sitting in Documents, newest first.
+              func existingBackups() -> [URL] {
+                  let all = (try? fm.contentsOfDirectory(at: documents, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+                  return all.filter { $0.lastPathComponent.hasPrefix("ASMusic-Backup-") && $0.pathExtension == "json" }
+                      .sorted { a, b in
+                          let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                          let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                          return da > db
+                      }
+              }
+
+              // MARK: Restore
+
+              func readPayload(at url: URL) -> BackupPayload? {
+                  let needsScope = url.startAccessingSecurityScopedResource()
+                  defer { if needsScope { url.stopAccessingSecurityScopedResource() } }
+                  guard let data = try? Data(contentsOf: url) else {
+                      lastError = "Could not read that file."
+                      return nil
+                  }
+                  let dec = JSONDecoder()
+                  dec.dateDecodingStrategy = .iso8601
+                  if let p = try? dec.decode(BackupPayload.self, from: data) { return p }
+                  dec.dateDecodingStrategy = .deferredToDate
+                  if let p = try? dec.decode(BackupPayload.self, from: data) { return p }
+                  lastError = "That doesn't look like an AS Music backup."
+                  return nil
+              }
+
+              /// Merges a backup into the live library. `replacePlaylists` wipes the
+              /// current user playlists first (Liked Songs is always merged, never lost).
+              @discardableResult
+              func restore(_ p: BackupPayload, replacePlaylists: Bool = false) -> RestoreReport {
+                  let mm = MusicManager.shared
+                  var report = RestoreReport()
+
+                  let idByFile: [String: UUID] = Dictionary(
+                      mm.songs.map { ($0.url.lastPathComponent, $0.id) },
+                      uniquingKeysWith: { a, _ in a })
+
+                  // 1) Song metadata (titles/artists/genres/artwork) for files we have.
+                  var metaChanged = false
+                  for meta in p.songs {
+                      guard let idx = mm.songs.firstIndex(where: { $0.url.lastPathComponent == meta.file }) else { continue }
+                      if mm.songs[idx].genre == nil, let g = meta.genre { mm.songs[idx].genre = g; metaChanged = true }
+                      if mm.songs[idx].artworkURL == nil, let a = meta.artworkURL { mm.songs[idx].artworkURL = a; metaChanged = true }
+                      if mm.songs[idx].artist == "AS Music", !meta.artist.isEmpty, meta.artist != "AS Music" {
+                          mm.songs[idx].artist = meta.artist; metaChanged = true
+                      }
+                  }
+                  if metaChanged { mm.saveSongMeta() }
+
+                  // 2) Playlists.
+                  if replacePlaylists {
+                      mm.playlists.removeAll { $0.name != "Liked Songs" }
+                  }
+                  for bp in p.playlists {
+                      let ids = bp.files.compactMap { idByFile[$0] }
+                      report.songsMatched += ids.count
+                      report.songsMissing += bp.files.count - ids.count
+                      if let idx = mm.playlists.firstIndex(where: { $0.name == bp.name }) {
+                          var merged = mm.playlists[idx].songIDs
+                          for id in ids where !merged.contains(id) { merged.append(id) }
+                          if merged.count != mm.playlists[idx].songIDs.count {
+                              mm.playlists[idx].songIDs = merged
+                              report.playlistsMerged += 1
+                          }
+                      } else {
+                          mm.playlists.append(Playlist(id: UUID(), name: bp.name, songIDs: ids))
+                          report.playlistsAdded += 1
+                      }
+                  }
+
+                  // 3) Likes.
+                  if !p.liked.isEmpty {
+                      if !mm.playlists.contains(where: { $0.name == "Liked Songs" }) {
+                          mm.playlists.insert(Playlist(id: UUID(), name: "Liked Songs", songIDs: []), at: 0)
+                      }
+                      if let li = mm.playlists.firstIndex(where: { $0.name == "Liked Songs" }) {
+                          for f in p.liked {
+                              guard let id = idByFile[f] else { report.songsMissing += 1; continue }
+                              if !mm.playlists[li].songIDs.contains(id) {
+                                  mm.playlists[li].songIDs.append(id)
+                                  report.likesAdded += 1
+                              }
+                          }
+                      }
+                  }
+                  mm.savePlaylists()
+
+                  // 4) Listening history (keeps the higher play count of the two).
+                  var incoming: [UUID: ListenRecord] = [:]
+                  for h in p.history {
+                      guard let id = idByFile[h.file] else { continue }
+                      incoming[id] = ListenRecord(playCount: h.playCount, lastPlayed: h.lastPlayed, hourCounts: h.hourCounts)
+                  }
+                  report.historyMerged = ListenHistory.shared.mergeImported(incoming)
+
+                  // 5) Settings.
+                  let ud = UserDefaults.standard
+                  for (k, raw) in p.settings where Self.settingKeys.contains(k) {
+                      if raw == "true" || raw == "false" {
+                          ud.set(raw == "true", forKey: k)
+                      } else if k == "asmusic_preamp", let f = Float(raw) {
+                          // Stored as Float by the audio chain — keep the exact type so
+                          // `object(forKey:) as? Float` still finds it after a restore.
+                          ud.set(f, forKey: k)
+                      } else if let i = Int(raw) {
+                          ud.set(i, forKey: k)
+                      } else if let d = Double(raw) {
+                          ud.set(d, forKey: k)
+                      } else {
+                          ud.set(raw, forKey: k)
+                      }
+                      report.settingsApplied += 1
+                  }
+                  mm.loadPrefs()
+                  mm.objectWillChange.send()
+
+                  lastNote = report.summary
+                  UINotificationFeedbackGenerator().notificationOccurred(.success)
+                  return report
+              }
+          }
+
+          // MARK: - Document picker (import)
+
+          struct BackupDocumentPicker: UIViewControllerRepresentable {
+              var onPick: (URL) -> Void
+
+              func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+              func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+                  let types: [UTType] = [UTType.json, UTType.plainText, UTType.data]
+                  let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
+                  picker.allowsMultipleSelection = false
+                  picker.delegate = context.coordinator
+                  return picker
+              }
+
+              func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+              final class Coordinator: NSObject, UIDocumentPickerDelegate {
+                  let onPick: (URL) -> Void
+                  init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+                  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+                      if let u = urls.first { onPick(u) }
+                  }
+              }
+          }
+
+          // MARK: - UI
+
+          /// Library ▸ ⋯ ▸ Backup & Restore.
+          struct BackupView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              @ObservedObject private var kit = BackupKit.shared
+              @Environment(\.presentationMode) private var pm
+
+              @State private var showPicker = false
+              @State private var pending: BackupPayload? = nil
+              @State private var pendingName = ""
+              @State private var replaceMode = false
+              @State private var report: RestoreReport? = nil
+
+              private var playlistCount: Int {
+                  musicManager.playlists.filter { $0.name != "Liked Songs" }.count
+              }
+              private var likeCount: Int {
+                  musicManager.playlists.first(where: { $0.name == "Liked Songs" })?.songIDs.count ?? 0
+              }
+
+              var body: some View {
+                  NavigationView {
+                      List {
+                          Section {
+                              HStack(spacing: 12) {
+                                  Image(systemName: "externaldrive.badge.timemachine")
+                                      .font(.title2).foregroundColor(AppTheme.accent)
+                                  VStack(alignment: .leading, spacing: 2) {
+                                      Text("\(playlistCount) playlists · \(likeCount) likes · \(musicManager.songs.count) songs")
+                                          .font(.subheadline.bold())
+                                      Text(kit.lastBackupAt == nil
+                                           ? "No backup taken yet"
+                                           : "Last backup \(TrashFormat.when(kit.lastBackupAt!))")
+                                          .font(.caption).foregroundColor(.secondary)
+                                  }
+                              }
+                          } footer: {
+                              Text("The backup holds your playlists, likes, play counts, song titles/artists and app settings — not the audio files, so it stays tiny.")
+                          }
+
+                          Section("Save") {
+                              Button {
+                                  kit.exportAndShare()
+                              } label: {
+                                  Label("Export backup & share…", systemImage: "square.and.arrow.up")
+                              }
+                              Button {
+                                  _ = kit.writeBackup()
+                              } label: {
+                                  Label("Save a copy in the app's Documents", systemImage: "folder.badge.plus")
+                              }
+                          }
+
+                          Section("Restore") {
+                              Button {
+                                  showPicker = true
+                              } label: {
+                                  Label("Choose a backup file…", systemImage: "square.and.arrow.down")
+                              }
+                              ForEach(kit.existingBackups(), id: \.self) { url in
+                                  Button {
+                                      if let p = kit.readPayload(at: url) {
+                                          pending = p
+                                          pendingName = url.lastPathComponent
+                                      }
+                                  } label: {
+                                      HStack {
+                                          Image(systemName: "doc.text").foregroundColor(.secondary)
+                                          VStack(alignment: .leading, spacing: 1) {
+                                              Text(url.lastPathComponent).font(.caption).lineLimit(1)
+                                              Text("on this device").font(.caption2).foregroundColor(.secondary)
+                                          }
+                                      }
+                                  }
+                              }
+                              Toggle("Replace my playlists instead of merging", isOn: $replaceMode)
+                                  .font(.subheadline)
+                          }
+
+                          if let r = report {
+                              Section {
+                                  Text(r.summary).font(.caption).foregroundColor(.green)
+                                  if r.songsMissing > 0 {
+                                      Text("Songs that aren't on this device stay reserved: download them again and they drop back into the same playlists automatically.")
+                                          .font(.caption2).foregroundColor(.secondary)
+                                  }
+                              }
+                          }
+                          if let note = kit.lastNote, report == nil {
+                              Section { Text(note).font(.caption).foregroundColor(.green) }
+                          }
+                          if let err = kit.lastError {
+                              Section { Text(err).font(.caption).foregroundColor(.orange) }
+                          }
+                      }
+                      .navigationTitle("Backup & Restore")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar {
+                          ToolbarItem(placement: .navigationBarTrailing) {
+                              Button("Done") { pm.wrappedValue.dismiss() }
+                          }
+                      }
+                      .sheet(isPresented: $showPicker) {
+                          BackupDocumentPicker { url in
+                              showPicker = false
+                              if let p = kit.readPayload(at: url) {
+                                  pending = p
+                                  pendingName = url.lastPathComponent
+                              }
+                          }
+                      }
+                      .alert("Restore this backup?",
+                             isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } })) {
+                          Button(replaceMode ? "Replace playlists" : "Merge into my library") {
+                              if let p = pending { report = kit.restore(p, replacePlaylists: replaceMode) }
+                              pending = nil
+                          }
+                          Button("Cancel", role: .cancel) { pending = nil }
+                      } message: {
+                          if let p = pending {
+                              Text("\(pendingName)\n\(p.playlists.count) playlists · \(p.liked.count) likes · taken \(TrashFormat.when(p.exportedAt)).\nYour audio files are never touched.")
+                          }
+                      }
+                  }
+                  .navigationViewStyle(StackNavigationViewStyle())
+              }
+          }
+          SWIFT
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/LibraryDoctor.swift
           import Foundation
           import SwiftUI
@@ -12140,6 +13090,10 @@ jobs:
               /// True when durations were measured and match (±8 s): a duplicated rip.
               /// False = same song, different version/length — check before deleting.
               var sameRecording: Bool
+              /// True when the files were matched by how they SOUND, not by their names
+              /// (same length, tempo, loudness and tone balance) — this is how a
+              /// re-download saved under a different title still gets caught.
+              var matchedByAudio: Bool = false
               var recommendedKeepID: UUID
               var aiNote: String? = nil
               var aiReviewed: Bool = false
@@ -12151,6 +13105,7 @@ jobs:
               static func == (l: DuplicateGroup, r: DuplicateGroup) -> Bool {
                   l.id == r.id && l.songs == r.songs && l.recommendedKeepID == r.recommendedKeepID
                       && l.aiNote == r.aiNote && l.aiReviewed == r.aiReviewed
+                      && l.matchedByAudio == r.matchedByAudio
               }
           }
 
@@ -12296,8 +13251,96 @@ jobs:
                                                     recommendedKeepID: best.id))
                       }
                   }
+                  // ---------------------------------------------------------------
+                  // Second pass: same AUDIO, different NAME.
+                  // Anything the name matcher didn't catch is compared on measured
+                  // sound: length, tempo, loudness, tone balance, stereo width and
+                  // dynamics. Two files that agree on all of those are the same
+                  // recording even when one is called "audio_2831" — the case the old
+                  // matcher was blind to.
+                  // ---------------------------------------------------------------
+                  let alreadyGrouped = Set(out.flatMap { $0.songs.map { $0.id } })
+                  let leftovers = songs.filter { !alreadyGrouped.contains($0.id) }
+                  let twins = acousticGroups(from: leftovers, likedIDs: likedIDs)
+                  out.append(contentsOf: twins)
+
                   // Biggest space savings first.
                   return out.sorted { $0.reclaimableBytes > $1.reclaimableBytes }
+              }
+
+              /// Are these two measurements the same recording? Deliberately strict:
+              /// a false positive here would offer to delete a song the user still
+              /// wants, so every axis has to agree.
+              static func soundsIdentical(_ a: TrackFeatures, _ b: TrackFeatures) -> Bool {
+                  guard a.duration > 20, b.duration > 20 else { return false }   // ignore clips/jingles
+                  guard abs(a.duration - b.duration) <= 1.5 else { return false }
+                  guard abs(a.loudness - b.loudness) <= 1.5 else { return false }
+                  guard abs(a.dynRange - b.dynRange) <= 1.5 else { return false }
+                  guard abs(a.stereoWidth - b.stereoWidth) <= 0.06 else { return false }
+                  if a.tempo > 0, b.tempo > 0, abs(a.tempo - b.tempo) > 2.5 { return false }
+                  let profileA = [a.subBass, a.warmth, a.body, a.presence, a.air, a.vocalCenter]
+                  let profileB = [b.subBass, b.warmth, b.body, b.presence, b.air, b.vocalCenter]
+                  return FeatureMath.distance(profileA, profileB) <= 0.025
+              }
+
+              /// Groups un-matched songs by their measured sound.
+              private func acousticGroups(from songs: [Song], likedIDs: Set<UUID>) -> [DuplicateGroup] {
+                  let lab = AudioLab.shared
+                  let measured: [(Song, TrackFeatures)] = songs.compactMap { s in
+                      guard let f = lab.features(for: s), f.duration > 20 else { return nil }
+                      return (s, f)
+                  }
+                  guard measured.count > 1 else { return [] }
+                  // Sorting by length keeps the comparison local: a song can only pair
+                  // with neighbours inside the ±1.5 s window, so this stays ~O(n).
+                  let ordered = measured.sorted { $0.1.duration < $1.1.duration }
+                  var used = Set<UUID>()
+                  var clusters: [[(Song, TrackFeatures)]] = []
+                  for i in 0..<ordered.count {
+                      let (song, f) = ordered[i]
+                      if used.contains(song.id) { continue }
+                      var cluster: [(Song, TrackFeatures)] = [(song, f)]
+                      var j = i + 1
+                      while j < ordered.count, ordered[j].1.duration - f.duration <= 1.5 {
+                          let (other, of) = ordered[j]
+                          if !used.contains(other.id), Self.soundsIdentical(f, of) {
+                              cluster.append((other, of))
+                              used.insert(other.id)
+                          }
+                          j += 1
+                      }
+                      if cluster.count > 1 {
+                          used.insert(song.id)
+                          clusters.append(cluster)
+                      }
+                  }
+
+                  let history = ListenHistory.shared
+                  let fm = FileManager.default
+                  return clusters.compactMap { cluster in
+                      var facts: [DuplicateSong] = cluster.map { pair in
+                          let (s, f) = pair
+                          let size = ((try? fm.attributesOfItem(atPath: s.url.path)[.size]) as? Int64) ?? 0
+                          let kbps = f.duration > 1 ? Int(Double(size) * 8.0 / (f.duration * 1000.0)) : 0
+                          return DuplicateSong(song: s,
+                                               fileSize: size,
+                                               bitrateKbps: kbps,
+                                               duration: f.duration,
+                                               quality: Int((Self.qualityNorm(f) * 100).rounded()),
+                                               lowQualityRip: f.isLowQualityRip,
+                                               plays: history.playCount(for: s),
+                                               isLiked: likedIDs.contains(s.id))
+                      }
+                      facts.sort { keeperScore($0) > keeperScore($1) }
+                      guard let best = facts.first else { return nil }
+                      return DuplicateGroup(id: "audio#" + best.id.uuidString,
+                                            title: best.song.title,
+                                            artist: best.song.artist,
+                                            songs: facts,
+                                            sameRecording: true,
+                                            matchedByAudio: true,
+                                            recommendedKeepID: best.id)
+                  }
               }
 
               /// 0…1 estimate of how clean a master sounds — same formula the smart
@@ -12348,13 +13391,14 @@ jobs:
                       for (si, d) in g.songs.prefix(6).enumerated() {
                           let dur = d.duration > 0 ? "\(Int(d.duration))s" : "?s"
                           let mb = String(format: "%.1fMB", Double(d.fileSize) / 1_048_576)
-                          lines.append("\(si)|\(d.song.title)|\(d.song.artist)|\(dur)|\(mb)|\(d.bitrateKbps)kbps|plays \(d.plays)|liked \(d.isLiked ? "yes" : "no")|quality \(d.quality)/100|sameRecording \(g.sameRecording ? "yes" : "no")")
+                          lines.append("\(si)|\(d.song.title)|\(d.song.artist)|\(dur)|\(mb)|\(d.bitrateKbps)kbps|plays \(d.plays)|liked \(d.isLiked ? "yes" : "no")|quality \(d.quality)/100|sameRecording \(g.sameRecording ? "yes" : "no")|matchedBy \(g.matchedByAudio ? "audio-fingerprint" : "name")")
                       }
                   }
                   let system = """
                   You are the library-cleaner inside a personal offline music player.
                   The user has groups of duplicate audio files. For EACH group choose the ONE copy to KEEP.
                   Prefer, in this order: a copy the user liked, the most played copy, the best sounding copy (higher quality score, higher bitrate), then the complete take.
+                  When matchedBy is audio-fingerprint the files are byte-different but sound identical, so the better-named, better-tagged copy should win ties.
                   Reply with ONLY valid JSON, no markdown:
                   {"decisions":[{"keep":<index>,"note":"max 8 words why"}]}
                   One decision per group, in the order the groups were given.
@@ -12400,7 +13444,9 @@ jobs:
                   var removed = 0
                   for d in group.songs where d.id != keepID {
                       if let live = mm.songs.first(where: { $0.id == d.id }) {
-                          mm.deleteSong(live)
+                          // Goes to Recently Deleted (unless the user turned the safety
+                          // net off), so an over-eager clean is always reversible.
+                          mm.deleteSong(live, reason: "duplicate of “\(group.title)”")
                           removed += 1
                       }
                   }
@@ -12439,6 +13485,7 @@ jobs:
               @State private var confirmDeleteAll = false
               @State private var groupToClean: DuplicateGroup? = nil
               @State private var freedNote: String? = nil
+              @State private var showTrash = false
 
               var body: some View {
                   NavigationView {
@@ -12471,7 +13518,9 @@ jobs:
                           }
                           Button("Cancel", role: .cancel) { }
                       } message: {
-                          Text("The app keeps the best copy of every group (your likes, plays and sound quality decide) and deletes the rest. Songs can't be restored afterwards.")
+                          Text(LibraryTrash.shared.safeDelete
+                               ? "The app keeps the best copy of every group (your likes, plays and sound quality decide). The extras move to Recently Deleted, so you can bring any of them back."
+                               : "The app keeps the best copy of every group and erases the rest immediately — the safety net is switched off in Recently Deleted.")
                       }
                       .alert("Clean this group?",
                              isPresented: Binding(get: { groupToClean != nil },
@@ -12483,11 +13532,16 @@ jobs:
                       } message: {
                           if let g = groupToClean {
                               let keepTitle = g.songs.first(where: { $0.id == selectedKeep(in: g) })?.song.title ?? "the best copy"
-                              Text("Keeps “\(keepTitle)” and deletes \(g.songs.count - 1) other file(s) of this song.")
+                              Text(LibraryTrash.shared.safeDelete
+                                   ? "Keeps “\(keepTitle)” and moves \(g.songs.count - 1) other file(s) of this song to Recently Deleted."
+                                   : "Keeps “\(keepTitle)” and erases \(g.songs.count - 1) other file(s) of this song.")
                           }
                       }
                   }
                   .navigationViewStyle(StackNavigationViewStyle())
+                  .sheet(isPresented: $showTrash) {
+                      RecentlyDeletedView()
+                  }
                   .onAppear {
                       if doctor.groups.isEmpty && !doctor.isScanning { doctor.scan() }
                   }
@@ -12500,7 +13554,7 @@ jobs:
                       Image(systemName: "checkmark.seal.fill")
                           .font(.system(size: 52)).foregroundColor(.green)
                       Text("No duplicates found").font(.title3).bold()
-                      Text("Your library looks clean. Songs are matched by name and artist, then by how long they play — so re-downloads and double rips get caught.")
+                      Text("Your library looks clean. Songs are matched by name and artist, by how long they play, and finally by how they actually sound — so even a re-download saved under a different name gets caught.")
                           .font(.subheadline).foregroundColor(.secondary)
                           .multilineTextAlignment(.center).padding(.horizontal, 30)
                       Button { doctor.scan() } label: {
@@ -12537,6 +13591,16 @@ jobs:
                           if let note = freedNote ?? doctor.lastNote {
                               Text(note).font(.caption).foregroundColor(.green)
                           }
+                          if LibraryTrash.shared.count > 0 {
+                              Button {
+                                  showTrash = true
+                              } label: {
+                                  Label("Recently Deleted (\(LibraryTrash.shared.count)) — restore anything",
+                                        systemImage: "arrow.uturn.backward")
+                                      .font(.caption)
+                                      .foregroundColor(AppTheme.accent)
+                              }
+                          }
                           if let err = doctor.lastError {
                               Text(err).font(.caption).foregroundColor(.orange)
                           }
@@ -12546,7 +13610,7 @@ jobs:
                           groupSection(g)
                       }
 
-                      Section(footer: Text("Nothing is deleted automatically — you pick the copy to keep (the app pre-selects the best one) and press Delete yourself.")) {
+                      Section(footer: Text("Nothing is deleted automatically — you pick the copy to keep (the app pre-selects the best one) and press Delete yourself. Deleted files wait in Recently Deleted until you empty it.")) {
                           if ai.isConfigured {
                               Button {
                                   hideKeyboard()
@@ -12585,6 +13649,14 @@ jobs:
                       HStack(spacing: 6) {
                           Text("\(g.title) — \(g.artist)").lineLimit(1)
                           Spacer()
+                          if g.matchedByAudio {
+                              Text("SAME AUDIO")
+                                  .font(.system(size: 8, weight: .black))
+                                  .padding(.horizontal, 5).padding(.vertical, 2)
+                                  .background(AppTheme.accent.opacity(0.18))
+                                  .foregroundColor(AppTheme.accent)
+                                  .cornerRadius(4)
+                          }
                           if !g.sameRecording {
                               Text("DIFFERENT VERSIONS")
                                   .font(.system(size: 8, weight: .black))
@@ -12600,6 +13672,8 @@ jobs:
                   } footer: {
                       if let note = g.aiNote {
                           Text("AI: \(note)").font(.caption2).foregroundColor(AppTheme.accent)
+                      } else if g.matchedByAudio {
+                          Text("Different file names, identical sound (same length, tempo, loudness and tone) — this is the same recording saved twice.")
                       } else if !g.sameRecording {
                           Text("Lengths differ — could be a live/remix version. Double-check before deleting.")
                       }
@@ -12687,6 +13761,1243 @@ jobs:
                   if secs < 60 { return "just now" }
                   if secs < 3600 { return "\(secs / 60) min ago" }
                   return "\(secs / 3600) h ago"
+              }
+          }
+          SWIFT
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/LibraryHealth.swift
+          import Foundation
+          import SwiftUI
+          import UIKit
+
+          // ===========================================================================
+          // MARK: - Library Health
+          //
+          // One screen that answers "is my library in good shape?" using engines the app
+          // already has, and puts a fix next to every problem instead of just reporting
+          // it:
+          //
+          //   storage        → what the songs cost, what the trash is holding
+          //   duplicates     → LibraryDoctor's count, opens the review sheet
+          //   sound analysis → AudioLab coverage + a real "measure everything" sweep
+          //   metadata       → songs with no artist/artwork, fixed by the free iTunes
+          //                    lookup (no key, no account)
+          //   broken files   → 0-byte / truncated downloads, deleted safely (they go to
+          //                    Recently Deleted like everything else)
+          //   rough rips     → the clipped / very quiet files the analysis flagged, so
+          //                    you know which songs deserve a better download
+          //
+          // Everything here reads cached numbers; the only work it starts is work the
+          // user asked for by tapping.
+          // ===========================================================================
+
+          struct LibraryHealthStats {
+              var songCount = 0
+              var libraryBytes: Int64 = 0
+              var brokenFiles: [Song] = []
+              var missingArtist: Int = 0
+              var missingArtwork: Int = 0
+              var roughRips: [Song] = []
+              var analyzed = 0
+              var pending = 0
+
+              var coverage: Double {
+                  songCount == 0 ? 1 : Double(analyzed) / Double(songCount)
+              }
+
+              /// 0…100 — a single number so the user sees progress after cleaning up.
+              var score: Int {
+                  guard songCount > 0 else { return 100 }
+                  var s = 100.0
+                  s -= min(25.0, Double(LibraryDoctor.shared.redundantCount) / Double(songCount) * 120.0)
+                  s -= min(20.0, Double(brokenFiles.count) * 6.0)
+                  s -= min(15.0, Double(missingArtist) / Double(songCount) * 45.0)
+                  s -= min(10.0, Double(missingArtwork) / Double(songCount) * 25.0)
+                  s -= min(15.0, Double(roughRips.count) / Double(songCount) * 45.0)
+                  s -= min(15.0, (1.0 - coverage) * 20.0)
+                  return max(0, min(100, Int(s.rounded())))
+              }
+          }
+
+          final class LibraryHealth: ObservableObject {
+              static let shared = LibraryHealth()
+
+              @Published private(set) var stats = LibraryHealthStats()
+              @Published private(set) var scanning = false
+              @Published var note: String? = nil
+
+              private init() {}
+
+              func refresh() {
+                  guard !scanning else { return }
+                  scanning = true
+                  let songs = MusicManager.shared.songs
+                  DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                      let fm = FileManager.default
+                      let lab = AudioLab.shared
+                      var s = LibraryHealthStats()
+                      s.songCount = songs.count
+                      for song in songs {
+                          let size = ((try? fm.attributesOfItem(atPath: song.url.path)[.size]) as? Int64) ?? 0
+                          s.libraryBytes += size
+                          // Under 32 KB of audio is never a real song: it's a failed or
+                          // interrupted download.
+                          if size < 32_768 { s.brokenFiles.append(song) }
+                          if song.artist.isEmpty || song.artist == "AS Music" { s.missingArtist += 1 }
+                          if song.artworkURL == nil { s.missingArtwork += 1 }
+                          if let f = lab.features(for: song) {
+                              s.analyzed += 1
+                              if f.isLowQualityRip { s.roughRips.append(song) }
+                          } else {
+                              s.pending += 1
+                          }
+                      }
+                      s.roughRips = Array(s.roughRips.prefix(12))
+                      s.brokenFiles = Array(s.brokenFiles.prefix(20))
+                      DispatchQueue.main.async {
+                          self?.stats = s
+                          self?.scanning = false
+                      }
+                  }
+              }
+          }
+
+          struct LibraryHealthView: View {
+              @EnvironmentObject var musicManager: MusicManager
+              @ObservedObject private var health = LibraryHealth.shared
+              @ObservedObject private var doctor = LibraryDoctor.shared
+              @ObservedObject private var lab = AudioLab.shared
+              @ObservedObject private var trash = LibraryTrash.shared
+              @Environment(\.presentationMode) private var pm
+
+              @State private var showDuplicates = false
+              @State private var showTrash = false
+              @State private var confirmBroken = false
+
+              private var s: LibraryHealthStats { health.stats }
+
+              var body: some View {
+                  NavigationView {
+                      List {
+                          scoreSection
+                          storageSection
+                          duplicatesSection
+                          analysisSection
+                          metadataSection
+                          if !s.brokenFiles.isEmpty { brokenSection }
+                          if !s.roughRips.isEmpty { ripsSection }
+                          if let note = health.note {
+                              Section { Text(note).font(.caption).foregroundColor(.green) }
+                          }
+                      }
+                      .navigationTitle("Library Health")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar {
+                          ToolbarItem(placement: .navigationBarLeading) {
+                              Button("Recheck") { health.refresh(); doctor.scan() }
+                                  .disabled(health.scanning)
+                          }
+                          ToolbarItem(placement: .navigationBarTrailing) {
+                              Button("Done") { pm.wrappedValue.dismiss() }
+                          }
+                      }
+                      .sheet(isPresented: $showDuplicates) {
+                          DuplicateReviewView().environmentObject(musicManager)
+                      }
+                      .sheet(isPresented: $showTrash) {
+                          RecentlyDeletedView()
+                      }
+                      .alert("Delete \(s.brokenFiles.count) unplayable file(s)?", isPresented: $confirmBroken) {
+                          Button("Delete", role: .destructive) { deleteBroken() }
+                          Button("Cancel", role: .cancel) { }
+                      } message: {
+                          Text("These files are too small to contain audio — a download that failed halfway. They go to Recently Deleted, so you can still get them back.")
+                      }
+                      .onAppear {
+                          health.refresh()
+                          doctor.autoScan()
+                      }
+                  }
+                  .navigationViewStyle(StackNavigationViewStyle())
+              }
+
+              // MARK: Sections
+
+              private var scoreSection: some View {
+                  Section {
+                      HStack(spacing: 16) {
+                          ZStack {
+                              Circle()
+                                  .stroke(Color.secondary.opacity(0.2), lineWidth: 8)
+                              Circle()
+                                  .trim(from: 0, to: CGFloat(s.score) / 100)
+                                  .stroke(scoreColor, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                                  .rotationEffect(.degrees(-90))
+                              Text("\(s.score)").font(.title3.bold())
+                          }
+                          .frame(width: 62, height: 62)
+                          VStack(alignment: .leading, spacing: 3) {
+                              Text(headline).font(.subheadline.bold())
+                              Text("\(s.songCount) songs · \(TrashFormat.size(s.libraryBytes))")
+                                  .font(.caption).foregroundColor(.secondary)
+                              if health.scanning {
+                                  Text("Checking…").font(.caption2).foregroundColor(.secondary)
+                              }
+                          }
+                      }
+                      .padding(.vertical, 4)
+                  }
+              }
+
+              private var storageSection: some View {
+                  Section("Storage") {
+                      row(icon: "internaldrive", title: "Songs on this device",
+                          detail: TrashFormat.size(s.libraryBytes))
+                      Button {
+                          showTrash = true
+                      } label: {
+                          row(icon: "trash.slash", title: "Recently Deleted",
+                              detail: trash.count == 0 ? "empty" : "\(trash.count) · \(TrashFormat.size(trash.totalBytes))",
+                              accent: trash.count > 0)
+                      }
+                  }
+              }
+
+              private var duplicatesSection: some View {
+                  Section("Duplicates") {
+                      Button {
+                          showDuplicates = true
+                      } label: {
+                          row(icon: "doc.on.doc",
+                              title: doctor.redundantCount == 0 ? "No duplicate files" : "\(doctor.redundantCount) extra copies",
+                              detail: doctor.redundantCount == 0
+                                  ? (doctor.isScanning ? "scanning…" : "clean")
+                                  : "free \(DoctorFormat.mb(doctor.totalReclaimable))",
+                              accent: doctor.redundantCount > 0)
+                      }
+                  }
+              }
+
+              private var analysisSection: some View {
+                  Section {
+                      row(icon: "waveform.path.ecg",
+                          title: "Sound analysis",
+                          detail: "\(Int(s.coverage * 100))% measured")
+                      if s.pending > 0 {
+                          Button {
+                              AudioLab.shared.analyzeAll(musicManager.songs)
+                              health.note = "Measuring \(s.pending) song\(s.pending == 1 ? "" : "s") in the background — smart playlists get sharper as it goes."
+                          } label: {
+                              Label(lab.isWorking ? "Measuring… (\(lab.queueDepth) left)" : "Measure the remaining \(s.pending)",
+                                    systemImage: "gauge")
+                                  .foregroundColor(AppTheme.accent)
+                          }
+                          .disabled(lab.isWorking)
+                      }
+                  } header: {
+                      Text("AI · on-device")
+                  } footer: {
+                      Text("Tempo, loudness, tone and vocal balance are measured on the device itself — that's what the auto-playlists, the duplicate 'same audio' check and the smart EQ all read.")
+                  }
+              }
+
+              private var metadataSection: some View {
+                  Section("Song info") {
+                      row(icon: "person.crop.square", title: "Missing artist",
+                          detail: s.missingArtist == 0 ? "all named" : "\(s.missingArtist) songs",
+                          accent: s.missingArtist > 0)
+                      row(icon: "photo", title: "Missing artwork",
+                          detail: s.missingArtwork == 0 ? "all covered" : "\(s.missingArtwork) songs",
+                          accent: s.missingArtwork > 0)
+                      if s.missingArtist + s.missingArtwork > 0 {
+                          Button {
+                              ITunesEnricher.shared.enrichLibrary()
+                              health.note = "Looking up artists and covers (free iTunes catalogue, no account) — give it a minute, then Recheck."
+                          } label: {
+                              Label("Fetch missing artists & covers", systemImage: "magnifyingglass")
+                                  .foregroundColor(AppTheme.accent)
+                          }
+                      }
+                  }
+              }
+
+              private var brokenSection: some View {
+                  Section {
+                      ForEach(s.brokenFiles) { song in
+                          HStack {
+                              Image(systemName: "exclamationmark.triangle.fill")
+                                  .foregroundColor(.orange).font(.caption)
+                              Text(song.title).font(.caption).lineLimit(1)
+                          }
+                      }
+                      Button(role: .destructive) {
+                          confirmBroken = true
+                      } label: {
+                          Label("Delete \(s.brokenFiles.count) unplayable file(s)", systemImage: "trash")
+                      }
+                  } header: {
+                      Text("Failed downloads")
+                  } footer: {
+                      Text("Files under 32 KB can't hold a song — they're what's left when a download is cut off.")
+                  }
+              }
+
+              private var ripsSection: some View {
+                  Section {
+                      ForEach(s.roughRips) { song in
+                          HStack {
+                              Image(systemName: "waveform.path.badge.minus")
+                                  .foregroundColor(.orange).font(.caption)
+                              VStack(alignment: .leading, spacing: 1) {
+                                  Text(song.title).font(.caption).lineLimit(1)
+                                  Text(ripReason(song)).font(.caption2).foregroundColor(.secondary)
+                              }
+                              Spacer()
+                              Button {
+                                  musicManager.playSong(song)
+                              } label: {
+                                  Image(systemName: "play.circle").foregroundColor(AppTheme.accent)
+                              }
+                              .buttonStyle(.plain)
+                          }
+                      }
+                  } header: {
+                      Text("Rough sounding rips")
+                  } footer: {
+                      Text("Clipped, very quiet, or starting with dead air. Re-download these from Magic DL for a cleaner copy — the duplicate finder will then keep the better one automatically.")
+                  }
+              }
+
+              // MARK: Bits
+
+              private var headline: String {
+                  switch s.score {
+                  case 90...100: return "Your library is in great shape"
+                  case 70..<90:  return "Good — a couple of things to tidy"
+                  case 45..<70:  return "Worth a clean-up"
+                  default:       return "Needs attention"
+                  }
+              }
+
+              private var scoreColor: Color {
+                  switch s.score {
+                  case 80...100: return .green
+                  case 55..<80:  return .yellow
+                  default:       return .orange
+                  }
+              }
+
+              private func ripReason(_ song: Song) -> String {
+                  guard let f = AudioLab.shared.features(for: song) else { return "not measured" }
+                  var parts: [String] = []
+                  if f.clipRatio > 0.004 { parts.append("clipping") }
+                  if f.loudness < -26 { parts.append("very quiet") }
+                  if f.leadSilence > 0.8 { parts.append(String(format: "%.1fs dead air", f.leadSilence)) }
+                  return parts.isEmpty ? "rough master" : parts.joined(separator: " · ")
+              }
+
+              private func row(icon: String, title: String, detail: String, accent: Bool = false) -> some View {
+                  HStack(spacing: 12) {
+                      Image(systemName: icon)
+                          .frame(width: 26)
+                          .foregroundColor(accent ? AppTheme.accent : .secondary)
+                      Text(title).font(.subheadline).foregroundColor(.primary)
+                      Spacer()
+                      Text(detail)
+                          .font(.caption)
+                          .foregroundColor(accent ? AppTheme.accent : .secondary)
+                  }
+              }
+
+              private func deleteBroken() {
+                  var n = 0
+                  for song in s.brokenFiles {
+                      if let live = musicManager.songs.first(where: { $0.id == song.id }) {
+                          musicManager.deleteSong(live, reason: "unplayable file")
+                          n += 1
+                      }
+                  }
+                  health.note = "Removed \(n) broken file\(n == 1 ? "" : "s") — they're in Recently Deleted."
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { health.refresh() }
+              }
+          }
+          SWIFT
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/LibraryTrash.swift
+          import Foundation
+          import SwiftUI
+          import UIKit
+
+          // ===========================================================================
+          // MARK: - Recently Deleted (the undo button for your library)
+          //
+          // Deleting a song used to be final: `FileManager.removeItem` and the file was
+          // gone. That is a scary thing to pair with a one-tap duplicate cleaner, so
+          // every delete now goes through here first:
+          //
+          //   Documents/<song>.mp3  ──move──▶  Documents/.trash/<uuid>-<song>.mp3
+          //
+          // The `.trash` folder starts with a dot, so `MusicManager.loadSongs()` (which
+          // only scans the top level of Documents and skips dot-files) never sees it —
+          // the song disappears from the library exactly like before, but the bytes are
+          // still there until the user says otherwise.
+          //
+          // What is remembered per item: title, artist, genre, artwork, how big it was,
+          // whether it was liked, and which playlists it belonged to. Restoring puts the
+          // file back under its original name AND puts the song back into those
+          // playlists with its original id, so a mistaken "delete all duplicates" costs
+          // one tap to undo instead of a re-download.
+          //
+          // Auto-clean: items older than the retention window (default 30 days) are
+          // purged on launch, and the trash is capped so it can never quietly eat the
+          // device (default 2 GB, oldest first).
+          // ===========================================================================
+
+          struct TrashedItem: Identifiable, Codable, Equatable {
+              var id: UUID                 // the song's stable id at delete time
+              var fileName: String         // original name in Documents ("Song.mp3")
+              var trashName: String        // name inside .trash (unique)
+              var title: String
+              var artist: String
+              var genre: String?
+              var artworkURL: String?
+              var sourceVid: String?
+              var deletedAt: Date
+              var bytes: Int64
+              var wasLiked: Bool
+              var playlistNames: [String]
+              /// Set when the file was deleted by the duplicate cleaner, so the UI can
+              /// say *why* something is in here.
+              var reason: String?
+
+              static func == (l: TrashedItem, r: TrashedItem) -> Bool {
+                  l.id == r.id && l.trashName == r.trashName
+              }
+          }
+
+          final class LibraryTrash: ObservableObject {
+              static let shared = LibraryTrash()
+
+              @Published private(set) var items: [TrashedItem] = []
+              @Published var lastNote: String? = nil
+
+              /// Master switch. Off = classic behaviour (files are erased immediately).
+              @Published var safeDelete: Bool {
+                  didSet { UserDefaults.standard.set(safeDelete, forKey: "asmusic_trash_on") }
+              }
+              /// 0 = keep until the user empties it.
+              @Published var retentionDays: Int {
+                  didSet { UserDefaults.standard.set(retentionDays, forKey: "asmusic_trash_days"); purgeExpired() }
+              }
+
+              static let retentionChoices: [Int] = [7, 30, 90, 0]
+              private let maxBytes: Int64 = 2 * 1024 * 1024 * 1024   // 2 GB ceiling
+
+              private let fm = FileManager.default
+
+              private var documents: URL {
+                  fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+              }
+              var trashDir: URL {
+                  let d = documents.appendingPathComponent(".trash")
+                  if !fm.fileExists(atPath: d.path) {
+                      try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+                  }
+                  return d
+              }
+              private var indexURL: URL { trashDir.appendingPathComponent("index.json") }
+
+              private init() {
+                  let ud = UserDefaults.standard
+                  safeDelete = (ud.object(forKey: "asmusic_trash_on") as? Bool) ?? true
+                  retentionDays = (ud.object(forKey: "asmusic_trash_days") as? Int) ?? 30
+                  load()
+                  purgeExpired()
+              }
+
+              // MARK: Stats
+
+              var totalBytes: Int64 { items.reduce(0) { $0 + $1.bytes } }
+              var count: Int { items.count }
+
+              func daysLeft(for item: TrashedItem) -> Int? {
+                  guard retentionDays > 0 else { return nil }
+                  let age = Date().timeIntervalSince(item.deletedAt) / 86_400
+                  return max(0, retentionDays - Int(age))
+              }
+
+              // MARK: Persistence
+
+              private func load() {
+                  guard let d = try? Data(contentsOf: indexURL),
+                        let decoded = try? JSONDecoder().decode([TrashedItem].self, from: d) else { return }
+                  // Drop entries whose file vanished (user cleaned via the Files app).
+                  items = decoded.filter { fm.fileExists(atPath: trashDir.appendingPathComponent($0.trashName).path) }
+                      .sorted { $0.deletedAt > $1.deletedAt }
+              }
+
+              private func save() {
+                  let snapshot = items
+                  DispatchQueue.global(qos: .utility).async { [weak self] in
+                      guard let self = self else { return }
+                      if let d = try? JSONEncoder().encode(snapshot) {
+                          try? d.write(to: self.indexURL, options: .atomic)
+                      }
+                  }
+              }
+
+              // MARK: Accepting a delete
+
+              /// Moves `song` (and its artwork sidecar) into the trash.
+              /// Returns true when the file now lives in `.trash` — the caller must then
+              /// NOT delete it from disk. Returns false when safe-delete is off or the
+              /// move failed, in which case the caller does its normal hard delete.
+              @discardableResult
+              func accept(song: Song, liked: Bool, playlistNames: [String], reason: String? = nil) -> Bool {
+                  guard safeDelete else { return false }
+                  guard fm.fileExists(atPath: song.url.path) else { return false }
+
+                  let original = song.url.lastPathComponent
+                  let stamp = UUID().uuidString.prefix(8)
+                  let trashName = "\(stamp)-\(original)"
+                  let dest = trashDir.appendingPathComponent(trashName)
+                  do {
+                      try fm.moveItem(at: song.url, to: dest)
+                  } catch {
+                      return false
+                  }
+                  // Artwork sidecar travels with the audio so restore looks identical.
+                  let sideOld = song.url.deletingPathExtension().appendingPathExtension("jpg")
+                  if fm.fileExists(atPath: sideOld.path) {
+                      let sideNew = dest.deletingPathExtension().appendingPathExtension("jpg")
+                      try? fm.moveItem(at: sideOld, to: sideNew)
+                  }
+                  let size = ((try? fm.attributesOfItem(atPath: dest.path)[.size]) as? Int64) ?? 0
+                  let item = TrashedItem(id: song.id,
+                                         fileName: original,
+                                         trashName: trashName,
+                                         title: song.title,
+                                         artist: song.artist,
+                                         genre: song.genre,
+                                         artworkURL: song.artworkURL,
+                                         sourceVid: song.sourceVid,
+                                         deletedAt: Date(),
+                                         bytes: size,
+                                         wasLiked: liked,
+                                         playlistNames: playlistNames,
+                                         reason: reason)
+                  items.insert(item, at: 0)
+                  save()
+                  enforceCeiling()
+                  return true
+              }
+
+              // MARK: Restoring
+
+              /// Puts the file back in Documents and re-attaches likes + playlists.
+              @discardableResult
+              func restore(_ item: TrashedItem) -> Bool {
+                  let src = trashDir.appendingPathComponent(item.trashName)
+                  guard fm.fileExists(atPath: src.path) else {
+                      drop(item)
+                      return false
+                  }
+                  // Never clobber a file that came back by other means.
+                  var dest = documents.appendingPathComponent(item.fileName)
+                  if fm.fileExists(atPath: dest.path) {
+                      let base = dest.deletingPathExtension().lastPathComponent
+                      let ext = dest.pathExtension
+                      var i = 2
+                      repeat {
+                          dest = documents.appendingPathComponent("\(base) \(i).\(ext)")
+                          i += 1
+                      } while fm.fileExists(atPath: dest.path) && i < 50
+                  }
+                  do {
+                      try fm.moveItem(at: src, to: dest)
+                  } catch {
+                      lastNote = "Could not restore “\(item.title)”."
+                      return false
+                  }
+                  let sideOld = src.deletingPathExtension().appendingPathExtension("jpg")
+                  if fm.fileExists(atPath: sideOld.path) {
+                      try? fm.moveItem(at: sideOld, to: dest.deletingPathExtension().appendingPathExtension("jpg"))
+                  }
+                  try? fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: dest.path)
+
+                  // Re-register with the ORIGINAL id so playlists, likes, listening
+                  // history and the audio-analysis cache all still point at this song.
+                  let mm = MusicManager.shared
+                  let restored = Song(id: item.id,
+                                      title: item.title,
+                                      url: dest,
+                                      artist: item.artist.isEmpty ? "AS Music" : item.artist,
+                                      artworkURL: item.artworkURL,
+                                      sourceVid: item.sourceVid,
+                                      genre: item.genre)
+                  mm.songs.removeAll { $0.id == item.id || $0.url.lastPathComponent == dest.lastPathComponent }
+                  mm.songs.append(restored)
+                  mm.songs.sort { $0.title.lowercased() < $1.title.lowercased() }
+                  mm.saveSongMeta()
+
+                  // Memberships (playlists are matched by name; missing ones are recreated).
+                  for name in item.playlistNames {
+                      if let idx = mm.playlists.firstIndex(where: { $0.name == name }) {
+                          if !mm.playlists[idx].songIDs.contains(item.id) {
+                              mm.playlists[idx].songIDs.append(item.id)
+                          }
+                      } else {
+                          mm.playlists.append(Playlist(id: UUID(), name: name, songIDs: [item.id]))
+                      }
+                  }
+                  if item.wasLiked, let li = mm.playlists.firstIndex(where: { $0.name == "Liked Songs" }),
+                     !mm.playlists[li].songIDs.contains(item.id) {
+                      mm.playlists[li].songIDs.append(item.id)
+                  }
+                  mm.savePlaylists()
+                  mm.loadSongs()
+
+                  drop(item)
+                  lastNote = "“\(item.title)” is back in your library."
+                  UINotificationFeedbackGenerator().notificationOccurred(.success)
+                  return true
+              }
+
+              @discardableResult
+              func restoreAll() -> Int {
+                  var n = 0
+                  for item in items { if restore(item) { n += 1 } }
+                  lastNote = n == 0 ? "Nothing to restore." : "Restored \(n) song\(n == 1 ? "" : "s")."
+                  return n
+              }
+
+              // MARK: Purging
+
+              /// Erases one item for good.
+              func purge(_ item: TrashedItem) {
+                  let f = trashDir.appendingPathComponent(item.trashName)
+                  try? fm.removeItem(at: f)
+                  try? fm.removeItem(at: f.deletingPathExtension().appendingPathExtension("jpg"))
+                  drop(item)
+              }
+
+              func emptyAll() {
+                  let freed = totalBytes
+                  for item in items { purge(item) }
+                  items = []
+                  save()
+                  lastNote = "Trash emptied · \(TrashFormat.size(freed)) freed."
+              }
+
+              /// Called on launch and whenever the retention setting changes.
+              func purgeExpired() {
+                  guard retentionDays > 0 else { return }
+                  let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86_400)
+                  let expired = items.filter { $0.deletedAt < cutoff }
+                  guard !expired.isEmpty else { return }
+                  for item in expired { purge(item) }
+              }
+
+              /// Keeps the folder under the ceiling, oldest first.
+              private func enforceCeiling() {
+                  var total = totalBytes
+                  guard total > maxBytes else { return }
+                  for item in items.sorted(by: { $0.deletedAt < $1.deletedAt }) {
+                      guard total > maxBytes else { break }
+                      total -= item.bytes
+                      purge(item)
+                  }
+              }
+
+              private func drop(_ item: TrashedItem) {
+                  items.removeAll { $0.trashName == item.trashName }
+                  save()
+              }
+          }
+
+          // MARK: - Formatting
+
+          enum TrashFormat {
+              static func size(_ bytes: Int64) -> String {
+                  if bytes >= 1_073_741_824 { return String(format: "%.2f GB", Double(bytes) / 1_073_741_824) }
+                  return String(format: "%.1f MB", Double(bytes) / 1_048_576)
+              }
+              static func when(_ d: Date) -> String {
+                  let secs = Int(Date().timeIntervalSince(d))
+                  if secs < 60 { return "just now" }
+                  if secs < 3600 { return "\(secs / 60) min ago" }
+                  if secs < 86_400 { return "\(secs / 3600) h ago" }
+                  return "\(secs / 86_400) day\(secs / 86_400 == 1 ? "" : "s") ago"
+              }
+          }
+
+          // MARK: - UI
+
+          /// Library ▸ ⋯ ▸ Recently Deleted. Restore, erase, or change how long the
+          /// safety net keeps things.
+          struct RecentlyDeletedView: View {
+              @ObservedObject private var trash = LibraryTrash.shared
+              @Environment(\.presentationMode) private var pm
+              @State private var confirmEmpty = false
+
+              var body: some View {
+                  NavigationView {
+                      List {
+                          Section {
+                              Toggle(isOn: $trash.safeDelete) {
+                                  VStack(alignment: .leading, spacing: 2) {
+                                      Text("Safety net").font(.subheadline.bold())
+                                      Text("Deleted songs wait here instead of vanishing.")
+                                          .font(.caption2).foregroundColor(.secondary)
+                                  }
+                              }
+                              Picker("Keep for", selection: $trash.retentionDays) {
+                                  ForEach(LibraryTrash.retentionChoices, id: \.self) { d in
+                                      Text(d == 0 ? "Until I empty it" : "\(d) days").tag(d)
+                                  }
+                              }
+                          } footer: {
+                              Text("Songs in here don't show in your Library and don't play — they only take up storage. Restoring puts a song back with its likes and playlists intact.")
+                          }
+
+                          if trash.items.isEmpty {
+                              Section {
+                                  VStack(spacing: 10) {
+                                      Image(systemName: "trash.slash")
+                                          .font(.system(size: 42)).foregroundColor(.secondary)
+                                      Text("Nothing deleted recently").font(.headline)
+                                      Text("When you delete a song — or clean duplicates — it lands here first.")
+                                          .font(.caption).foregroundColor(.secondary)
+                                          .multilineTextAlignment(.center)
+                                  }
+                                  .frame(maxWidth: .infinity)
+                                  .padding(.vertical, 26)
+                              }
+                          } else {
+                              Section {
+                                  ForEach(trash.items) { item in
+                                      row(item)
+                                  }
+                              } header: {
+                                  Text("\(trash.count) song\(trash.count == 1 ? "" : "s") · \(TrashFormat.size(trash.totalBytes))")
+                              }
+
+                              Section {
+                                  Button {
+                                      _ = trash.restoreAll()
+                                  } label: {
+                                      Label("Restore everything", systemImage: "arrow.uturn.backward")
+                                  }
+                                  Button(role: .destructive) {
+                                      confirmEmpty = true
+                                  } label: {
+                                      Label("Empty trash · free \(TrashFormat.size(trash.totalBytes))", systemImage: "trash")
+                                  }
+                              }
+                          }
+
+                          if let note = trash.lastNote {
+                              Section { Text(note).font(.caption).foregroundColor(.green) }
+                          }
+                      }
+                      .navigationTitle("Recently Deleted")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar {
+                          ToolbarItem(placement: .navigationBarTrailing) {
+                              Button("Done") { pm.wrappedValue.dismiss() }
+                          }
+                      }
+                      .alert("Erase \(trash.count) song\(trash.count == 1 ? "" : "s") for good?",
+                             isPresented: $confirmEmpty) {
+                          Button("Erase", role: .destructive) { trash.emptyAll() }
+                          Button("Cancel", role: .cancel) { }
+                      } message: {
+                          Text("This frees \(TrashFormat.size(trash.totalBytes)) and cannot be undone.")
+                      }
+                  }
+                  .navigationViewStyle(StackNavigationViewStyle())
+              }
+
+              private func row(_ item: TrashedItem) -> some View {
+                  HStack(spacing: 10) {
+                      Image(systemName: "music.note")
+                          .font(.body)
+                          .frame(width: 34, height: 34)
+                          .background(Color.secondary.opacity(0.15))
+                          .cornerRadius(6)
+                      VStack(alignment: .leading, spacing: 2) {
+                          Text(item.title).font(.subheadline).lineLimit(1)
+                          Text(subtitle(item)).font(.caption2).foregroundColor(.secondary).lineLimit(2)
+                      }
+                      Spacer()
+                      Button {
+                          _ = trash.restore(item)
+                      } label: {
+                          Image(systemName: "arrow.uturn.backward.circle.fill")
+                              .font(.title3).foregroundColor(AppTheme.accent)
+                      }
+                      .buttonStyle(.plain)
+                  }
+                  .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                      Button(role: .destructive) { trash.purge(item) } label: {
+                          Label("Erase", systemImage: "trash")
+                      }
+                      Button { _ = trash.restore(item) } label: {
+                          Label("Restore", systemImage: "arrow.uturn.backward")
+                      }.tint(AppTheme.accent)
+                  }
+              }
+
+              private func subtitle(_ item: TrashedItem) -> String {
+                  var parts: [String] = [item.artist, TrashFormat.size(item.bytes), TrashFormat.when(item.deletedAt)]
+                  if let d = trash.daysLeft(for: item) {
+                      parts.append(d == 0 ? "erased soon" : "\(d) day\(d == 1 ? "" : "s") left")
+                  }
+                  if let r = item.reason { parts.append(r) }
+                  if item.wasLiked { parts.append("was liked") }
+                  return parts.filter { !$0.isEmpty }.joined(separator: " · ")
+              }
+          }
+          SWIFT
+          cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/LyricsLive.swift
+          import Foundation
+          import SwiftUI
+          import UIKit
+
+          // ===========================================================================
+          // MARK: - Live (synced) lyrics — karaoke in the full player
+          //
+          // The old lyrics sheet fetched a wall of text and stripped the timestamps out.
+          // This one keeps them, so the current line lights up while the song plays and
+          // tapping any line jumps the player to that moment.
+          //
+          // Where the words come from, in order (first hit wins):
+          //   1. a `.lrc` file sitting next to the audio in Documents  → 100% offline,
+          //      AirDrop your own timings and they are used verbatim
+          //   2. the on-device cache in `Documents/.lyrics/`           → offline after
+          //      the first successful fetch, even in airplane mode
+          //   3. lrclib.net — free, open, no account, no API key       → cached at once
+          //
+          // Per-song timing offset (±) is remembered, because rips are not all trimmed
+          // the same way. Nothing is uploaded: the request is a song title and artist.
+          // ===========================================================================
+
+          struct LyricLine: Identifiable, Equatable {
+              let id: Int
+              let time: Double     // seconds
+              let text: String
+          }
+
+          enum LyricsKind: Equatable {
+              case none
+              case plain
+              case synced
+          }
+
+          final class LiveLyrics: ObservableObject {
+              static let shared = LiveLyrics()
+
+              @Published private(set) var lines: [LyricLine] = []
+              @Published private(set) var plain: String = ""
+              @Published private(set) var kind: LyricsKind = .none
+              @Published private(set) var loading = false
+              @Published private(set) var sourceNote: String = ""
+              @Published var offset: Double = 0 {
+                  didSet {
+                      guard let id = currentSongID else { return }
+                      UserDefaults.standard.set(offset, forKey: "asmusic_lrc_off_" + id.uuidString)
+                  }
+              }
+
+              private var currentSongID: UUID?
+              private let fm = FileManager.default
+
+              private var cacheDir: URL {
+                  let d = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                      .appendingPathComponent(".lyrics")
+                  if !fm.fileExists(atPath: d.path) {
+                      try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+                  }
+                  return d
+              }
+
+              private init() {}
+
+              // MARK: Loading
+
+              /// Loads lyrics for `song`. Cheap and idempotent: calling it again for the
+              /// song already shown does nothing.
+              func load(for song: Song, duration: Double = 0, force: Bool = false) {
+                  if !force, currentSongID == song.id, kind != .none || loading { return }
+                  currentSongID = song.id
+                  offset = UserDefaults.standard.double(forKey: "asmusic_lrc_off_" + song.id.uuidString)
+                  lines = []
+                  plain = ""
+                  kind = .none
+                  sourceNote = ""
+
+                  // 1) A .lrc the user placed next to the file wins over everything.
+                  let sidecar = song.url.deletingPathExtension().appendingPathExtension("lrc")
+                  if let text = try? String(contentsOf: sidecar, encoding: .utf8), !text.isEmpty {
+                      apply(text, note: "from the .lrc next to your file", for: song.id)
+                      return
+                  }
+                  // 2) Cache from a previous fetch (works offline).
+                  if !force {
+                      let cached = cacheDir.appendingPathComponent(song.id.uuidString + ".lrc")
+                      if let text = try? String(contentsOf: cached, encoding: .utf8), !text.isEmpty {
+                          apply(text, note: "saved on your device", for: song.id)
+                          return
+                      }
+                  }
+                  // 3) lrclib.net (free, key-free).
+                  fetch(song: song, duration: duration)
+              }
+
+              private func apply(_ text: String, note: String, for songID: UUID) {
+                  let parsed = Self.parseLRC(text)
+                  DispatchQueue.main.async {
+                      guard self.currentSongID == songID else { return }
+                      if parsed.isEmpty {
+                          self.lines = []
+                          self.plain = Self.stripTimestamps(text)
+                          self.kind = self.plain.isEmpty ? .none : .plain
+                      } else {
+                          self.lines = parsed
+                          self.plain = parsed.map { $0.text }.joined(separator: "\n")
+                          self.kind = .synced
+                      }
+                      self.sourceNote = note
+                      self.loading = false
+                  }
+              }
+
+              private func fetch(song: Song, duration: Double) {
+                  loading = true
+                  let title = Self.searchable(song.title)
+                  let artist = (song.artist == "AS Music" || song.artist.isEmpty) ? "" : Self.searchable(song.artist)
+                  let songID = song.id
+
+                  // Exact match first (title + artist + length) — this is the endpoint
+                  // that returns properly synced timings.
+                  var getComps = URLComponents(string: "https://lrclib.net/api/get")
+                  var q: [URLQueryItem] = [URLQueryItem(name: "track_name", value: title)]
+                  if !artist.isEmpty { q.append(URLQueryItem(name: "artist_name", value: artist)) }
+                  if duration > 1 { q.append(URLQueryItem(name: "duration", value: String(Int(duration.rounded())))) }
+                  getComps?.queryItems = q
+
+                  let searchURL: URL? = {
+                      var c = URLComponents(string: "https://lrclib.net/api/search")
+                      if artist.isEmpty {
+                          c?.queryItems = [URLQueryItem(name: "q", value: title)]
+                      } else {
+                          c?.queryItems = [URLQueryItem(name: "track_name", value: title),
+                                           URLQueryItem(name: "artist_name", value: artist)]
+                      }
+                      return c?.url
+                  }()
+
+                  let finishEmpty: () -> Void = { [weak self] in
+                      DispatchQueue.main.async {
+                          guard let self = self, self.currentSongID == songID else { return }
+                          self.loading = false
+                          self.kind = .none
+                          self.sourceNote = "No lyrics found for this track."
+                      }
+                  }
+
+                  let handleSearch: () -> Void = { [weak self] in
+                      guard let self = self, let url = searchURL else { finishEmpty(); return }
+                      self.request(url) { data in
+                          guard let data = data,
+                                let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                              finishEmpty(); return
+                          }
+                          // Prefer a result that actually has timings, and whose length
+                          // is close to the file we are playing.
+                          let best = arr.sorted { a, b in
+                              let sa = (a["syncedLyrics"] as? String)?.isEmpty == false ? 1 : 0
+                              let sb = (b["syncedLyrics"] as? String)?.isEmpty == false ? 1 : 0
+                              if sa != sb { return sa > sb }
+                              guard duration > 1 else { return false }
+                              let da = abs(((a["duration"] as? Double) ?? 0) - duration)
+                              let db = abs(((b["duration"] as? Double) ?? 0) - duration)
+                              return da < db
+                          }.first
+                          guard let hit = best else { finishEmpty(); return }
+                          self.consume(hit, songID: songID, note: "lrclib.net", finishEmpty: finishEmpty)
+                      }
+                  }
+
+                  guard let getURL = getComps?.url else { handleSearch(); return }
+                  request(getURL) { [weak self] data in
+                      guard let self = self else { return }
+                      if let data = data,
+                         let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                         (obj["syncedLyrics"] is String || obj["plainLyrics"] is String) {
+                          self.consume(obj, songID: songID, note: "lrclib.net", finishEmpty: handleSearch)
+                      } else {
+                          handleSearch()
+                      }
+                  }
+              }
+
+              private func consume(_ obj: [String: Any], songID: UUID, note: String, finishEmpty: @escaping () -> Void) {
+                  let synced = (obj["syncedLyrics"] as? String) ?? ""
+                  let plainText = (obj["plainLyrics"] as? String) ?? ""
+                  let text = !synced.isEmpty ? synced : plainText
+                  guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                      finishEmpty(); return
+                  }
+                  // Cache so the next play works with no network at all.
+                  try? text.write(to: cacheDir.appendingPathComponent(songID.uuidString + ".lrc"),
+                                  atomically: true, encoding: .utf8)
+                  apply(text, note: synced.isEmpty ? "\(note) · no timings for this one" : note, for: songID)
+              }
+
+              private func request(_ url: URL, completion: @escaping (Data?) -> Void) {
+                  var req = URLRequest(url: url, timeoutInterval: 12)
+                  req.setValue("ASMusic v2 (offline music player)", forHTTPHeaderField: "User-Agent")
+                  URLSession.shared.dataTask(with: req) { data, resp, _ in
+                      let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                      completion((200...299).contains(code) ? data : nil)
+                  }.resume()
+              }
+
+              // MARK: Live position
+
+              /// Index of the line that should be highlighted at `time`, or nil.
+              func activeIndex(at time: TimeInterval) -> Int? {
+                  guard !lines.isEmpty else { return nil }
+                  let t = time - offset
+                  var lo = 0, hi = lines.count - 1, found: Int? = nil
+                  while lo <= hi {
+                      let mid = (lo + hi) / 2
+                      if lines[mid].time <= t { found = mid; lo = mid + 1 } else { hi = mid - 1 }
+                  }
+                  return found
+              }
+
+              /// Saves what is on screen as a `.lrc` next to the audio file, so it stays
+              /// even if the caches are cleared (and travels with the exported song).
+              @discardableResult
+              func pinToFile(for song: Song) -> Bool {
+                  let text: String
+                  if kind == .synced {
+                      text = lines.map { l in
+                          let m = Int(l.time) / 60, s = Int(l.time) % 60
+                          let cs = Int((l.time - floor(l.time)) * 100)
+                          return String(format: "[%02d:%02d.%02d]%@", m, s, cs, l.text)
+                      }.joined(separator: "\n")
+                  } else {
+                      text = plain
+                  }
+                  guard !text.isEmpty else { return false }
+                  let dest = song.url.deletingPathExtension().appendingPathExtension("lrc")
+                  do {
+                      try text.write(to: dest, atomically: true, encoding: .utf8)
+                      sourceNote = "saved beside your song file"
+                      return true
+                  } catch { return false }
+              }
+
+              // MARK: Parsing
+
+              /// Parses standard LRC (`[01:23.45] line`), including repeated timestamps
+              /// on one line. Metadata tags (`[ar:...]`) are ignored.
+              static func parseLRC(_ raw: String) -> [LyricLine] {
+                  var out: [(Double, String)] = []
+                  let stampPattern = "\\[(\\d{1,3}):(\\d{1,2})(?:[.:](\\d{1,3}))?\\]"
+                  guard let rx = try? NSRegularExpression(pattern: stampPattern) else { return [] }
+                  for rawLine in raw.split(whereSeparator: { $0.isNewline }) {
+                      let line = String(rawLine)
+                      let ns = line as NSString
+                      let matches = rx.matches(in: line, range: NSRange(location: 0, length: ns.length))
+                      guard !matches.isEmpty else { continue }
+                      let lastEnd = matches.map { $0.range.location + $0.range.length }.max() ?? 0
+                      let text = ns.substring(from: lastEnd).trimmingCharacters(in: .whitespaces)
+                      for m in matches {
+                          let mm = Double(ns.substring(with: m.range(at: 1))) ?? 0
+                          let ss = Double(ns.substring(with: m.range(at: 2))) ?? 0
+                          var frac = 0.0
+                          if m.range(at: 3).location != NSNotFound {
+                              let f = ns.substring(with: m.range(at: 3))
+                              frac = (Double(f) ?? 0) / pow(10, Double(f.count))
+                          }
+                          out.append((mm * 60 + ss + frac, text))
+                      }
+                  }
+                  // Empty lines are kept (they are the instrumental breaks) but a run of
+                  // them collapses to one so the view doesn't scroll through nothing.
+                  let sorted = out.sorted { $0.0 < $1.0 }
+                  var cleaned: [(Double, String)] = []
+                  for entry in sorted {
+                      if entry.1.isEmpty, cleaned.last?.1.isEmpty == true { continue }
+                      cleaned.append(entry)
+                  }
+                  guard cleaned.contains(where: { !$0.1.isEmpty }) else { return [] }
+                  return cleaned.enumerated().map { LyricLine(id: $0.offset, time: $0.element.0, text: $0.element.1) }
+              }
+
+              static func stripTimestamps(_ raw: String) -> String {
+                  raw.replacingOccurrences(of: "\\[[0-9:.\\s\\-]+\\]", with: "", options: .regularExpression)
+                      .split(whereSeparator: { $0.isNewline })
+                      .map { String($0).trimmingCharacters(in: .whitespaces) }
+                      .joined(separator: "\n")
+                      .trimmingCharacters(in: .whitespacesAndNewlines)
+              }
+
+              /// Removes the junk downloaders leave in titles so the lookup matches.
+              static func searchable(_ s: String) -> String {
+                  var x = s
+                  for pattern in ["\\([^)]*\\)", "\\[[^\\]]*\\]", "(?i)official", "(?i)video",
+                                  "(?i)lyrics?", "(?i)audio", "(?i)hd", "(?i)4k", "(?i)remaster(ed)?"] {
+                      x = x.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
+                  }
+                  x = x.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                  return x.trimmingCharacters(in: .whitespaces)
+              }
+          }
+
+          // MARK: - The karaoke view
+
+          struct LiveLyricsView: View {
+              let song: Song
+              @EnvironmentObject var musicManager: MusicManager
+              @ObservedObject private var store = LiveLyrics.shared
+              @State private var pinned = false
+
+              private var rtl: Bool {
+                  let sample = store.kind == .synced ? store.lines.prefix(6).map { $0.text }.joined() : String(store.plain.prefix(120))
+                  return sample.unicodeScalars.contains { (0x0600...0x06FF).contains(Int($0.value)) }
+              }
+
+              private var activeIndex: Int? {
+                  store.activeIndex(at: musicManager.currentTime)
+              }
+
+              var body: some View {
+                  VStack(spacing: 8) {
+                      header
+                      Group {
+                          if store.loading {
+                              VStack(spacing: 8) {
+                                  ProgressView().tint(.white)
+                                  Text("Looking for the words…")
+                                      .font(.caption).foregroundColor(.white.opacity(0.7))
+                              }
+                              .frame(maxWidth: .infinity, maxHeight: .infinity)
+                          } else if store.kind == .synced {
+                              syncedList
+                          } else if store.kind == .plain {
+                              ScrollView(showsIndicators: false) {
+                                  Text(store.plain)
+                                      .font(.system(size: 18, weight: .medium))
+                                      .foregroundColor(.white)
+                                      .multilineTextAlignment(rtl ? .trailing : .leading)
+                                      .lineSpacing(6)
+                                      .frame(maxWidth: .infinity, alignment: rtl ? .trailing : .leading)
+                                      .padding(20)
+                              }
+                          } else {
+                              VStack(spacing: 10) {
+                                  Image(systemName: "text.quote")
+                                      .font(.system(size: 34)).foregroundColor(.white.opacity(0.5))
+                                  Text(store.sourceNote.isEmpty ? "No lyrics yet" : store.sourceNote)
+                                      .font(.subheadline).foregroundColor(.white.opacity(0.75))
+                                  Text("Tip: drop a “\(song.url.deletingPathExtension().lastPathComponent).lrc” file in the app's Documents folder and it will be used offline.")
+                                      .font(.caption2).foregroundColor(.white.opacity(0.5))
+                                      .multilineTextAlignment(.center).padding(.horizontal, 24)
+                                  Button {
+                                      store.load(for: song, duration: musicManager.duration, force: true)
+                                  } label: {
+                                      Label("Search again", systemImage: "arrow.clockwise")
+                                          .font(.caption.bold())
+                                          .padding(.horizontal, 14).padding(.vertical, 7)
+                                          .background(Color.white.opacity(0.15))
+                                          .foregroundColor(.white)
+                                          .cornerRadius(16)
+                                  }
+                              }
+                              .frame(maxWidth: .infinity, maxHeight: .infinity)
+                          }
+                      }
+                  }
+                  .frame(maxHeight: 340)
+                  .background(Color.white.opacity(0.08))
+                  .cornerRadius(16)
+                  .padding(.horizontal)
+                  .onAppear { store.load(for: song, duration: musicManager.duration) }
+                  .onChange(of: song.id) { _ in
+                      pinned = false
+                      store.load(for: song, duration: musicManager.duration)
+                  }
+              }
+
+              private var header: some View {
+                  HStack(spacing: 10) {
+                      Image(systemName: store.kind == .synced ? "waveform.and.mic" : "text.quote")
+                          .font(.caption).foregroundColor(AppTheme.accent)
+                      Text(store.kind == .synced ? "Synced · tap a line to jump" : (store.sourceNote.isEmpty ? "Lyrics" : store.sourceNote))
+                          .font(.caption2).foregroundColor(.white.opacity(0.65)).lineLimit(1)
+                      Spacer()
+                      if store.kind == .synced {
+                          Button { store.offset -= 0.3 } label: {
+                              Image(systemName: "minus.circle").font(.caption)
+                          }
+                          Text(String(format: "%+.1fs", store.offset))
+                              .font(.system(size: 10, weight: .bold)).foregroundColor(.white.opacity(0.7))
+                          Button { store.offset += 0.3 } label: {
+                              Image(systemName: "plus.circle").font(.caption)
+                          }
+                      }
+                      Menu {
+                          Button {
+                              store.load(for: song, duration: musicManager.duration, force: true)
+                          } label: { Label("Re-download lyrics", systemImage: "arrow.clockwise") }
+                          Button {
+                              pinned = store.pinToFile(for: song)
+                          } label: { Label(pinned ? "Saved beside the song" : "Keep offline with this song",
+                                           systemImage: pinned ? "checkmark.circle" : "square.and.arrow.down") }
+                              .disabled(store.kind == .none)
+                          Button { store.offset = 0 } label: { Label("Reset timing", systemImage: "gobackward") }
+                      } label: {
+                          Image(systemName: "ellipsis.circle").font(.caption)
+                      }
+                  }
+                  .foregroundColor(.white.opacity(0.8))
+                  .padding(.horizontal, 14)
+                  .padding(.top, 10)
+              }
+
+              private var syncedList: some View {
+                  ScrollViewReader { proxy in
+                      ScrollView(showsIndicators: false) {
+                          LazyVStack(alignment: rtl ? .trailing : .leading, spacing: 14) {
+                              ForEach(store.lines) { line in
+                                  let isActive = activeIndex == line.id
+                                  Text(line.text.isEmpty ? "♪" : line.text)
+                                      .font(.system(size: isActive ? 22 : 17,
+                                                    weight: isActive ? .bold : .medium))
+                                      .foregroundColor(isActive ? .white : .white.opacity(0.42))
+                                      .multilineTextAlignment(rtl ? .trailing : .leading)
+                                      .frame(maxWidth: .infinity, alignment: rtl ? .trailing : .leading)
+                                      .id(line.id)
+                                      .onTapGesture {
+                                          musicManager.seek(to: max(0, line.time + store.offset))
+                                          UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                      }
+                                      .animation(.easeInOut(duration: 0.2), value: isActive)
+                              }
+                          }
+                          .padding(.horizontal, 20)
+                          .padding(.vertical, 14)
+                      }
+                      .onChange(of: activeIndex ?? -1) { idx in
+                          guard idx >= 0 else { return }
+                          withAnimation(.easeInOut(duration: 0.35)) {
+                              proxy.scrollTo(idx, anchor: .center)
+                          }
+                      }
+                  }
               }
           }
           SWIFT

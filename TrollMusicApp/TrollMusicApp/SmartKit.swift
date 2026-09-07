@@ -103,6 +103,34 @@ final class ListenHistory: ObservableObject {
         save()
     }
 
+    /// Folds a restored backup into the live history. Never loses plays: the
+    /// higher count wins and the hour buckets are summed, so restoring an old
+    /// backup can only ever make the taste model better informed.
+    /// Returns how many songs were touched.
+    @discardableResult
+    func mergeImported(_ incoming: [UUID: ListenRecord]) -> Int {
+        guard !incoming.isEmpty else { return 0 }
+        var touched = 0
+        for (id, inc) in incoming {
+            guard var cur = records[id] else {
+                records[id] = inc
+                touched += 1
+                continue
+            }
+            var changed = false
+            if inc.playCount > cur.playCount { cur.playCount = inc.playCount; changed = true }
+            if inc.lastPlayed > cur.lastPlayed { cur.lastPlayed = inc.lastPlayed; changed = true }
+            if let hc = inc.hourCounts {
+                var merged = cur.hourCounts ?? [:]
+                for (h, n) in hc { merged[h] = max(merged[h] ?? 0, n) }
+                if merged != cur.hourCounts { cur.hourCounts = merged; changed = true }
+            }
+            if changed { records[id] = cur; touched += 1 }
+        }
+        if touched > 0 { save() }
+        return touched
+    }
+
     private func save() {
         let snapshot = records
         DispatchQueue.global(qos: .utility).async {

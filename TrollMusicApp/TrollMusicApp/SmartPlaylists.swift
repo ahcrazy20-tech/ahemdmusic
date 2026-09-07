@@ -912,6 +912,11 @@ extension SmartPlaylistEngine {
             return
         }
 
+        // Remember the sentence behind this playlist so the Playlists tab can
+        // offer "Regenerate with AI" later (the kind is derived from the text,
+        // so the mapping stays valid across launches).
+        rememberRequest(text, kind: "req-" + StableKey.make(text.lowercased()))
+
         let vs = vectors()
         let brief = PlaylistBriefParser.parse(text)
         let aiOn = GeminiAI.shared.isConfigured
@@ -1229,5 +1234,38 @@ enum StableKey {
         var h: UInt64 = 5381
         for b in s.utf8 { h = h &* 33 &+ UInt64(b) }
         return String(h, radix: 36)
+    }
+}
+
+// MARK: - Remembering what the user asked for
+//
+// A generated playlist is only as good as the sentence behind it. Keeping that
+// sentence lets the app re-run it later ("Regenerate with AI" in the Playlists
+// tab) so a list built from "sad arabic for a rainy night" can be refreshed
+// against a library that has grown since.
+
+extension SmartPlaylistEngine {
+    private var requestsKey: String { "asmusic_smart_requests" }
+
+    var savedRequests: [String: String] {
+        UserDefaults.standard.dictionary(forKey: requestsKey) as? [String: String] ?? [:]
+    }
+
+    func rememberRequest(_ text: String, kind: String) {
+        var map = savedRequests
+        map[kind] = text
+        // Keep the store small; these are only convenience strings.
+        if map.count > 80 {
+            for key in map.keys.sorted().prefix(map.count - 80) { map[key] = nil }
+        }
+        UserDefaults.standard.set(map, forKey: requestsKey)
+    }
+
+    func request(forKind kind: String) -> String? { savedRequests[kind] }
+
+    /// The request behind a playlist, if the app generated it from a sentence.
+    func request(forPlaylist id: UUID) -> String? {
+        guard let kind = SmartPlaylistStore.shared.kind(for: id) else { return nil }
+        return savedRequests[kind]
     }
 }

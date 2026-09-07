@@ -626,7 +626,6 @@ struct MiniPlayerView: View {
 struct FullPlayerView: View {
     @EnvironmentObject var musicManager: MusicManager
     @Environment(\.presentationMode) var presentationMode
-    @StateObject private var lyrics = LyricsStore.shared
     @State private var showTimerOptions = false
     @State private var showLyrics = false
     @State private var showEQ = false
@@ -692,27 +691,16 @@ struct FullPlayerView: View {
                     }
                 }.padding()
 
-                if showLyrics {
-                    ScrollView(showsIndicators: false) {
-                        VStack(alignment: lyricsAreRTL ? .trailing : .leading, spacing: 12) {
-                            if lyrics.loading {
-                                ProgressView().tint(.white)
-                            } else {
-                                Text(lyrics.lyrics)
-                                    .font(.system(size: isRTL(lyrics.lyrics) ? 20 : 18, weight: .medium))
-                                    .foregroundColor(.white)
-                                    .multilineTextAlignment(lyricsAreRTL ? .trailing : .leading)
-                                    .lineSpacing(6)
-                                    .environment(\.layoutDirection, lyricsAreRTL ? .rightToLeft : .leftToRight)
-                            }
-                        }
-                        .padding(24)
-                        .frame(maxWidth: .infinity, alignment: lyricsAreRTL ? .trailing : .leading)
-                    }
-                    .frame(maxHeight: 340)
-                    .background(Color.white.opacity(0.08))
-                    .cornerRadius(16)
-                    .padding(.horizontal)
+                if showLyrics, let song = musicManager.currentSong {
+                    // Synced (karaoke) lyrics: the current line lights up and
+                    // tapping any line seeks the player there. Falls back to
+                    // plain text when the source has no timings.
+                    LiveLyricsView(song: song)
+                        .environmentObject(musicManager)
+                } else if showLyrics {
+                    Text("Play a song to see its lyrics.")
+                        .font(.subheadline).foregroundColor(.white.opacity(0.7))
+                        .frame(maxWidth: .infinity, minHeight: 120)
                 } else {
                     if let song = musicManager.currentSong {
                         ArtworkView(song: song, size: 290, cornerRadius: 16, fallbackSystemName: "music.note.list")
@@ -841,16 +829,8 @@ struct FullPlayerView: View {
                 Spacer()
             }
         }
-        .onAppear {
-            if let t = musicManager.currentSong?.title {
-                lyrics.fetch(for: t, artist: musicManager.currentSong?.artist ?? "")
-            }
-        }
-        .onChange(of: musicManager.currentSong?.title) { _ in
-            if let t = musicManager.currentSong?.title {
-                lyrics.fetch(for: t, artist: musicManager.currentSong?.artist ?? "")
-            }
-        }
+        // Lyrics are loaded by LiveLyricsView itself (offline cache first,
+        // then lrclib) — no need to prefetch a second copy here.
         .sheet(isPresented: $showEQ) {
             NavigationView { EQView() }.environmentObject(musicManager)
         }
@@ -867,7 +847,6 @@ struct FullPlayerView: View {
         }
     }
 
-    private var lyricsAreRTL: Bool { isRTL(lyrics.lyrics) }
     private func isRTL(_ text: String) -> Bool {
         var rtl = 0; var total = 0
         for c in text.prefix(400) {
@@ -1024,11 +1003,15 @@ enum LibrarySort: String, CaseIterable, Identifiable {
 struct LibraryView: View {
     @EnvironmentObject var musicManager: MusicManager
     @ObservedObject private var doctor = LibraryDoctor.shared
+    @ObservedObject private var trash = LibraryTrash.shared
     @State private var showingOptionsFor: Song?
     @State private var showingRenameFor: Song?
     @State private var newNameInput = ""
     @State private var searchText = ""
     @State private var showDuplicateDoctor = false
+    @State private var showRecentlyDeleted = false
+    @State private var showHealth = false
+    @State private var showBackup = false
     @AppStorage("asmusic_lib_sort") private var sortRaw: String = LibrarySort.title.rawValue
 
     /// Searches title AND artist AND genre, ranked by where the match is —
@@ -1101,6 +1084,26 @@ struct LibraryView: View {
                         Text("Use Magic DL or Web Hub to download songs")
                             .font(.subheadline).foregroundColor(.secondary).multilineTextAlignment(.center)
                     }.padding(.vertical, 60).frame(maxWidth: .infinity)
+                }
+                // One-tap undo right after a delete — the file is still in
+                // Recently Deleted, this just saves a trip to the menu.
+                if let justDeleted = trash.items.first,
+                   Date().timeIntervalSince(justDeleted.deletedAt) < 30 {
+                    Section {
+                        HStack(spacing: 10) {
+                            Image(systemName: "trash.slash").foregroundColor(AppTheme.accent)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Deleted “\(justDeleted.title)”")
+                                    .font(.caption.bold()).lineLimit(1)
+                                Text("It's in Recently Deleted — nothing is gone yet.")
+                                    .font(.caption2).foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Button("Undo") { _ = trash.restore(justDeleted) }
+                                .font(.caption.bold())
+                                .foregroundColor(AppTheme.accent)
+                        }
+                    }
                 }
                 if !recentlyPlayed.isEmpty {
                     Section {
@@ -1201,6 +1204,15 @@ struct LibraryView: View {
             .sheet(isPresented: $showDuplicateDoctor) {
                 DuplicateReviewView().environmentObject(musicManager)
             }
+            .sheet(isPresented: $showRecentlyDeleted) {
+                RecentlyDeletedView()
+            }
+            .sheet(isPresented: $showHealth) {
+                LibraryHealthView().environmentObject(musicManager)
+            }
+            .sheet(isPresented: $showBackup) {
+                BackupView().environmentObject(musicManager)
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button { showDuplicateDoctor = true } label: {
@@ -1255,6 +1267,18 @@ struct LibraryView: View {
                                   ? "Find Duplicates (\(doctor.redundantCount) found)"
                                   : "Find Duplicates",
                                   systemImage: "doc.on.doc")
+                        }
+                        Button { showHealth = true } label: {
+                            Label("Library Health", systemImage: "heart.text.square")
+                        }
+                        Button { showRecentlyDeleted = true } label: {
+                            Label(trash.count > 0
+                                  ? "Recently Deleted (\(trash.count))"
+                                  : "Recently Deleted",
+                                  systemImage: "trash.slash")
+                        }
+                        Button { showBackup = true } label: {
+                            Label("Backup & Restore", systemImage: "externaldrive.badge.timemachine")
                         }
                     } label: {
                         Image(systemName: "slider.horizontal.3")
@@ -1453,20 +1477,45 @@ struct PlaylistsView: View {
     @State private var newPlaylistName = ""
     @State private var showAsk = false
     @State private var askText = ""
-    @State private var playlistToDelete: Playlist? = nil
+    @State private var confirm: PlaylistConfirm? = nil
     @State private var playlistToRename: Playlist? = nil
     @State private var renameText = ""
+
+    // Multi-select ("Select" in the toolbar) — delete ten AI experiments in
+    // one go instead of swiping ten times.
+    @State private var selecting = false
+    @State private var selected: Set<UUID> = []
+    @AppStorage("asmusic_pl_sort") private var sortRaw: String = PlaylistSort.custom.rawValue
 
     /// Every playlist except the protected "Liked Songs" — looked up by name,
     /// never by position, so deleting lists can't shift the wrong one in.
     private var userPlaylists: [Playlist] {
-        musicManager.playlists.filter { $0.name != "Liked Songs" }
+        let base = musicManager.playlists.filter { $0.name != "Liked Songs" }
+        switch PlaylistSort(rawValue: sortRaw) ?? .custom {
+        case .custom: return base
+        case .name:   return base.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .size:   return base.sorted { $0.songIDs.count > $1.songIDs.count }
+        case .smart:  return base.sorted { a, b in
+            let sa = SmartPlaylistStore.shared.isSmart(a.id) ? 1 : 0
+            let sb = SmartPlaylistStore.shared.isSmart(b.id) ? 1 : 0
+            if sa != sb { return sa > sb }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+        }
+    }
+
+    private var smartPlaylists: [Playlist] {
+        userPlaylists.filter { SmartPlaylistStore.shared.isSmart($0.id) }
+    }
+
+    private var songByID: [UUID: Song] {
+        Dictionary(musicManager.songs.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
     }
 
     /// Explains the ✨ badges and gives a manual "rebuild now" escape hatch.
     private var smartFooter: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off. Swipe any playlist to delete it — deleted smart playlists stay deleted.")
+            Text("✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off. Swipe any playlist to delete it, or use Select to remove several at once — deleted smart playlists stay deleted.")
                 .font(.caption2).foregroundColor(.secondary)
             HStack(spacing: 10) {
                 Button("Rebuild smart playlists now") {
@@ -1491,56 +1540,98 @@ struct PlaylistsView: View {
 
     var body: some View {
         NavigationView {
-            List {
-                Section {
-                    NavigationLink(destination: LikedSongsView()) {
-                        HStack {
-                            Image(systemName: "heart.fill").foregroundColor(.pink).font(.title2).frame(width:36)
-                            VStack(alignment:.leading) {
-                                Text("Liked Songs").font(.headline)
-                                let liked = musicManager.playlists
-                                    .first(where: { $0.name == "Liked Songs" })?.songIDs.count ?? 0
-                                Text("\(liked) songs").font(.caption).foregroundColor(.secondary)
+            ZStack(alignment: .bottom) {
+                List {
+                    if !selecting {
+                        Section {
+                            NavigationLink(destination: LikedSongsView()) {
+                                HStack {
+                                    Image(systemName: "heart.fill").foregroundColor(.pink).font(.title2).frame(width:36)
+                                    VStack(alignment:.leading) {
+                                        Text("Liked Songs").font(.headline)
+                                        let liked = musicManager.playlists
+                                            .first(where: { $0.name == "Liked Songs" })?.songIDs.count ?? 0
+                                        Text("\(liked) songs").font(.caption).foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                        }
+
+                        Section(header: Label("AI Playlist Generator", systemImage: "wand.and.stars")) {
+                            PlaylistAICard()
+                        }
+                    }
+
+                    Section(header: listHeader, footer: smartFooter) {
+                        if userPlaylists.isEmpty {
+                            Text("No playlists yet — let the AI build one above, or tap +.")
+                                .font(.subheadline).foregroundColor(.secondary)
+                        }
+                        ForEach(userPlaylists) { playlist in
+                            if selecting {
+                                Button { toggle(playlist) } label: { playlistRow(playlist) }
+                                    .buttonStyle(.plain)
+                            } else {
+                                NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
+                                    playlistRow(playlist)
+                                }
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button(role: .destructive) {
+                                        confirm = .single(playlist)
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                    Button {
+                                        playlistToRename = playlist
+                                        renameText = playlist.name
+                                    } label: { Label("Rename", systemImage: "pencil") }
+                                        .tint(.blue)
+                                }
+                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                    Button {
+                                        musicManager.playPlaylist(playlist)
+                                    } label: { Label("Play", systemImage: "play.fill") }
+                                        .tint(AppTheme.accent)
+                                    Button {
+                                        musicManager.shufflePlaylist(playlist)
+                                    } label: { Label("Shuffle", systemImage: "shuffle") }
+                                        .tint(.indigo)
+                                }
+                                .contextMenu {
+                                    Button {
+                                        musicManager.playPlaylist(playlist)
+                                    } label: { Label("Play", systemImage: "play.fill") }
+                                    Button {
+                                        musicManager.shufflePlaylist(playlist)
+                                    } label: { Label("Shuffle Play", systemImage: "shuffle") }
+                                    if let request = engine.request(forPlaylist: playlist.id) {
+                                        Button {
+                                            engine.generate(from: request) { _ in }
+                                        } label: { Label("Regenerate with AI", systemImage: "arrow.triangle.2.circlepath") }
+                                    }
+                                    Button {
+                                        playlistToRename = playlist
+                                        renameText = playlist.name
+                                    } label: { Label("Rename", systemImage: "pencil") }
+                                    Button {
+                                        selecting = true
+                                        selected = [playlist.id]
+                                    } label: { Label("Select…", systemImage: "checkmark.circle") }
+                                    Divider()
+                                    Button(role: .destructive) {
+                                        confirm = .single(playlist)
+                                    } label: { Label("Delete Playlist", systemImage: "trash") }
+                                }
                             }
                         }
                     }
                 }
 
-                Section(header: Label("AI Playlist Generator", systemImage: "wand.and.stars")) {
-                    PlaylistAICard()
+                if !musicManager.recentlyDeletedPlaylists.isEmpty {
+                    undoBanner
                 }
-
-                Section(header: Text("My Playlists"),
-                        footer: smartFooter) {
-                    if userPlaylists.isEmpty {
-                        Text("No playlists yet — let the AI build one above, or tap +.")
-                            .font(.subheadline).foregroundColor(.secondary)
-                    }
-                    ForEach(userPlaylists) { playlist in
-                        NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
-                            playlistRow(playlist)
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) {
-                                playlistToDelete = playlist
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                        .contextMenu {
-                            Button {
-                                musicManager.playPlaylist(playlist)
-                            } label: { Label("Play", systemImage: "play.fill") }
-                            Button {
-                                playlistToRename = playlist
-                                renameText = playlist.name
-                            } label: { Label("Rename", systemImage: "pencil") }
-                            Divider()
-                            Button(role: .destructive) {
-                                playlistToDelete = playlist
-                            } label: { Label("Delete Playlist", systemImage: "trash") }
-                        }
-                    }
+                if selecting {
+                    selectionBar
                 }
             }
             .alert("Describe a playlist", isPresented: $showAsk) {
@@ -1556,18 +1647,16 @@ struct PlaylistsView: View {
             } message: {
                 Text("Built from the songs already in your Library — offline if you have no AI key set.")
             }
-            .alert("Delete Playlist?",
-                   isPresented: Binding(get: { playlistToDelete != nil },
-                                        set: { if !$0 { playlistToDelete = nil } })) {
-                Button("Delete", role: .destructive) {
-                    if let p = playlistToDelete { musicManager.deletePlaylist(p) }
-                    playlistToDelete = nil
-                }
-                Button("Cancel", role: .cancel) { playlistToDelete = nil }
+            // One alert drives every destructive confirmation: SwiftUI only
+            // reliably presents a single alert per view, and stacking five of
+            // them is how "the delete button does nothing" bugs happen.
+            .alert(confirmTitle,
+                   isPresented: Binding(get: { confirm != nil },
+                                        set: { if !$0 { confirm = nil } })) {
+                Button("Delete", role: .destructive) { runConfirm() }
+                Button("Cancel", role: .cancel) { confirm = nil }
             } message: {
-                if let p = playlistToDelete {
-                    Text("“\(p.name)” (\(p.songIDs.count) songs) will be removed. Your songs stay in the Library — only the list is deleted.")
-                }
+                Text(confirmMessage)
             }
             .alert("Rename Playlist",
                    isPresented: Binding(get: { playlistToRename != nil },
@@ -1583,16 +1672,59 @@ struct PlaylistsView: View {
             }
             .navigationTitle("Playlists")
             .toolbar {
-                Button { showingNewPlaylist = true } label: { Image(systemName: "plus") }
-                Button {
-                    SmartPlaylistEngine.shared.autoCreate.toggle()
-                } label: {
-                    Image(systemName: SmartPlaylistEngine.shared.autoCreate ? "sparkles" : "sparkle")
-                        .foregroundColor(SmartPlaylistEngine.shared.autoCreate ? AppTheme.accent : .secondary)
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if !userPlaylists.isEmpty {
+                        Button(selecting ? "Done" : "Select") {
+                            withAnimation {
+                                selecting.toggle()
+                                if !selecting { selected = [] }
+                            }
+                        }
+                        .font(.subheadline.bold())
+                    }
                 }
-                .accessibilityLabel(SmartPlaylistEngine.shared.autoCreate
-                                    ? "Auto-create playlists is on"
-                                    : "Auto-create playlists is off")
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { showingNewPlaylist = true } label: { Image(systemName: "plus") }
+                        .disabled(selecting)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        Toggle(isOn: Binding(get: { engine.autoCreate },
+                                             set: { engine.autoCreate = $0 })) {
+                            Label("Auto-create ✨ playlists", systemImage: "sparkles")
+                        }
+                        Toggle(isOn: Binding(get: { engine.flowOrdering },
+                                             set: { engine.flowOrdering = $0 })) {
+                            Label("Order tracks like a DJ set", systemImage: "waveform.path.ecg")
+                        }
+                        Divider()
+                        Text("Sort playlists")
+                        ForEach(PlaylistSort.allCases) { mode in
+                            Button {
+                                sortRaw = mode.rawValue
+                            } label: {
+                                if sortRaw == mode.rawValue {
+                                    Label(mode.label, systemImage: "checkmark")
+                                } else {
+                                    Label(mode.label, systemImage: mode.icon)
+                                }
+                            }
+                        }
+                        Divider()
+                        Button {
+                            SmartPlaylistStore.shared.unretireAll()
+                            SmartPlaylistEngine.shared.rebuild(force: true)
+                            _ = SmartPlaylistEngine.shared.applyAll()
+                        } label: { Label("Rebuild ✨ playlists", systemImage: "arrow.clockwise") }
+                        if !smartPlaylists.isEmpty {
+                            Button(role: .destructive) {
+                                confirm = .allSmart
+                            } label: { Label("Delete all ✨ playlists", systemImage: "trash") }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                }
             }
             .alert("New Playlist", isPresented: $showingNewPlaylist) {
                 TextField("Playlist Name", text: $newPlaylistName)
@@ -1605,17 +1737,186 @@ struct PlaylistsView: View {
         .navigationViewStyle(StackNavigationViewStyle())
     }
 
+    // MARK: Pieces
+
+    private var listHeader: some View {
+        HStack {
+            Text(selecting ? "\(selected.count) selected" : "My Playlists")
+            Spacer()
+            if selecting {
+                Button(selected.count == userPlaylists.count ? "None" : "All") {
+                    selected = selected.count == userPlaylists.count
+                        ? []
+                        : Set(userPlaylists.map { $0.id })
+                }
+                .font(.caption.bold())
+                .foregroundColor(AppTheme.accent)
+            }
+        }
+    }
+
+    private var selectionBar: some View {
+        HStack(spacing: 14) {
+            Button(role: .destructive) {
+                confirm = .bulk
+            } label: {
+                Label("Delete \(selected.count)", systemImage: "trash")
+                    .font(.subheadline.bold())
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(selected.isEmpty ? Color.gray.opacity(0.3) : Color.red.opacity(0.9))
+                    .foregroundColor(.white)
+                    .cornerRadius(22)
+            }
+            .disabled(selected.isEmpty)
+            Button {
+                withAnimation { selecting = false; selected = [] }
+            } label: {
+                Text("Cancel")
+                    .font(.subheadline.bold())
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(Color.secondary.opacity(0.2))
+                    .cornerRadius(22)
+            }
+        }
+        .padding(.bottom, 14)
+        .transition(.move(edge: .bottom))
+    }
+
+    private var undoBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "trash.slash").foregroundColor(.white)
+            Text(musicManager.recentlyDeletedPlaylists.count == 1
+                 ? "“\(musicManager.recentlyDeletedPlaylists[0].name)” deleted"
+                 : "\(musicManager.recentlyDeletedPlaylists.count) playlists deleted")
+                .font(.caption.bold()).foregroundColor(.white).lineLimit(1)
+            Spacer()
+            Button("Undo") { _ = musicManager.undoPlaylistDelete() }
+                .font(.caption.bold())
+                .foregroundColor(.white)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(Color.white.opacity(0.25))
+                .cornerRadius(14)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(AppTheme.accent.opacity(0.95))
+        .cornerRadius(16)
+        .padding(.horizontal, 16)
+        .padding(.bottom, selecting ? 74 : 14)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    // MARK: Destructive confirmations
+
+    private var confirmTitle: String {
+        guard let c = confirm else { return "" }
+        switch c {
+        case .single(let p): return "Delete “\(p.name)”?"
+        case .bulk:          return "Delete \(selected.count) playlist\(selected.count == 1 ? "" : "s")?"
+        case .allSmart:      return "Delete all \(smartPlaylists.count) ✨ playlists?"
+        }
+    }
+
+    private var confirmMessage: String {
+        guard let c = confirm else { return "" }
+        switch c {
+        case .single(let p):
+            return "\(p.songIDs.count) song\(p.songIDs.count == 1 ? "" : "s") in this list. Your songs stay in the Library — only the list is deleted, and Undo appears right after."
+        case .bulk:
+            return "Only the lists go away — every song stays in your Library, and Undo appears right after."
+        case .allSmart:
+            return "Removes every playlist the app built for you. Your own playlists and all your songs are untouched, and the AI won't rebuild these unless you ask it to."
+        }
+    }
+
+    private func runConfirm() {
+        guard let c = confirm else { return }
+        switch c {
+        case .single(let p):
+            musicManager.deletePlaylist(p)
+        case .bulk:
+            let n = musicManager.deletePlaylists(ids: selected)
+            selected = []
+            selecting = false
+            if n > 0 { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+        case .allSmart:
+            musicManager.deletePlaylists(ids: Set(smartPlaylists.map { $0.id }))
+        }
+        confirm = nil
+    }
+
+    private func toggle(_ p: Playlist) {
+        if selected.contains(p.id) { selected.remove(p.id) } else { selected.insert(p.id) }
+    }
+
+    /// "12 songs · 48 min" — the minutes come from the on-device analysis, so
+    /// they only appear for songs the lab has already measured.
+    private func subtitle(_ playlist: Playlist) -> String {
+        let map = songByID
+        var seconds = 0.0
+        var measured = 0
+        for id in playlist.songIDs {
+            guard let s = map[id] else { continue }
+            if let f = AudioLab.shared.features(for: s), f.duration > 0 {
+                seconds += f.duration
+                measured += 1
+            }
+        }
+        var out = "\(playlist.songIDs.count) song\(playlist.songIDs.count == 1 ? "" : "s")"
+        if measured > 0, seconds > 60 {
+            let mins = Int(seconds / 60)
+            out += measured == playlist.songIDs.count ? " · \(mins) min" : " · about \(mins) min"
+        }
+        return out
+    }
+
     private func playlistRow(_ playlist: Playlist) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
+            if selecting {
+                Image(systemName: selected.contains(playlist.id) ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundColor(selected.contains(playlist.id) ? AppTheme.accent : .secondary.opacity(0.6))
+            }
             if SmartPlaylistStore.shared.isSmart(playlist.id) {
                 Image(systemName: "sparkles")
                     .font(.caption2).foregroundColor(AppTheme.accent)
                     .accessibilityLabel("Smart playlist — refreshed automatically")
             }
-            Text(playlist.name).font(.headline).padding(.vertical, 5).lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(playlist.name).font(.headline).lineLimit(1)
+                Text(subtitle(playlist)).font(.caption2).foregroundColor(.secondary)
+            }
             Spacer()
-            Text("\(playlist.songIDs.count)")
-                .font(.caption2).foregroundColor(.secondary)
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+    }
+}
+
+/// What the single confirmation alert in the Playlists tab is about.
+enum PlaylistConfirm {
+    case single(Playlist)
+    case bulk
+    case allSmart
+}
+
+/// How the Playlists tab orders the list.
+enum PlaylistSort: String, CaseIterable, Identifiable {
+    case custom, name, size, smart
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .custom: return "My order"
+        case .name:   return "Name"
+        case .size:   return "Most songs"
+        case .smart:  return "AI playlists first"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .custom: return "list.bullet"
+        case .name:   return "textformat.abc"
+        case .size:   return "number"
+        case .smart:  return "sparkles"
         }
     }
 }
