@@ -772,6 +772,40 @@ class MusicManager: NSObject, ObservableObject {
         playlists.append(Playlist(id: UUID(), name: name, songIDs: []))
         savePlaylists()
     }
+
+    /// Deletes ANY playlist except "Liked Songs". The songs themselves stay in
+    /// the Library — only the list goes away. If the playlist is a smart (✨)
+    /// one, its kind is also *retired* in `SmartPlaylistStore`, so the
+    /// auto-create pass never silently resurrects a list the user removed.
+    func deletePlaylist(_ playlist: Playlist) {
+        guard playlist.name != "Liked Songs" else { return }
+        playlists.removeAll { $0.id == playlist.id }
+        savePlaylists()
+        if let kind = SmartPlaylistStore.shared.kind(for: playlist.id) {
+            SmartPlaylistStore.shared.remove(kind: kind)
+            SmartPlaylistStore.shared.retire(kind: kind)
+        }
+        objectWillChange.send()
+    }
+
+    func renamePlaylist(_ playlist: Playlist, to name: String) {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, playlist.name != "Liked Songs" else { return }
+        guard let idx = playlists.firstIndex(where: { $0.id == playlist.id }) else { return }
+        playlists[idx].name = clean
+        savePlaylists()
+        if let kind = SmartPlaylistStore.shared.kind(for: playlist.id) {
+            SmartPlaylistStore.shared.set(kind: kind, playlistID: playlist.id,
+                                          name: clean, count: playlists[idx].songIDs.count)
+        }
+        objectWillChange.send()
+    }
+
+    /// Empties the "Up Next" queue (one tap from the Library header).
+    func clearUpNext() {
+        upNextQueue.removeAll()
+        objectWillChange.send()
+    }
     func addSongToPlaylist(song: Song, playlist: Playlist) {
         if let idx = playlists.firstIndex(where: { $0.id == playlist.id }) {
             if !playlists[idx].songIDs.contains(song.id) {

@@ -164,21 +164,31 @@ final class SmartPlaylistStore {
     }
 
     private(set) var entries: [Entry] = []
+    /// Kinds the user deleted by hand. Auto-create must never resurrect these;
+    /// only an explicit user action (Create / Rebuild) un-retires a kind.
+    private(set) var retired: Set<String> = []
     private let key = "asmusic_smart_playlists"
+    private let retiredKey = "asmusic_smart_retired"
     private let lock = NSLock()
 
     private init() { load() }
 
     private func load() {
-        guard let d = UserDefaults.standard.data(forKey: key),
-              let arr = try? JSONDecoder().decode([Entry].self, from: d) else { return }
-        entries = arr
+        if let d = UserDefaults.standard.data(forKey: key),
+           let arr = try? JSONDecoder().decode([Entry].self, from: d) {
+            entries = arr
+        }
+        if let arr = UserDefaults.standard.stringArray(forKey: retiredKey) {
+            retired = Set(arr)
+        }
     }
 
     private func save() {
         let snapshot = entries
-        guard let d = try? JSONEncoder().encode(snapshot) else { return }
-        UserDefaults.standard.set(d, forKey: key)
+        if let d = try? JSONEncoder().encode(snapshot) {
+            UserDefaults.standard.set(d, forKey: key)
+        }
+        UserDefaults.standard.set(Array(retired), forKey: retiredKey)
     }
 
     func entry(for kind: String) -> Entry? { entries.first { $0.kind == kind } }
@@ -201,6 +211,33 @@ final class SmartPlaylistStore {
     func remove(kind: String) {
         lock.lock(); defer { lock.unlock() }
         entries.removeAll { $0.kind == kind }
+        save()
+    }
+
+    // MARK: Retirement (deleted-by-user protection)
+
+    func isRetired(_ kind: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return retired.contains(kind)
+    }
+
+    func retire(kind: String) {
+        lock.lock(); defer { lock.unlock() }
+        retired.insert(kind)
+        save()
+    }
+
+    func unretire(kind: String) {
+        lock.lock(); defer { lock.unlock() }
+        retired.remove(kind)
+        save()
+    }
+
+    /// Used by the explicit "Rebuild smart playlists now" action — a fresh
+    /// start the user asked for, so previously deleted lists may come back.
+    func unretireAll() {
+        lock.lock(); defer { lock.unlock() }
+        retired.removeAll()
         save()
     }
 
@@ -320,12 +357,19 @@ final class SmartPlaylistEngine: ObservableObject {
         return made
     }
 
-    /// Create or refresh one suggestion.
+    /// Create or refresh one suggestion. Kinds the user deleted ("retired")
+    /// are skipped by background automation; only an explicit user tap
+    /// (`userInitiated`) brings them back.
     @discardableResult
-    func apply(_ s: SmartPlaylistSuggestion) -> Bool {
+    func apply(_ s: SmartPlaylistSuggestion, userInitiated: Bool = false) -> Bool {
         guard !s.songIDs.isEmpty else { return false }
+        let store = SmartPlaylistStore.shared
+        if store.isRetired(s.kind) {
+            guard userInitiated else { return false }
+            store.unretire(kind: s.kind)
+        }
         let mm = MusicManager.shared
-        let id = SmartPlaylistStore.shared.playlistID(for: s.kind)
+        let id = store.playlistID(for: s.kind)
         if let id = id, let idx = mm.playlists.firstIndex(where: { $0.id == id }) {
             mm.playlists[idx].songIDs = s.songIDs
             mm.savePlaylists()
@@ -410,7 +454,7 @@ final class SmartPlaylistEngine: ObservableObject {
         if suggestions.isEmpty { rebuild(force: true) }
         let target = suggestions.first { $0.kind == kind }
             ?? suggestions.max(by: { $0.count < $1.count })
-        guard let target = target, target.count > 0, apply(target) else {
+        guard let target = target, target.count > 0, apply(target, userInitiated: true) else {
             MusicManager.shared.shuffleAll()
             return "your library"
         }
@@ -419,6 +463,31 @@ final class SmartPlaylistEngine: ObservableObject {
             MusicManager.shared.playPlaylist(pl)
         }
         return target.title
+    }
+
+    /// The "Surprise me" button in the Playlists tab: builds (without playing)
+    /// one playlist that fits the current hour of day, and saves it to the
+    /// library. Returns the created playlist's title, or nil when nothing fit.
+    @discardableResult
+    func surpriseMix() -> String? {
+        if suggestions.isEmpty { rebuild(force: true) }
+        let hour = Calendar.current.component(.hour, from: Date())
+        let pool: [String]
+        switch hour {
+        case 5..<11:  pool = ["gym", "fresh", "party", "vibe1", "vibe2"]
+        case 11..<17: pool = ["drive", "arabic", "party", "fresh"]
+        case 17..<22: pool = ["party", "arabic", "drive", "repeat"]
+        default:      pool = ["night", "sleep", "calm", "gems"]
+        }
+        var candidates = suggestions.filter { pool.contains($0.kind) && $0.count >= 5 }
+        if candidates.isEmpty { candidates = suggestions.filter { $0.count >= 5 } }
+        guard let s = candidates.randomElement(), apply(s, userInitiated: true) else {
+            lastError = "Not enough songs to build a surprise mix yet."
+            return nil
+        }
+        lastNote = "Surprise! “\(s.title)” · \(s.count) songs, ready in My Playlists."
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        return s.title
     }
 
     /// Stable across launches on purpose: `String.hashValue` is randomized
@@ -863,7 +932,7 @@ extension SmartPlaylistEngine {
                                                icon: "wand.and.stars",
                                                songIDs: ordered.map { $0.song.id },
                                                usesAI: aiOn)
-            if self.apply(sug) {
+            if self.apply(sug, userInitiated: true) {
                 self.suggestions.insert(sug, at: 0)
                 self.lastNote = "“\(title)” — \(ordered.count) songs, ready in Playlists."
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -917,7 +986,7 @@ extension SmartPlaylistEngine {
                                                        icon: "wand.and.stars",
                                                        songIDs: ordered.map { $0.song.id },
                                                        usesAI: true)
-                    if self.apply(sug) {
+                    if self.apply(sug, userInitiated: true) {
                         self.suggestions.insert(sug, at: 0)
                         self.lastNote = "AI built “\(b.title)” · \(ordered.count) songs"
                         completion?(nil)
@@ -1110,7 +1179,7 @@ struct SmartPlaylistsSection: View {
             }
             Spacer()
             Button {
-                if engine.apply(s) {
+                if engine.apply(s, userInitiated: true) {
                     engine.lastNote = "“\(s.title)” · \(s.count) songs"
                 }
             } label: {
