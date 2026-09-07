@@ -24,9 +24,13 @@ So the repo was *not* the source of truth, and running the old `sync_build_yaml.
 would have **deleted** the multi-engine downloaders and the AI self-healing from
 the next build. Fixed in this pack:
 
-* **`scripts/restore_sources_from_workflow.py`** — the reverse sync: copies the
-  workflow's embedded sources back into `TrollMusicApp/TrollMusicApp/`
-  (`--check` for CI/diagnostics). Used it to restore the 5 drifted files.
+* **`scripts/restore_sources_from_workflow.py`** — the reverse sync, with safe
+  semantics: files the workflow has and git lost are **restored**; files where the
+  **repo is newer are never overwritten** (the workflow's copy is written to
+  `.ci-copy/` for a `diff -u`), because clobbering ahead-of-CI work is exactly the
+  mistake this tool exists to prevent. `--check` = report only (CI-friendly),
+  `--force` = "workflow wins" for a file you know is staler in the repo.
+  Used it to restore the 5 lost files (`ExtractorKit.swift` + 4).
 * **`backend-registry.json`** added at the repo root so the app's remote engine
   config resolves instead of 404-ing (tune mirrors, enable/disable engines, change
   the Gemini model — **no app rebuild needed**).
@@ -160,11 +164,15 @@ a hint instead of crashing on a missing usage string.
 ## 5. Tooling
 
 ```bash
-python3 scripts/check_swift_syntax.py          # structure + cross-file symbol pre-flight
-python3 scripts/restore_sources_from_workflow.py --check   # repo vs CI drift
-python3 scripts/sync_build_yaml.py             # repo → CI (run after adding a .swift file)
-bash scripts/install_ci_fix.sh && git push     # you (workflows permission)
+bash scripts/install_ci_fix.sh            # restore-missing → pre-flight → sync → commit (then: git push)
+bash scripts/install_ci_fix.sh --check    # report drift + structure problems, change nothing
+python3 scripts/check_swift_syntax.py     # structure + cross-file symbol pre-flight
+python3 scripts/restore_sources_from_workflow.py --check   # repo vs CI, safe
+python3 scripts/sync_build_yaml.py        # repo → CI only (run after adding a .swift file)
 ```
+`install_ci_fix.sh` is the one to remember: it **regenerates the workflow from the
+repo** (it no longer installs a frozen copy), so the file it commits can never be
+stale relative to your sources.
 `check_swift_syntax.py` needs no Xcode and no pip packages: it balances
 brackets/strings/comments (Swift raw strings and `#/regex/#` included), rejects
 imports after code, and warns about PascalCase symbols **this app** never
@@ -181,3 +189,26 @@ second instead of a 10-minute CI cycle. It does **not** type-check; CI still doe
 | CarPlay / Siri audio provider | needs `entitlements` + a real device to test, and TrollStore installs have limited entitlement support. |
 | Per-song key/mood (chroma) | needs a real STFT; the one-pole analysis here is deliberately cheap. |
 | Smart-playlist *ordering* learned from your skips | needs a skip log (only plays are recorded today) — 20 lines once that exists. |
+
+## 7. Next up — the shortlist I'd build next (in order)
+
+| # | Feature | Why it's the best next thing | Cost |
+|---|---|---|---|
+| 1 | **Skip/downvote log + learned recipes** | The engine already scores songs; it just doesn't know what you *reject*. Record a skip in `ListenHistory` (10 lines) and let each recipe learn a per-song weight → auto-playlists that get right without you touching settings. | S |
+| 2 | **Crossfade / gapless auto-DJ** | The flow ordering already knows the next song's tempo and energy; a 1.5–4 s overlap (second `AVAudioPlayerNode` + volume ramps, or `AVAudioEngine` player pooling) turns "smart list" into "one continuous mix". | M |
+| 3 | **Voice commands while playing** | Same `SFSpeechRecognizer` pipe as dictation, but a small grammar ("louder", "quieter", "more bass", "night mode", "karaoke", "like", "next", "sleep in 20") → parsed locally → `EQManager`/`VocalStudio` setters. Offline, no key, no upload. | S-M |
+| 4 | **Duet/pitch layer for the mic take** | You can already record over the song. Add a key-shift + double-tracker + a "my voice vs. the original" balance fader and a tap-to-punch-in — that's the feature people actually share. | M |
+| 5 | **Vocal pitch display (auto-score)** | YIN autocorrelation on the mic buffer (already tapped) gives real-time note/cent deviation → "sing along, get a score" without any model. Reuses §3's tap. | M |
+| 6 | **Per-playlist smart tweaks** | Each smart playlist stores its own override (e.g. Sleep = night mode + −20 LUFS target; Party = +2 dB). `applyTuning(for:)` already takes the song — take the enclosing playlist too. | S |
+| 7 | **Auto-tag downloads with the analysis** | Downloads already get real ID3 tags; now you have BPM/loudness/energy — write `BPM`, `ReplayGain` and a mood comment into TXXX frames, so other players benefit and the numbers survive a restore. | S |
+| 8 | **Watch a chart, get a mixtape** | The Deezer chart engine + the brief parser combine into "make me an Egyptian hits playlist *and download the ones I don't have*" (opt-in, rate-limited, dedup'd by `LibraryIndex`). | M |
+| 9 | **Hearing-safe volume guard** | `SoundCheck`-style dose tracking from the loudness data: warn when the running average crosses 80 dB-equivalent, offer a −3 dB "protect" mode. Genuinely useful, unique for this kind of app. | M |
+| 10 | **Widgets / Live Activities for the moment mix** | App Intents are already defined, so a Home-Screen "play my gym mix" widget is mostly SwiftUI; needs a shared app group though (TrollStore-friendly, but check your signing). | S-M |
+
+For **voice specifically**, the three highest-value after #3/#4/#5: on-device
+**Arabic ASR for lyrics search** (whisper.cpp is too big for this repo's shipping
+model — instead, match dictated words against the lyrics you already cache in
+`LyricsStore`); a **"find me a song like this one" from the mic** (record 8 s of
+what's playing around you → `AudioLab.compute` on a temp file → nearest vectors);
+and **voice memo → song idea** (dictation + `PlaylistBriefParser`, saved as a
+playlist draft).
