@@ -45,7 +45,7 @@ final class ListenHistory: ObservableObject {
     private let fileURL: URL
     private static let storeKey = ".asmusic_history.json"
 
-    override private init() {
+    private init() {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         fileURL = docs.appendingPathComponent(Self.storeKey)
         if let d = try? Data(contentsOf: fileURL),
@@ -144,7 +144,7 @@ final class ITunesEnricher {
     private var enrichedThisSession = 0
     private let sessionCap = 60   // be a good citizen of the free API
 
-    override private init() {}
+    private init() {}
 
     /// Enriches songs that are missing artwork, one by one on a serial queue
     /// (naturally rate-limited). Safe to call repeatedly.
@@ -353,7 +353,7 @@ final class GeminiAI: ObservableObject {
     private static let keyDefaultsKey = "asmusic_gemini_key"
     private static let modelDefaultsKey = "asmusic_gemini_model"
 
-    override private init() {
+    private init() {
         key = UserDefaults.standard.string(forKey: Self.keyDefaultsKey) ?? ""
         model = UserDefaults.standard.string(forKey: Self.modelDefaultsKey) ?? "gemini-2.5-flash"
     }
