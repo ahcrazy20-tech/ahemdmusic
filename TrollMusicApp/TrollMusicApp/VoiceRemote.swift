@@ -397,7 +397,7 @@ struct QueueControlIntent: AppIntent {
             case .shuffle: mm.isShuffle.toggle(); return mm.isShuffle ? "Shuffle on." : "Shuffle off."
             }
         }
-        return .result(dialog: IntentDialog(content: Text(said.isEmpty ? "Done." : said)))
+        return .result(dialog: IntentDialog.spoken(said.isEmpty ? "Done." : said))
     }
 }
 
@@ -456,7 +456,22 @@ struct GeneratePlaylistIntent: AppIntent {
                 }
             }
         }
-        return .result(dialog: IntentDialog(content: Text(said)))
+        return .result(dialog: IntentDialog.spoken(said))
+    }
+}
+
+extension IntentDialog {
+    /// A dialog built from a string produced at runtime.
+    ///
+    /// `IntentDialog` has no plain-string initialiser (the available ones take a
+    /// `LocalizedStringResource`), which is why the literal replies above use
+    /// `IntentDialog(stringLiteral:)`. A runtime string is exactly one
+    /// interpolation segment of a `LocalizableStringInterpolation`, so that is how
+    /// we hand it over — no strings file or lookup involved.
+    static func spoken(_ text: String) -> IntentDialog {
+        var interp = LocalizableStringInterpolation()
+        interp.appendInterpolation(text)
+        return IntentDialog(LocalizedStringResource(interp))
     }
 }
 
