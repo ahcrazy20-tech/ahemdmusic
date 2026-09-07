@@ -5,9 +5,9 @@
     <key>CFBundleExecutable</key>
     <string>TrollMusicApp</string>
     <key>CFBundleIdentifier</key>
-    <string>com.ahmedsoliman.trollmusic</string>
+    <string>com.ahmedsoliman.trollmusicapp</string>
     <key>CFBundleName</key>
-    <string>TrollMusic</string>
+    <string>AS Music</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>CFBundleVersion</key>
@@ -19,6 +19,8 @@
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>
+        <false/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
         <true/>
     </dict>
     <key>UILaunchScreen</key>
