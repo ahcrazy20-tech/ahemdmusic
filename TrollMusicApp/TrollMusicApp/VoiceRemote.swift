@@ -469,9 +469,13 @@ extension IntentDialog {
     /// interpolation segment of a `LocalizableStringInterpolation`, so that is how
     /// we hand it over — no strings file or lookup involved.
     static func spoken(_ text: String) -> IntentDialog {
-        var interp = LocalizableStringInterpolation()
-        interp.appendInterpolation(text)
-        return IntentDialog(LocalizedStringResource(interp))
+        // `IntentDialog`'s literal path is built out of a
+        // LocalizableStringInterpolation; that type is not importable, so we
+        // get hold of one via the one literal form the compiler can produce for
+        // us. `"\(verbatim:)"` interpolates as-is — no lookup, no strings file,
+        // and nothing is re-escaped (unlike interpolating a quoted string).
+        let literal: IntentDialog.StringLiteralType = "\(verbatim: text)"
+        return IntentDialog(stringLiteral: literal)
     }
 }
 
