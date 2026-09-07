@@ -6,30 +6,26 @@ and nothing deletes a file without asking you first.
 
 ---
 
-## 0. Read this first — why features you already "had" were missing from the app
+## 0. Read this first — why nothing new showed up in your IPA
 
-`.github/workflows/build.yml` does not compile the `.swift` files in this repo.
-It **deletes them** and rewrites them from copies embedded inside the workflow.
-When this pack started, the workflow's copies were from **before** the AI
-playlist generator and the duplicate finder were written:
+`.github/workflows/build.yml` is not a normal build file: its first steps
+**delete every `.swift` file in the repo** and rewrite them from copies pasted
+inside the workflow itself. Those copies are months old — no AI playlist card,
+no duplicate finder, no Recently Deleted, no lyrics. The build goes green and
+ships old code. (The same drift also cost the app its microphone/speech
+`Info.plist` keys, which the repo has and the workflow's copy does not.)
 
-| In the repo | In `build.yml` (what actually shipped) |
-|---|---|
-| `LibraryDoctor.swift` — duplicate finder + AI review | ❌ absent |
-| `PlaylistAICard` — "describe the vibe" generator in the Playlists tab | ❌ absent |
-| `AudioAnalysis.swift`, `SmartPlaylists.swift`, `VocalStudio.swift`, `VoiceRemote.swift` | ❌ absent |
+**The fix is in the repo at `ci/build.yml`** — a 140-line workflow that simply
+compiles what is in `TrollMusicApp/TrollMusicApp/`. GitHub blocks the Arena app
+from writing anything under `.github/workflows/`, so you install it once:
 
-That is why the buttons weren't in your IPA: they were written, but the build
-never saw them. `build.yml` (and `build.yml.ready`) are now regenerated from the
-repo and contain **all 20 source files**.
+> Open `.github/workflows/build.yml` on GitHub → **Delete file** → commit.
+> Open `ci/build.yml` → **✏️ Edit** → change the file name at the top to
+> `.github/workflows/build.yml` → commit.
 
-> ⚠️ If the workflow file can't be pushed by the app (GitHub Apps need the
-> *workflows* permission), run this once from your Mac/PC:
-> ```
-> bash scripts/install_ci_fix.sh && git push
-> ```
-> It re-embeds the repo's sources into the workflow and commits it. After that,
-> every build contains everything in this document.
+Step-by-step (with Arabic) in **`READ_ME_FIRST_CI_FIX.md`**. After that one
+time, every future change reaches the app automatically and this pack's 20
+source files all compile.
 
 ---
 

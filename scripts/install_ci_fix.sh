@@ -1,66 +1,64 @@
 #!/usr/bin/env bash
 #
-# install_ci_fix.sh — make the GitHub build compile EXACTLY the sources in this
-# repo, then commit that workflow.
+# install_ci_fix.sh — make the GitHub build compile the sources in THIS repo.
 #
 # WHY THIS EXISTS
 # ---------------
-# .github/workflows/build.yml doesn't just build the app: its first steps
-# DELETE every .swift file and rewrite them from copies embedded inside the
-# workflow. So editing TrollMusicApp/TrollMusicApp/*.swift changes nothing on CI
-# until those embedded copies are refreshed — and the drift can also run the
-# other way (it happened: ExtractorKit.swift existed only inside the workflow,
-# so syncing at that moment would have silently deleted the extra download
-# engines from the built IPA).
+# The old .github/workflows/build.yml carried a copy of every Swift file inside
+# itself: it deleted the real sources and rewrote them from those embedded
+# copies. Result: editing the app changed nothing in the IPA.
 #
-# The Arena GitHub App can't push to .github/workflows/ (needs the "workflows"
-# permission), so this script has to be run by you, once per code change.
+# `ci/build.yml` is the fixed workflow — it just compiles
+# TrollMusicApp/TrollMusicApp/*.swift. This script installs it.
+#
+# The Arena GitHub App is not allowed to write .github/workflows/, so this has
+# to be run by you — but only ONCE. After that the workflow never needs to be
+# touched again (no more sync step for new files).
 #
 # Usage
-#   bash scripts/install_ci_fix.sh            # regenerate + stage + commit
-#   bash scripts/install_ci_fix.sh --check     # report drift only, change nothing
+#   bash scripts/install_ci_fix.sh            # install + commit
+#   bash scripts/install_ci_fix.sh --check     # report only, change nothing
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+LEAN="ci/build.yml"
+LIVE=".github/workflows/build.yml"
+
 if [ "${1:-}" = "--check" ]; then
-  echo "→ repo vs CI (workflow is the source of truth for what ships today)"
-  python3 scripts/restore_sources_from_workflow.py --check || true
-  echo
-  echo "→ do the files in the repo parse?"
+  echo "→ do the Swift sources parse?"
   python3 scripts/check_swift_syntax.py
+  echo
+  if grep -q "Write Swift Files" "$LIVE" 2>/dev/null; then
+    echo "✗ $LIVE still embeds its own copies of the sources — the IPA is NOT"
+    echo "  built from this repo. Run:  bash scripts/install_ci_fix.sh && git push"
+  else
+    echo "✓ $LIVE builds the repo's sources directly."
+  fi
   exit 0
 fi
 
-[ -f scripts/sync_build_yaml.py ] || { echo "scripts/sync_build_yaml.py missing" >&2; exit 1; }
-[ -f .github/workflows/build.yml ] || { echo ".github/workflows/build.yml missing" >&2; exit 1; }
+[ -f "$LEAN" ] || { echo "$LEAN missing" >&2; exit 1; }
 
-# 1) Anything the workflow knows about that git doesn't? restore it first, so
-#    regenerating below can never delete a feature by accident.
-echo "→ step 1/3: making the repo the source of truth"
-python3 scripts/restore_sources_from_workflow.py
-
-# 2) Structural pre-flight (unbalanced braces, imports after code, unknown
-#    app-level types) — a 1-second check that saves a 10-minute CI cycle.
-echo
-echo "→ step 2/3: Swift structure pre-flight"
+echo "→ 1/2: Swift structure pre-flight"
 python3 scripts/check_swift_syntax.py
 
-# 3) Re-embed the repo's sources (and Info.plist) into the workflow.
 echo
-echo "→ step 3/3: regenerating the workflow from the repo"
-python3 scripts/sync_build_yaml.py
-cp .github/workflows/build.yml build.yml.ready
+echo "→ 2/2: installing the lean workflow"
+mkdir -p .github/workflows
+cp "$LEAN" "$LIVE"
+# build.yml.ready used to be the generated fat workflow; keep it in step so
+# nobody re-installs the old self-contained one by accident.
+cp "$LEAN" build.yml.ready
 
-git add .github/workflows/build.yml build.yml.ready
-if git diff --cached --quiet -- .github/workflows/build.yml; then
+git add "$LIVE" build.yml.ready
+if git diff --cached --quiet -- "$LIVE"; then
   echo
   echo "Workflow already up to date — nothing to commit."
   exit 0
 fi
 
+git commit -q -m "ci: build the repo's real sources instead of stale embedded copies"
 echo
-echo "Committing the synced workflow (build.yml + build.yml.ready)…"
-git commit -q -m "ci: sync build workflow with the repo sources"
 echo "Done. Now:  git push"
 echo "Watch it:   gh run watch"
