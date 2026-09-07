@@ -111,7 +111,9 @@ final class AudioLab: ObservableObject {
     @Published private(set) var doneCount: Int = 0
     @Published private(set) var lastError: String? = nil
 
-    private let perSessionBudget = 60      // songs measured per app launch
+    /// Songs measured per app launch. A `var` because an explicit
+    /// "analyze everything" from the Library Health screen lifts it.
+    private var perSessionBudget = 60
     private let work = DispatchQueue(label: "asMusic.audioLab", qos: .utility)
     private let lock = NSLock()
 
@@ -183,6 +185,27 @@ final class AudioLab: ObservableObject {
         enqueue(ordered)
     }
 
+    /// The user explicitly asked for a full sweep (Library Health). Lifts the
+    /// per-launch budget, queues everything still unmeasured and restarts the
+    /// worker if it had parked itself.
+    func analyzeAll(_ songs: [Song]) {
+        lock.lock()
+        perSessionBudget = max(perSessionBudget, startedThisSession + songs.count + 8)
+        lock.unlock()
+        prime(songs)
+        lock.lock()
+        let needsKick = !working && !queue.isEmpty
+        if needsKick { working = true }
+        lock.unlock()
+        if needsKick { drain() }
+    }
+
+    /// How many songs are still waiting to be measured.
+    func pending(of songs: [Song]) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return songs.reduce(0) { $0 + (store[$1.id.uuidString] == nil ? 1 : 0) }
+    }
+
     /// Measure one song soon (right after a download, or when the player opens
     /// a track we never analyzed).
     func ensureAnalyzed(_ song: Song) {
@@ -231,11 +254,21 @@ final class AudioLab: ObservableObject {
                 DispatchQueue.main.async { self.queueDepth = depth; self.isWorking = true }
 
                 if overBudget {
+                    // Park the rest for the next launch and STOP. The old code
+                    // pushed the job back and `continue`d, which span this
+                    // background queue at 100% CPU forever once the budget ran
+                    // out on a big library.
                     self.lock.lock()
-                    self.queue.append(job)          // keep it for the next launch
+                    self.queue.insert(job, at: 0)
                     self.queued.insert(job.id)
+                    self.working = false
+                    let parked = self.queue.count
                     self.lock.unlock()
-                    continue
+                    DispatchQueue.main.async {
+                        self.isWorking = false
+                        self.queueDepth = parked
+                    }
+                    return
                 }
 
                 if let f = AudioLab.compute(job.url) {

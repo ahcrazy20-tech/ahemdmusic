@@ -98,6 +98,9 @@ class MusicManager: NSObject, ObservableObject {
     @Published var currentTime: TimeInterval = 0.0
     @Published var duration: TimeInterval = 1.0
     @Published var upNextQueue: [Song] = []
+    /// The last playlist(s) removed — powers the one-tap Undo in the
+    /// Playlists tab. Cleared once the user restores or the banner times out.
+    @Published var recentlyDeletedPlaylists: [Playlist] = []
     @Published var smartRadioMode: Bool = false
     @Published var eqPreset: EQPreset = .flat {
         didSet { applyEQ(); UserDefaults.standard.set(eqPreset.rawValue, forKey: "asmusic_eq") }
@@ -700,9 +703,25 @@ class MusicManager: NSObject, ObservableObject {
                            b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15]))
     }
 
-    func deleteSong(_ s: Song) {
-        try? fileManager.removeItem(at: s.url)
-        try? fileManager.removeItem(at: s.url.deletingPathExtension().appendingPathExtension("jpg"))
+    /// Deletes a song. By default the file is **moved to Recently Deleted**
+    /// (`LibraryTrash`) instead of being erased, so a wrong tap — or an
+    /// over-eager duplicate clean — is one button away from being undone.
+    /// Pass `permanently: true` (or turn the safety net off in Recently
+    /// Deleted) to erase the bytes immediately.
+    func deleteSong(_ s: Song, permanently: Bool = false, reason: String? = nil) {
+        // Remember where this song lived so a restore can put it back.
+        let memberships = playlists
+            .filter { $0.name != "Liked Songs" && $0.songIDs.contains(s.id) }
+            .map { $0.name }
+        let liked = isFavorite(song: s)
+        let archived = permanently
+            ? false
+            : LibraryTrash.shared.accept(song: s, liked: liked,
+                                         playlistNames: memberships, reason: reason)
+        if !archived {
+            try? fileManager.removeItem(at: s.url)
+            try? fileManager.removeItem(at: s.url.deletingPathExtension().appendingPathExtension("jpg"))
+        }
         try? fileManager.removeItem(at: artworkCacheDir.appendingPathComponent("\(s.id.uuidString).jpg"))
         upNextQueue.removeAll { $0.id == s.id }
         // Drop dangling references so playlists don't accumulate dead ids.
@@ -720,7 +739,10 @@ class MusicManager: NSObject, ObservableObject {
             updateNowPlayingInfo()
         }
         songs.removeAll { $0.id == s.id }
-        ListenHistory.shared.remove(songID: s.id)
+        // Play counts are kept while the song sits in Recently Deleted, so a
+        // restore brings its history (and its weight in the smart playlists)
+        // back with it.
+        if !archived { ListenHistory.shared.remove(songID: s.id) }
         saveSongMeta()
         loadSongs()
     }
@@ -777,8 +799,12 @@ class MusicManager: NSObject, ObservableObject {
     /// the Library — only the list goes away. If the playlist is a smart (✨)
     /// one, its kind is also *retired* in `SmartPlaylistStore`, so the
     /// auto-create pass never silently resurrects a list the user removed.
-    func deletePlaylist(_ playlist: Playlist) {
+    func deletePlaylist(_ playlist: Playlist, recordUndo: Bool = true) {
         guard playlist.name != "Liked Songs" else { return }
+        if recordUndo {
+            recentlyDeletedPlaylists = [playlist]
+            scheduleUndoExpiry()
+        }
         playlists.removeAll { $0.id == playlist.id }
         savePlaylists()
         if let kind = SmartPlaylistStore.shared.kind(for: playlist.id) {
@@ -788,8 +814,49 @@ class MusicManager: NSObject, ObservableObject {
         objectWillChange.send()
     }
 
-    func renamePlaylist(_ playlist: Playlist, to name: String) {
-        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Deletes several playlists at once (the Playlists tab's Select mode) and
+    /// keeps a copy so the whole batch can be undone with one tap.
+    @discardableResult
+    func deletePlaylists(ids: Set<UUID>) -> Int {
+        let doomed = playlists.filter { ids.contains($0.id) && $0.name != "Liked Songs" }
+        guard !doomed.isEmpty else { return 0 }
+        recentlyDeletedPlaylists = doomed
+        for p in doomed { deletePlaylist(p, recordUndo: false) }
+        scheduleUndoExpiry()
+        return doomed.count
+    }
+
+    /// The Undo banner is a safety net, not a permanent fixture: it fades ten
+    /// seconds after the delete unless the user acts on it.
+    private func scheduleUndoExpiry() {
+        let snapshot = recentlyDeletedPlaylists.map { $0.id }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self = self else { return }
+            if self.recentlyDeletedPlaylists.map({ $0.id }) == snapshot {
+                withAnimation { self.recentlyDeletedPlaylists = [] }
+            }
+        }
+    }
+
+    /// Puts the last deleted playlist(s) back, exactly as they were — including
+    /// un-retiring smart ✨ lists so the auto-DJ keeps refreshing them.
+    @discardableResult
+    func undoPlaylistDelete() -> Int {
+        let back = recentlyDeletedPlaylists
+        guard !back.isEmpty else { return 0 }
+        for p in back where !playlists.contains(where: { $0.id == p.id }) {
+            playlists.append(p)
+            if let kind = SmartPlaylistStore.shared.kind(for: p.id) {
+                SmartPlaylistStore.shared.unretire(kind: kind)
+            }
+        }
+        savePlaylists()
+        recentlyDeletedPlaylists = []
+        objectWillChange.send()
+        return back.count
+    }
+
+    func renamePlaylist(_ playlist: Playlist, to name: String) {        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty, playlist.name != "Liked Songs" else { return }
         guard let idx = playlists.firstIndex(where: { $0.id == playlist.id }) else { return }
         playlists[idx].name = clean
@@ -1270,8 +1337,18 @@ class MusicManager: NSObject, ObservableObject {
         return list.count
     }
 
-    func playSmartPlaylist(kind: String) {
-        guard let id = SmartPlaylistStore.shared.playlistID(for: kind),
+    /// Plays a playlist in random order without touching the global shuffle
+    /// switch — "shuffle this list once" is what people actually mean.
+    @discardableResult
+    func shufflePlaylist(_ pl: Playlist) -> Int {
+        let list = pl.songIDs.compactMap { id in songs.first { $0.id == id } }.shuffled()
+        guard let first = list.first else { return 0 }
+        upNextQueue = Array(list.dropFirst())
+        playSong(first)
+        return list.count
+    }
+
+    func playSmartPlaylist(kind: String) {        guard let id = SmartPlaylistStore.shared.playlistID(for: kind),
               let pl = playlists.first(where: { $0.id == id }) else { return }
         playPlaylist(pl)
     }

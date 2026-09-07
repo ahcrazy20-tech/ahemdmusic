@@ -34,6 +34,11 @@ struct TrollMusicAppApp: App {
                             MusicManager.shared.resumeLastSongIfAvailable()
                         }
                     }
+                    // Touch the trash once per launch so expired items are
+                    // swept up (and the folder never grows without bound).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                        LibraryTrash.shared.purgeExpired()
+                    }
                 }
         }
     }
