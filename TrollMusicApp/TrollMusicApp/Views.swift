@@ -632,6 +632,7 @@ struct FullPlayerView: View {
     @State private var showEQ = false
     @State private var showTheme = false
     @State private var showArtistInfo = false
+    @State private var showStudio = false
 
     var body: some View {
         ZStack {
@@ -680,6 +681,7 @@ struct FullPlayerView: View {
                         }
                         Divider()
                         Button { showEQ = true } label: { Label("Equalizer", systemImage: "slider.horizontal.3") }
+                        Button { showStudio = true } label: { Label("Vocal & Sound Studio", systemImage: "waveform.with.arrow.down.circle") }
                         Button { showTheme = true } label: { Label("Theme color", systemImage: "paintpalette") }
                         if let song = musicManager.currentSong {
                             Divider()
@@ -855,6 +857,9 @@ struct FullPlayerView: View {
         .sheet(isPresented: $showTheme) {
             NavigationView { ThemePickerView() }.environmentObject(musicManager)
         }
+        .sheet(isPresented: $showStudio) {
+            NavigationView { VocalStudioView() }.environmentObject(musicManager)
+        }
         .sheet(isPresented: $showArtistInfo) {
             if let song = musicManager.currentSong {
                 NavigationView { ArtistInfoView(artist: song.artist, genre: song.genre) }
@@ -947,7 +952,8 @@ struct EQView: View {
                 }
                 .autocorrectionDisabled()
             }
-            Section(footer: Text("Tip: Arabic/Maqaam preset boosts oud/qanun highs while keeping warm lows, great for Amr Diab, Sherine, Nancy Ajram.")) {
+            VoiceSettingsSection()
+            Section(footer: Text("Tip: the Vocal & Sound Studio sheet adds per-song corrections on top of these presets. Arabic/Maqaam boosts oud/qanun highs while keeping warm lows — great for Amr Diab, Sherine, Nancy Ajram.")) {
                 EmptyView()
             }
         }
@@ -1089,6 +1095,11 @@ struct LibraryView: View {
             .refreshable { musicManager.loadSongs(); ITunesEnricher.shared.enrichLibrary() }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
+                    VoiceSearchButton(placeholderHint: "a song in your library") { heard in
+                        searchText = heard
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         Button { musicManager.isShuffle.toggle() } label: {
                             Label(musicManager.isShuffle ? "Shuffle On" : "Shuffle Off",
@@ -1200,6 +1211,34 @@ struct PlaylistsView: View {
     @EnvironmentObject var musicManager: MusicManager
     @State private var showingNewPlaylist = false
     @State private var newPlaylistName = ""
+    @State private var showAsk = false
+    @State private var askText = ""
+
+    /// Explains the ✨ badges and gives a manual "rebuild now" escape hatch.
+    private var smartFooter: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off.")
+                .font(.caption2).foregroundColor(.secondary)
+            HStack(spacing: 10) {
+                Button("Rebuild smart playlists now") {
+                    SmartPlaylistEngine.shared.rebuild(force: true)
+                    _ = SmartPlaylistEngine.shared.applyAll()
+                }
+                .font(.caption.bold())
+                Button("Describe a playlist…") { showAsk = true }
+                    .font(.caption.bold())
+            }
+            .foregroundColor(AppTheme.accent)
+            if let note = SmartPlaylistEngine.shared.lastNote {
+                Text(note).font(.caption2).foregroundColor(.green)
+            }
+            if let err = SmartPlaylistEngine.shared.lastError {
+                Text(err).font(.caption2).foregroundColor(.orange)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
     var body: some View {
         NavigationView {
             List {
@@ -1215,16 +1254,51 @@ struct PlaylistsView: View {
                         }
                     }
                 }
-                Section(header: Text("My Playlists")) {
+                Section(header: Text("My Playlists"),
+                        footer: smartFooter) {
                     ForEach(musicManager.playlists.dropFirst()) { playlist in
                         NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
-                            Text(playlist.name).font(.headline).padding(.vertical, 5)
+                            HStack(spacing: 8) {
+                                if SmartPlaylistStore.shared.isSmart(playlist.id) {
+                                    Image(systemName: "sparkles")
+                                        .font(.caption2).foregroundColor(AppTheme.accent)
+                                        .accessibilityLabel("Smart playlist — refreshed automatically")
+                                }
+                                Text(playlist.name).font(.headline).padding(.vertical, 5)
+                                Spacer()
+                                Text("\(playlist.songIDs.count)")
+                                    .font(.caption2).foregroundColor(.secondary)
+                            }
                         }
                     }
                 }
             }
+            .alert("Describe a playlist", isPresented: $showAsk) {
+                TextField("“quiet arabic for a drive”, “جيم حماسية”", text: $askText)
+                Button("Build it") {
+                    let text = askText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !text.isEmpty {
+                        SmartPlaylistEngine.shared.generate(from: text) { _ in }
+                    }
+                    askText = ""
+                }
+                Button("Cancel", role: .cancel) { askText = "" }
+            } message: {
+                Text("Built from the songs already in your Library — offline if you have no AI key set.")
+            }
             .navigationTitle("Playlists")
-            .toolbar { Button { showingNewPlaylist = true } label: { Image(systemName: "plus") } }
+            .toolbar {
+                Button { showingNewPlaylist = true } label: { Image(systemName: "plus") }
+                Button {
+                    SmartPlaylistEngine.shared.autoCreate.toggle()
+                } label: {
+                    Image(systemName: SmartPlaylistEngine.shared.autoCreate ? "sparkles" : "sparkle")
+                        .foregroundColor(SmartPlaylistEngine.shared.autoCreate ? AppTheme.accent : .secondary)
+                }
+                .accessibilityLabel(SmartPlaylistEngine.shared.autoCreate
+                                    ? "Auto-create playlists is on"
+                                    : "Auto-create playlists is off")
+            }
             .alert("New Playlist", isPresented: $showingNewPlaylist) {
                 TextField("Playlist Name", text: $newPlaylistName)
                 Button("Create") {
@@ -1307,6 +1381,10 @@ struct SmartDownloaderView: View {
                                         searchInput = s
                                     }
                                 }.font(.subheadline.bold()).foregroundColor(AppTheme.accent)
+                                VoiceSearchButton(placeholderHint: "a song to download") { heard in
+                                    searchInput = heard
+                                    downloader.performMagicSearch(query: heard)
+                                }
                             }
                             .padding()
                             .background(Color.white.opacity(0.08))
@@ -1508,6 +1586,13 @@ struct SmartDownloaderView: View {
                 }
             }
             .navigationTitle("Magic DL").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink(destination: EngineSettingsView()) {
+                        Image(systemName: "gearshape").font(.body)
+                    }
+                }
+            }
             .alert("Save As", isPresented: $downloader.showNamePrompt) {
                 TextField("Song name", text: $downloader.nameInput)
                 Button("Download") { downloader.confirmNamedDownload() }
@@ -1554,4 +1639,3 @@ struct TrendingCard: View {
         }.buttonStyle(.plain)
     }
 }
-

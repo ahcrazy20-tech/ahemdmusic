@@ -120,6 +120,9 @@ class MusicManager: NSObject, ObservableObject {
     @Published var stopAtSongEnd: Bool = false {
         didSet { UserDefaults.standard.set(stopAtSongEnd, forKey: "asmusic_stopend") }
     }
+    /// Master output attenuation while the app is talking (SpokenFeedback).
+    private var duckLevel: Float = 1.0
+
     /// Live FFT spectrum (24 log-spaced bands in dB), written by the audio
     /// render thread, read by the player UI.
     let spectrum = SpectrumMeter()
@@ -189,6 +192,13 @@ class MusicManager: NSObject, ObservableObject {
         // has landed (it is also called from the Library tab on appear).
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             ITunesEnricher.shared.enrichLibrary()
+        }
+        // Measure the library on-device (loudness/tempo/balance) and let the
+        // auto-DJ refresh smart playlists once the real song list exists.
+        // Deferred so nothing here runs while MusicManager is still initializing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            AudioLab.shared.prime(MusicManager.shared.songs)
+            SmartPlaylistEngine.shared.autoSyncIfNeeded()
         }
     }
 
@@ -261,7 +271,7 @@ class MusicManager: NSObject, ObservableObject {
         engine.connect(preampMixer, to: reverb, format: nil)
         engine.connect(reverb, to: timePitch, format: nil)
         engine.connect(timePitch, to: engine.mainMixerNode, format: nil)
-        engine.mainMixerNode.outputVolume = 1.0
+        engine.mainMixerNode.outputVolume = duckLevel
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buf, _ in
             self?.updatePowerLevel(buffer: buf)
             self?.updateSpectrum(buffer: buf)
@@ -276,19 +286,60 @@ class MusicManager: NSObject, ObservableObject {
         isScheduled = false
     }
 
+    /// Preamp + the per-song loudness trim from Vocal Studio (loudness match).
     private func applyGain() {
-        let db = max(-12, min(9, preampDB))
+        let trim = VocalStudio.shared.snapshot().trim
+        let db = max(-14, min(9, preampDB + trim))
         preampMixer?.outputVolume = pow(10.0, db / 20.0)
+    }
+
+    /// Lowers the master only while the app speaks; EQ and the sleep fade are
+    /// untouched, so the music is never permanently quieter.
+    func setDuckLevel(_ v: Float) {
+        let clamped = max(0.05, min(1.0, v))
+        playerQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.duckLevel = clamped
+            self.engine?.mainMixerNode.outputVolume = clamped
+        }
+    }
+
+    /// Vocal Studio pushes new per-song EQ / trim values through here.
+    func soundTuningChanged() {
+        playerQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.applyEQ()
+            self.applyGain()
+        }
+    }
+
+    /// After KaraokeRecorder swaps the session category back to playback.
+    func reassertPlaybackSession() {
+        playerQueue.async { [weak self] in
+            guard let self = self else { return }
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try? AVAudioSession.sharedInstance().setActive(true)
+            self.audioSessionConfigured = true
+            self.ensureEngineRunning()
+            if self.isPlaying, self.audioFile != nil, !self.playerNode.isPlaying {
+                self.playerNode.play()
+            }
+        }
     }
 
     private func applySpatial() {
         reverb?.wetDryMix = spatialEnhance ? 25 : 0
     }
 
+    /// Preset curve + Smart Master's per-song correction (Vocal Studio). The
+    /// correction is all zeros when the feature is off, so the old behaviour is
+    /// the exact fallback.
     func applyEQ() {
         let gains = eqPreset.gains
+        let smart = VocalStudio.shared.snapshot().eq
         for (i,b) in eqNode.bands.enumerated() where i < gains.count {
-            b.gain = gains[i]
+            let extra = i < smart.count ? smart[i] : 0
+            b.gain = max(-12, min(9, gains[i] + extra))
         }
     }
 
@@ -865,6 +916,10 @@ class MusicManager: NSObject, ObservableObject {
             if artworkURL == nil {
                 ITunesEnricher.shared.enrich(song: song)
             }
+            // Measure the new file and (debounced) rebuild the smart playlists,
+            // so a fresh download lands in "Fresh Finds" without a relaunch.
+            AudioLab.shared.ensureAnalyzed(song)
+            SmartPlaylistEngine.shared.scheduleAutoSync(delay: 25)
             // Write proper MP3 tags (title/artist/cover) once the sidecar
             // artwork has had a moment to land. Pre-tagged files are skipped.
             if url.pathExtension.lowercased() == "mp3" {
@@ -990,11 +1045,15 @@ class MusicManager: NSObject, ObservableObject {
                 self.fileLength = file.length
                 self.fileSampleRate = file.processingFormat.sampleRate
 
+                // Per-song EQ/loudness from the on-device analysis, and skip
+                // the dead air a bad rip starts with.
+                VocalStudio.shared.applyTuning(for: song)
+                let lead = VocalStudio.shared.leadOffset(for: song)
                 self.applyEQ(); self.applyGain(); self.applySpatial()
 
                 DispatchQueue.main.async {
                     self.duration = Double(self.fileLength) / self.fileSampleRate
-                    self.currentTime = 0
+                    self.currentTime = lead
                     self.currentSong = song
                     self.isPlaying = true
                     self.lastSongId = song.id
@@ -1002,10 +1061,11 @@ class MusicManager: NSObject, ObservableObject {
                     ListenHistory.shared.recordPlay(song)
                     self.updateDisplayLinkState()
                     self.updateNowPlayingInfo()
+                    SpokenFeedback.shared.announceNowPlaying(song)
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 }
 
-                self.playCurrent(resumeFrom: nil)
+                self.playCurrent(resumeFrom: lead > 0.05 ? lead : nil)
                 self.didAutoSearchForRadio = false
             } catch {
                 print("playSong error:", error)
@@ -1161,6 +1221,51 @@ class MusicManager: NSObject, ObservableObject {
             "artist": artist,
             "title": title
         ])
+    }
+
+    // MARK: - Named / smart playlist playback (used by Siri and automation)
+
+    /// Plays a playlist in its own order, queueing the rest. Returns how many
+    /// of its songs still exist in the Library.
+    @discardableResult
+    func playPlaylist(_ pl: Playlist) -> Int {
+        let list = pl.songIDs.compactMap { id in songs.first { $0.id == id } }
+        guard let first = list.first else { return 0 }
+        upNextQueue = Array(list.dropFirst())
+        playSong(first)
+        return list.count
+    }
+
+    func playSmartPlaylist(kind: String) {
+        guard let id = SmartPlaylistStore.shared.playlistID(for: kind),
+              let pl = playlists.first(where: { $0.id == id }) else { return }
+        playPlaylist(pl)
+    }
+
+    /// Fuzzy name match for voice: exact → contains → shared-word score.
+    func playlist(matching text: String) -> Playlist? {
+        let want = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !want.isEmpty else { return nil }
+        if let exact = playlists.first(where: { $0.name.lowercased() == want }) { return exact }
+        if let has = playlists.first(where: {
+            !$0.name.lowercased().isEmpty
+                && ($0.name.lowercased().contains(want) || want.contains($0.name.lowercased()))
+        }) { return has }
+        let words = want.split(separator: " ").filter { $0.count > 2 }.map(String.init)
+        guard !words.isEmpty else { return nil }
+        var best: (pl: Playlist, score: Int)? = nil
+        for p in playlists {
+            let hay = p.name.lowercased()
+            let score = words.reduce(0) { hay.contains($1) ? $0 + 1 : $0 }
+            if score > (best?.score ?? 0) { best = (p, score) }
+        }
+        return best?.pl
+    }
+
+    func shuffleAll() {
+        if !isShuffle { isShuffle = true }
+        guard let s = songs.randomElement() else { return }
+        playSong(s)
     }
 
     func playPrevious() {

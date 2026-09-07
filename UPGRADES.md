@@ -1,5 +1,11 @@
 # AS Music — Smart Upgrades (Sept 2026)
 
+> **New in this repo now:** **`AI_UPGRADES.md`** — Smart Pack 2 (on-device audio
+> analysis, AI auto-playlists, Smart Master / loudness match / vocal tools,
+> karaoke + mic takes, Siri & dictation). Read its §0 first: it documents a
+> **repo↔CI drift that had already broken the build's source of truth**, and the
+> one `install_ci_fix.sh` command that still has to be run by hand.
+
 This document describes the intelligence & strength upgrade pack added to the app,
 and the **free APIs** it uses.
 
@@ -51,7 +57,7 @@ step).
    `gemini-2.5-flash` (free tier: ~10 req/min, 500 req/day). Changeable in
    settings.
 
-## ⚠️ ONE-TIME CI FIX — REQUIRED, the build fails without it (2 minutes)
+## ⚠️ CI FIX — REQUIRED after **every** code change (2 minutes)
 
 **Status: the GitHub build is currently failing with exit code 65 (Swift
 compile error). The code fixes are committed, but CI cannot pick them up
