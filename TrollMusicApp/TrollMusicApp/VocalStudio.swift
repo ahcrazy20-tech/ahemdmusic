@@ -399,7 +399,7 @@ enum VocalProcessor {
             try? FileManager.default.removeItem(at: outURL)
             return .failure(VocalStudio.VocalError.unreadable)
         }
-        writer.close()
+        if #available(iOS 18.0, *) { try? writer.close() }
         // Files in Documents must not be iCloud-backed for this app's layout.
         try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none],
                                                ofItemAtPath: outURL.path)
@@ -572,7 +572,7 @@ final class KaraokeRecorder: ObservableObject {
             if !keep { lastNote("Take discarded.") }
             return
         }
-        out?.close()
+        if #available(iOS 18.0, *) { try? out?.close() }
         outQueue.async {
             try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none],
                                                    ofItemAtPath: url.path)
@@ -616,11 +616,11 @@ final class KaraokeRecorder: ObservableObject {
                 let y = x - hpInput                      // high-passed
                 let ay = abs(y)
                 if ay > peak { peak = Float(ay) }
-                let gated = gateEnabled ? (gateHold > 0.12 ? y * Double(boost) : 0) : y * Double(boost)
+                let gated = gateEnabled ? (Double(peak) > 0.12 ? y * Double(boost) : 0) : y * Double(boost)
                 p[i] = max(-0.95, min(0.95, Float(gated)))
             }
         }
-        let lvl = peak > 0 ? min(1, Double(20 * log10(max(1e-6, peak)) + 55) / 55) : 0
+        let lvl = peak > 0 ? min(1, Double(20 * log10(max(Float(1e-6), peak)) + 55) / 55) : 0
         gateHold = max(lvl > 0.10 ? 1.0 : gateHold - Double(n) / sr * 4, 0)
 
         if let f = file {

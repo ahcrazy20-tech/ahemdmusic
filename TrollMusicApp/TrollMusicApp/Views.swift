@@ -1104,7 +1104,7 @@ struct LibraryView: View {
     }
 
     private func modDate(_ url: URL) -> Date {
-        (try? url.resourceValues(forKeys: [.contentModificationDate]))?.contentModificationDate
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             ?? .distantPast
     }
 

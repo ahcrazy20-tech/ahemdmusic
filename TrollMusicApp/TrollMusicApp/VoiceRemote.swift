@@ -92,7 +92,12 @@ final class VoiceSearchController: ObservableObject {
     }
 
     private func begin(useArabic: Bool) {
-        let tags = useArabic ? ["ar-SA", "ar-EG", "ar"] : [Locale.current.language.identifier, "en-US"]
+        // `Locale.Language` has no `identifier` — the tag is assembled from the
+        // language/region codes (and an unknown tag is simply skipped below).
+        let lang = Locale.current.language.languageCode?.identifier ?? "en"
+        let region = Locale.current.region?.identifier
+        let current = region.map { "\(lang)-\($0)" } ?? lang
+        let tags = useArabic ? ["ar-SA", "ar-EG", "ar"] : [current, lang, "en-US"]
         var rec: SFSpeechRecognizer? = nil
         for t in tags {
             if let r = SFSpeechRecognizer(locale: Locale(identifier: t)), r.isAvailable {
@@ -328,7 +333,7 @@ struct PlayMomentIntent: AppIntent {
         let picked = await MainActor.run { () -> String in
             SmartPlaylistEngine.shared.playMoment(kind)
         }
-        return .result(dialog: "Playing \(picked).")
+        return .result(dialog: IntentDialog(stringLiteral: "Playing \(picked)."))
     }
 }
 
@@ -362,9 +367,9 @@ struct PlayPlaylistIntent: AppIntent {
             return ("shuffled Library", mm.songs.count)
         }
         if outcome.1 == 0 {
-            return .result(dialog: "I couldn't find anything to play.")
+            return .result(dialog: IntentDialog(stringLiteral: "I couldn't find anything to play."))
         }
-        return .result(dialog: "Playing \(outcome.0) — \(outcome.1) songs.")
+        return .result(dialog: IntentDialog(stringLiteral: "Playing \(outcome.0) — \(outcome.1) songs."))
     }
 }
 
@@ -392,7 +397,7 @@ struct QueueControlIntent: AppIntent {
             case .shuffle: mm.isShuffle.toggle(); return mm.isShuffle ? "Shuffle on." : "Shuffle off."
             }
         }
-        return .result(dialog: said.isEmpty ? "Done." : said)
+        return .result(dialog: Text(said.isEmpty ? "Done." : said))
     }
 }
 
@@ -419,8 +424,8 @@ struct SleepTimerIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let m = max(1, min(180, minutes))
         await MainActor.run { MusicManager.shared.setSleepTimer(minutes: m) }
-        if m == 1 { return .result(dialog: "Sleeping in one minute.") }
-        return .result(dialog: "Sleeping in \(m) minutes.")
+        if m == 1 { return .result(dialog: IntentDialog(stringLiteral: "Sleeping in one minute.")) }
+        return .result(dialog: IntentDialog(stringLiteral: "Sleeping in \(m) minutes."))
     }
 }
 
@@ -451,7 +456,7 @@ struct GeneratePlaylistIntent: AppIntent {
                 }
             }
         }
-        return .result(dialog: said)
+        return .result(dialog: Text(said))
     }
 }
 

@@ -545,8 +545,8 @@ final class SmartPlaylistEngine: ObservableObject {
                                   familiarity: min(1, Double(plays) / 12),
                                   liked: liked.contains(s.id) ? 1 : 0,
                                   recency: recency, arabic: arabicFlag, quality: quality,
-                                  genre: genre,
                                   hourFit: hourFit,
+                                  genre: genre,
                                   artistKey: s.artist.trimmingCharacters(in: .whitespaces).lowercased(),
                                   hours: rec))
         }
