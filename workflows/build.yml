@@ -1,27 +1,72 @@
+# ===========================================================================
+#  ⚠️  THIS COPY DOES NOTHING WHERE IT IS — READ THIS FIRST
+#
+#  GitHub Actions only ever reads workflow files that live at exactly:
+#
+#        .github/workflows/build.yml
+#        ^^^^^^ ^^^^^^^^
+#        a hidden folder called ".github", containing a folder "workflows"
+#
+#  This file sits in a folder called "workflows" at the ROOT of the repo
+#  (no ".github/" in front of it). GitHub ignores that folder completely,
+#  which is why a push today starts no build at all.
+#
+#  This copy is only the SOURCE you copy FROM. It must be reproduced at the
+#  path above, once. Two ways, either one takes under a minute:
+#
+#   A) One-tap (phone works): open
+#      https://github.com/ahcrazy20-tech/ahemdmusic/new/main?filename=.github/workflows/build.yml
+#      paste the whole file below (copy it from this exact page so the
+#      indentation survives), press "Create file", then "Commit directly to
+#      main branch". The build starts by itself.
+#
+#   B) Terminal (if you have a clone of the repo):
+#      bash scripts/install_ci_fix.sh && git push
+#
+#  DO NOT "rename" this file in the web editor — GitHub's rename box cannot
+#  create the hidden .github/ folder reliably, and that is exactly the move
+#  that left this repo with zero workflows.
+#
+#  This workflow contains no copy of the app. It only runs scripts/ci_build.sh,
+#  which compiles whatever is in TrollMusicApp/TrollMusicApp/, so it never has
+#  to be regenerated when the app changes. (The old one deleted the sources
+#  with `find . -name "*.swift" -delete` and pasted months-old frozen copies
+#  back — green builds, stale IPA. Every build up to 2026-09-07 13:32 UTC was
+#  that one, which is why the new features never appeared on the phone.)
+# ===========================================================================
 name: Build TrollMusicApp
+
 on:
   push:
     branches: ["main", "arena/**"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:
+
 permissions:
-  contents: write
-  actions: write
+  contents: write   # post compile errors back on the commit
+  actions: write    # upload the IPA + build log
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   build:
     name: Build IPA
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: maxim-lobanov/setup-xcode@v1
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
+
       - name: Build the app from the repo's own sources
         run: bash scripts/ci_build.sh
+
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -30,10 +75,11 @@ jobs:
           path: build.log
           if-no-files-found: ignore
           retention-days: 7
+
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: TrollMusicApp-IPA
           path: TrollMusicApp.ipa
           if-no-files-found: error
-          retention-days: 30 
+          retention-days: 30

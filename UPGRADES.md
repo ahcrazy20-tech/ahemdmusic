@@ -74,7 +74,9 @@ workflow, so CI kept recompiling the same broken code.)
 
 The Arena GitHub App is not allowed to push to `.github/workflows/` — that
 requires the *workflows* permission — so the corrected workflow ships here as
-**`build.yml.ready`**.
+**`workflows/build.yml`** (there used to be extra copies named
+`build.yml.ready`, `ci/build.yml` and `workflows/build.min.yml`; they are
+deleted — four copies of one file is how CI got mis-installed).
 
 ### Install it
 
@@ -86,7 +88,7 @@ bash scripts/install_ci_fix.sh && git push
 <summary>…or do it by hand</summary>
 
 ```bash
-cp build.yml.ready .github/workflows/build.yml
+cp workflows/build.yml .github/workflows/build.yml
 git add .github/workflows/build.yml
 git commit -m "Sync CI build with the fixed sources"
 git push
@@ -96,7 +98,10 @@ git push
 **Permanent fix:** grant the Arena GitHub App the *workflows* permission for
 this repo. Then every code push can auto-sync the build and it can never
 drift again. Until then, after changing any `.swift` file run
-`python3 scripts/sync_build_yaml.py` (or the script above) before pushing.
+nothing at all: `scripts/sync_build_yaml.py` was removed together with the
+embedded-copy workflow, because the short workflow has no copies to keep in sync.
+*Never* install it by **renaming** in the web editor — that cannot create the
+hidden `.github/` folder; use `bash scripts/install_ci_fix.sh --link` instead.
 
 ## What was broken (Sept 2026 build failure)
 

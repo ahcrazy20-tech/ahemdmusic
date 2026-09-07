@@ -20,7 +20,8 @@ being written, that had already silently gone wrong:
 | `Views.swift`, `DiscoverView.swift` (engine settings UI) | older | newer |
 | `backend-registry.json` the app tries to fetch | missing (404) | referenced |
 
-So the repo was *not* the source of truth, and running the old `sync_build_yaml.py`
+So the repo was *not* the source of truth, and running `sync_build_yaml.py`
+(which has since been deleted, together with the embedded-copy workflow)
 would have **deleted** the multi-engine downloaders and the AI self-healing from
 the next build. Fixed in this pack:
 
@@ -36,7 +37,7 @@ the next build. Fixed in this pack:
   the Gemini model — **no app rebuild needed**).
 * **`scripts/check_swift_syntax.py`** — 1-second structural pre-flight for people
   without a Mac (see §5).
-* `build.yml.ready` regenerated from the repo, so installing it can only ever add.
+* the installable workflow is generated from the repo, so installing it can only ever add.
 
 > ⚠️ **One command you must run** to make any of this code reach the IPA:
 > `bash scripts/install_ci_fix.sh && git push`
@@ -168,7 +169,7 @@ bash scripts/install_ci_fix.sh            # restore-missing → pre-flight → s
 bash scripts/install_ci_fix.sh --check    # report drift + structure problems, change nothing
 python3 scripts/check_swift_syntax.py     # structure + cross-file symbol pre-flight
 python3 scripts/restore_sources_from_workflow.py --check   # repo vs CI, safe
-python3 scripts/sync_build_yaml.py        # repo → CI only (run after adding a .swift file)
+bash scripts/install_ci_fix.sh --link     # the one-tap URL to install the workflow
 ```
 `install_ci_fix.sh` is the one to remember: it **regenerates the workflow from the
 repo** (it no longer installs a frozen copy), so the file it commits can never be
@@ -280,5 +281,5 @@ VoiceRemote were missing from CI entirely):
 
 ```bash
 python3 scripts/check_swift_syntax.py   # structure pre-flight (green)
-python3 scripts/sync_build_yaml.py      # repo → .github/workflows/build.yml
+# sync_build_yaml.py is gone: the installed workflow no longer embeds sources
 ```
