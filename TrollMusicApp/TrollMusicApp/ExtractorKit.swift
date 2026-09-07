@@ -516,23 +516,27 @@ enum SoundCloudResolver {
         getJSON(u) { j in
             guard let items = j?["collection"] as? [[String: Any]],
                   let first = items.first else { completion(nil); return }
-            completion(progressiveURL(from: first, cid: cid, done: completion))
+            followTranscoding(first, cid: cid, done: completion)
         }
     }
 
     /// Pick the progressive (plain MP3) transcoding and follow it to the
-    /// signed media URL. Returns nil synchronously when it completes async.
-    private static func progressiveURL(from track: [String: Any], cid: String,
-                                       done: @escaping (URL?) -> Void) -> URL? {
+    /// signed media URL. Always completes exactly once via `done`.
+    private static func followTranscoding(_ track: [String: Any], cid: String,
+                                          done: @escaping (URL?) -> Void) {
         guard let media = track["media"] as? [String: Any],
-              let trans = media["transcodings"] as? [[String: Any]] else { return nil }
+              let trans = media["transcodings"] as? [[String: Any]] else {
+            done(nil); return
+        }
         var pick: String? = nil
         for t in trans {
             let proto = ((t["format"] as? [String: Any])?["protocol"] as? String) ?? ""
             if proto == "progressive", let u = t["url"] as? String { pick = u; break }
         }
         guard let base = pick,
-              let u = URL(string: "\(base)?client_id=\(cid)") else { return nil }
+              let u = URL(string: "\(base)?client_id=\(cid)") else {
+            done(nil); return
+        }
         getJSON(u) { j in
             if let s = j?["url"] as? String, let mediaURL = URL(string: s) {
                 done(mediaURL)
@@ -540,7 +544,6 @@ enum SoundCloudResolver {
                 done(nil)
             }
         }
-        return nil
     }
 
     private static func getJSON(_ url: URL, completion: @escaping ([String: Any]?) -> Void) {
@@ -766,9 +769,6 @@ struct EngineSettingsView: View {
                 testResult = ok ? "Connected — your server will join every race."
                     : "No answer. Check the address and that the server is running."
             }
-        }
-    }
-}
         }
     }
 }

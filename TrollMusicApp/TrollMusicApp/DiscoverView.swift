@@ -518,6 +518,10 @@ struct AIKeySetupView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     SecureField("Paste your Gemini API key", text: $keyInput)
                     TextField("Model (default: gemini-3.5-flash)", text: $ai.model)
+                    Toggle("Auto model (self-healing)", isOn: $ai.autoModel)
+                        .font(.subheadline)
+                    Text(ai.autoModel ? "On: the app switches models automatically when Google retires one." : "Off: always use the model above.")
+                        .font(.caption).foregroundColor(.secondary)
                 }
                 .autocorrectionDisabled()
             }

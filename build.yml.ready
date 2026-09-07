@@ -2970,21 +2970,6 @@ jobs:
               }
           }
 
-          ht: 100).clipped().cornerRadius(10)
-                              Image(systemName: "arrow.down.circle.fill")
-                                  .font(.title2).foregroundColor(.white)
-                                  .padding(6).shadow(radius: 3)
-                          }
-                          Text(result.title).font(.caption2.bold())
-                              .foregroundColor(.white).lineLimit(2)
-                              .frame(width: 130, alignment: .leading)
-                          Text(result.artist).font(.caption2).foregroundColor(.gray)
-                              .lineLimit(1).frame(width:130, alignment:.leading)
-                      }
-                  }.buttonStyle(.plain)
-              }
-          }
-
           SWIFT
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/WebBrowser.swift
           import SwiftUI
@@ -3852,7 +3837,10 @@ jobs:
                   let winnerQueue = DispatchQueue(label: "asMusic.race")
                   var resolved = false
                   var failedCount = 0
-                  let totalContenders = 3
+                  // NEW: extra alternative-engine contenders join the classic 3.
+                  // Additive: with none configured this is exactly the classic race.
+                  let extraRacers = NewExtractors.racers()
+                  let totalContenders = 3 + extraRacers.count
                   func tryWin(_ label: String, downloadURL: URL, finalName: String, referer: String = "https://mp3juice.sc/") {
                       winnerQueue.async { [weak self] in
                           guard let self = self else { return }
@@ -3911,6 +3899,14 @@ jobs:
                   // for short songs. Detect the limit error quickly and move on.
                   cnvmp3Race(task: task, win: { url,name in tryWin("cnvmp3", downloadURL:url, finalName:name, referer:"https://cnvmp3.com/v55") },
                              lose: { oneFailed("cnvmp3") })
+
+                  // NEW contenders 4+: Piped / Invidious / Cobalt / MyServer. Each must
+                  // probe-validate its URL before it may win; losers just call oneFailed.
+                  for c in extraRacers {
+                      c.run(task,
+                            { url, name in tryWin(c.label, downloadURL: url, finalName: name, referer: c.referer) },
+                            { oneFailed(c.label) })
+                  }
               }
 
               // ---- Fast-race: worker mirrors (parallel within the group) -----------
@@ -4243,6 +4239,48 @@ jobs:
                       self.startNext()
                   }
               }
+              /// Task ids that already consumed their one SoundCloud fallback attempt.
+              private var scFallbackTried = Set<UUID>()
+              private let scFallbackLock = NSLock()
+
+              /// One additive SoundCloud-API attempt after the classic engines failed.
+              /// Returns true when an attempt was launched (caller must return without
+              /// marking failed — this method re-invokes failOrRetry when the attempt
+              /// resolves). Returns false to proceed with the classic failure path.
+              private func soundCloudFallback(task: DownloadTask, message: String) -> Bool {
+                  if task.isCancelled { return false }
+                  let q = task.proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+                  if q.isEmpty { return false }
+                  scFallbackLock.lock()
+                  let already = scFallbackTried.contains(task.id)
+                  if !already { scFallbackTried.insert(task.id) }
+                  scFallbackLock.unlock()
+                  if already { return false }
+                  log.debug("[scapi] classic engines failed — trying SoundCloud API fallback")
+                  SoundCloudResolver.resolve(pageURL: nil, titleQuery: q) { [weak self] url in
+                      guard let self = self else { return }
+                      if task.isCancelled { return }
+                      guard let u = url else {
+                          self.failOrRetry(task: task, message: message)
+                          return
+                      }
+                      self.probeForAudio(url: u, referer: "https://soundcloud.com/") { [weak self] ready in
+                          guard let self = self else { return }
+                          if task.isCancelled { return }
+                          if !ready {
+                              self.failOrRetry(task: task, message: message)
+                              return
+                          }
+                          BackendHealth.shared.recordSuccess("scapi")
+                          var name = task.proposedName
+                          if !name.lowercased().hasSuffix(".mp3") { name += ".mp3" }
+                          self.startMediaDownload(task: task, url: u, finalName: name,
+                                                  referer: "https://soundcloud.com/", backendLabel: "SoundCloud")
+                      }
+                  }
+                  return true
+              }
+
               private func failOrRetry(task: DownloadTask, message: String) {
                   if task.isCancelled { return }
                   if task.autoRetries < 3 {
@@ -4262,6 +4300,8 @@ jobs:
                       }
                       return
                   }
+                  // NEW: one additive SoundCloud-API attempt before terminal failure.
+                  if self.soundCloudFallback(task: task, message: message) { return }
                   DispatchQueue.main.async {
                       task.status = .failed(message)
                       log.error("Download failed: \(message, privacy: .public)")
@@ -5519,28 +5559,6 @@ jobs:
               static let smartRadioAutoSearch = Notification.Name("smartRadioAutoSearch")
           }
 
-          atic let downloadCenterChanged = Notification.Name("downloadCenterChanged")
-              static let smartRadioAutoSearch = Notification.Name("smartRadioAutoSearch")
-          }
-
-                     let k = TasteEngine.normKey(artist: r.artist, title: r.title)
-                      if k == want { return 100 }
-                      let hay = "\(r.artist) \(r.title)".lowercased()
-                          .folding(options: .diacriticInsensitive, locale: .current)
-                      var s = 0
-                      for tok in wantTitleTokens where hay.contains(tok) { s += 5 }
-                      if hay.contains(artist.lowercased().folding(options: .diacriticInsensitive, locale: .current)) { s += 10 }
-                      return s
-                  }
-                  return results.max { score($0) < score($1) }
-              }
-          }
-
-          extension Notification.Name {
-              static let downloadCenterChanged = Notification.Name("downloadCenterChanged")
-              static let smartRadioAutoSearch = Notification.Name("smartRadioAutoSearch")
-          }
-
           SWIFT
           cat << 'SWIFT' > TrollMusicApp/TrollMusicApp/MusicIntelligence.swift
           import Foundation
@@ -6412,6 +6430,10 @@ jobs:
                           VStack(alignment: .leading, spacing: 8) {
                               SecureField("Paste your Gemini API key", text: $keyInput)
                               TextField("Model (default: gemini-3.5-flash)", text: $ai.model)
+                              Toggle("Auto model (self-healing)", isOn: $ai.autoModel)
+                                  .font(.subheadline)
+                              Text(ai.autoModel ? "On: the app switches models automatically when Google retires one." : "Off: always use the model above.")
+                                  .font(.caption).foregroundColor(.secondary)
                           }
                           .autocorrectionDisabled()
                       }
@@ -6784,16 +6806,24 @@ jobs:
               @Published var model: String {
                   didSet { UserDefaults.standard.set(model, forKey: "asmusic_gemini_model") }
               }
+              /// NEW: Auto model (self-healing). On: the app silently switches to a
+              /// verified newer model id when Google retires the stored one. Off:
+              /// always use `model` exactly as before.
+              @Published var autoModel: Bool {
+                  didSet { UserDefaults.standard.set(autoModel, forKey: "asmusic_gemini_auto") }
+              }
               @Published var isThinking: Bool = false
               @Published var lastError: String? = nil
               @Published var suggestions: [DiscoTrack] = []
 
               private static let keyDefaultsKey = "asmusic_gemini_key"
               private static let modelDefaultsKey = "asmusic_gemini_model"
+              private static let autoDefaultsKey = "asmusic_gemini_auto"
 
               private init() {
                   key = UserDefaults.standard.string(forKey: Self.keyDefaultsKey) ?? ""
-                  model = UserDefaults.standard.string(forKey: Self.modelDefaultsKey) ?? "gemini-2.5-flash"
+                  autoModel = UserDefaults.standard.object(forKey: Self.autoDefaultsKey) as? Bool ?? true
+                  model = UserDefaults.standard.string(forKey: Self.modelDefaultsKey) ?? "gemini-3.5-flash"
               }
 
               var isConfigured: Bool { !key.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -6855,13 +6885,26 @@ jobs:
                       } else if let data = data {
                           if let status = (resp as? HTTPURLResponse)?.statusCode, status >= 400 {
                               // Surface a short human reason (bad key, rate limit, model…).
+                              var msg: String? = nil
                               if let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                                  let errObj = j["error"] as? [String: Any],
-                                 let msg = errObj["message"] as? String {
-                                  failure = String(msg.prefix(140))
-                              } else {
-                                  failure = "Server error \(status)"
+                                 let m = errObj["message"] as? String {
+                                  msg = String(m.prefix(140))
                               }
+                              // NEW self-heal: retired-model error + Auto on + first
+                              // attempt → adopt the next verified model and retry once.
+                              if attempt == 0 && self.autoModel
+                                  && self.modelGone(status: status, message: msg ?? ""),
+                                 let next = GeminiDiscovery.nextModel(after: self.model) {
+                                  let again = trimmed
+                                  let cont = completion
+                                  DispatchQueue.main.async {
+                                      self.model = next
+                                      self.ask(again, completion: cont, attempt: 1)
+                                  }
+                                  return
+                              }
+                              failure = msg ?? "Server error \(status)"
                           } else if let text = self.extractText(from: data) {
                               tracks = self.parseTracks(from: text)
                               if tracks.isEmpty { failure = "The AI returned nothing usable. Try again." }
@@ -6879,6 +6922,16 @@ jobs:
                           completion?(tracks)
                       }
                   }.resume()
+              }
+
+              /// True when an error plausibly means "this model id is retired".
+              private func modelGone(status: Int, message: String) -> Bool {
+                  if status == 404 { return true }
+                  let m = message.lowercased()
+                  guard m.contains("model") else { return false }
+                  return m.contains("not found") || m.contains("retired") || m.contains("deprecated")
+                      || m.contains("unsupported") || m.contains("not supported")
+                      || m.contains("expired") || m.contains("removed")
               }
 
               /// Pulls the text out of a generateContent reply.
@@ -6909,6 +6962,54 @@ jobs:
                                             albumCover: nil, previewURL: nil, reason: "AI pick for you"))
                   }
                   return out
+              }
+          }
+
+          // ---------------------------------------------------------------------------
+          // MARK: - Gemini model self-healing (Auto model)
+          // ---------------------------------------------------------------------------
+
+          /// Verifies model ids against Google's ListModels API and the remote
+          /// registry, so retired ids (2.0 → 2.5 → 3.x …) are replaced silently
+          /// without an app update. Read-only: it never touches the classic AI flow
+          /// beyond supplying a working model id.
+          enum GeminiDiscovery {
+              /// Ordered model candidates: remote registry first, hardcoded backup.
+              static func candidates() -> [String] {
+                  let reg = RegistryStore.shared.current
+                  if let list = reg.geminiFallbacks, !list.isEmpty { return list }
+                  if let pref = reg.preferredGeminiModel, !pref.isEmpty { return [pref] }
+                  return ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"]
+              }
+
+              /// Next candidate after `current` (nil when current is last/unknown-end).
+              static func nextModel(after current: String) -> String? {
+                  let list = candidates()
+                  guard let i = list.firstIndex(of: current) else { return list.first }
+                  return (i + 1 < list.count) ? list[i + 1] : nil
+              }
+
+              /// Fire-and-forget pre-check: if `current` already vanished from Google's
+              /// model list, complete with a verified replacement (else nil = keep).
+              static func preSwitchIfGone(key: String, current: String, completion: @escaping (String?) -> Void) {
+                  guard let ke = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                        let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(ke)&pageSize=100") else {
+                      completion(nil); return
+                  }
+                  var req = URLRequest(url: url, timeoutInterval: 15)
+                  req.httpMethod = "GET"
+                  URLSession.shared.dataTask(with: req) { data, resp, _ in
+                      guard let data = data,
+                            (resp as? HTTPURLResponse)?.statusCode == 200,
+                            let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                            let arr = j["models"] as? [[String: Any]] else {
+                          completion(nil); return
+                      }
+                      let names = arr.compactMap { ($0["name"] as? String)?.replacingOccurrences(of: "models/", with: "") }
+                      if names.contains(current) { completion(nil); return }
+                      for c in candidates() where names.contains(c) { completion(c); return }
+                      completion(names.filter { $0.contains("flash") }.sorted().last)
+                  }.resume()
               }
           }
 
@@ -7733,23 +7834,27 @@ jobs:
                   getJSON(u) { j in
                       guard let items = j?["collection"] as? [[String: Any]],
                             let first = items.first else { completion(nil); return }
-                      completion(progressiveURL(from: first, cid: cid, done: completion))
+                      followTranscoding(first, cid: cid, done: completion)
                   }
               }
 
               /// Pick the progressive (plain MP3) transcoding and follow it to the
-              /// signed media URL. Returns nil synchronously when it completes async.
-              private static func progressiveURL(from track: [String: Any], cid: String,
-                                                 done: @escaping (URL?) -> Void) -> URL? {
+              /// signed media URL. Always completes exactly once via `done`.
+              private static func followTranscoding(_ track: [String: Any], cid: String,
+                                                    done: @escaping (URL?) -> Void) {
                   guard let media = track["media"] as? [String: Any],
-                        let trans = media["transcodings"] as? [[String: Any]] else { return nil }
+                        let trans = media["transcodings"] as? [[String: Any]] else {
+                      done(nil); return
+                  }
                   var pick: String? = nil
                   for t in trans {
                       let proto = ((t["format"] as? [String: Any])?["protocol"] as? String) ?? ""
                       if proto == "progressive", let u = t["url"] as? String { pick = u; break }
                   }
                   guard let base = pick,
-                        let u = URL(string: "\(base)?client_id=\(cid)") else { return nil }
+                        let u = URL(string: "\(base)?client_id=\(cid)") else {
+                      done(nil); return
+                  }
                   getJSON(u) { j in
                       if let s = j?["url"] as? String, let mediaURL = URL(string: s) {
                           done(mediaURL)
@@ -7757,7 +7862,6 @@ jobs:
                           done(nil)
                       }
                   }
-                  return nil
               }
 
               private static func getJSON(_ url: URL, completion: @escaping ([String: Any]?) -> Void) {
@@ -7983,9 +8087,6 @@ jobs:
                           testResult = ok ? "Connected — your server will join every race."
                               : "No answer. Check the address and that the server is running."
                       }
-                  }
-              }
-          }
                   }
               }
           }

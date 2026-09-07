@@ -1562,18 +1562,3 @@ struct TrendingCard: View {
     }
 }
 
-ht: 100).clipped().cornerRadius(10)
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.title2).foregroundColor(.white)
-                        .padding(6).shadow(radius: 3)
-                }
-                Text(result.title).font(.caption2.bold())
-                    .foregroundColor(.white).lineLimit(2)
-                    .frame(width: 130, alignment: .leading)
-                Text(result.artist).font(.caption2).foregroundColor(.gray)
-                    .lineLimit(1).frame(width:130, alignment:.leading)
-            }
-        }.buttonStyle(.plain)
-    }
-}
-

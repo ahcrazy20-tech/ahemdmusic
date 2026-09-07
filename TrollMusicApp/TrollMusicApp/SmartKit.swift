@@ -346,16 +346,24 @@ final class GeminiAI: ObservableObject {
     @Published var model: String {
         didSet { UserDefaults.standard.set(model, forKey: "asmusic_gemini_model") }
     }
+    /// NEW: Auto model (self-healing). On: the app silently switches to a
+    /// verified newer model id when Google retires the stored one. Off:
+    /// always use `model` exactly as before.
+    @Published var autoModel: Bool {
+        didSet { UserDefaults.standard.set(autoModel, forKey: "asmusic_gemini_auto") }
+    }
     @Published var isThinking: Bool = false
     @Published var lastError: String? = nil
     @Published var suggestions: [DiscoTrack] = []
 
     private static let keyDefaultsKey = "asmusic_gemini_key"
     private static let modelDefaultsKey = "asmusic_gemini_model"
+    private static let autoDefaultsKey = "asmusic_gemini_auto"
 
     private init() {
         key = UserDefaults.standard.string(forKey: Self.keyDefaultsKey) ?? ""
-        model = UserDefaults.standard.string(forKey: Self.modelDefaultsKey) ?? "gemini-2.5-flash"
+        autoModel = UserDefaults.standard.object(forKey: Self.autoDefaultsKey) as? Bool ?? true
+        model = UserDefaults.standard.string(forKey: Self.modelDefaultsKey) ?? "gemini-3.5-flash"
     }
 
     var isConfigured: Bool { !key.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -417,13 +425,26 @@ final class GeminiAI: ObservableObject {
             } else if let data = data {
                 if let status = (resp as? HTTPURLResponse)?.statusCode, status >= 400 {
                     // Surface a short human reason (bad key, rate limit, model…).
+                    var msg: String? = nil
                     if let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                        let errObj = j["error"] as? [String: Any],
-                       let msg = errObj["message"] as? String {
-                        failure = String(msg.prefix(140))
-                    } else {
-                        failure = "Server error \(status)"
+                       let m = errObj["message"] as? String {
+                        msg = String(m.prefix(140))
                     }
+                    // NEW self-heal: retired-model error + Auto on + first
+                    // attempt → adopt the next verified model and retry once.
+                    if attempt == 0 && self.autoModel
+                        && self.modelGone(status: status, message: msg ?? ""),
+                       let next = GeminiDiscovery.nextModel(after: self.model) {
+                        let again = trimmed
+                        let cont = completion
+                        DispatchQueue.main.async {
+                            self.model = next
+                            self.ask(again, completion: cont, attempt: 1)
+                        }
+                        return
+                    }
+                    failure = msg ?? "Server error \(status)"
                 } else if let text = self.extractText(from: data) {
                     tracks = self.parseTracks(from: text)
                     if tracks.isEmpty { failure = "The AI returned nothing usable. Try again." }
@@ -441,6 +462,16 @@ final class GeminiAI: ObservableObject {
                 completion?(tracks)
             }
         }.resume()
+    }
+
+    /// True when an error plausibly means "this model id is retired".
+    private func modelGone(status: Int, message: String) -> Bool {
+        if status == 404 { return true }
+        let m = message.lowercased()
+        guard m.contains("model") else { return false }
+        return m.contains("not found") || m.contains("retired") || m.contains("deprecated")
+            || m.contains("unsupported") || m.contains("not supported")
+            || m.contains("expired") || m.contains("removed")
     }
 
     /// Pulls the text out of a generateContent reply.
@@ -471,6 +502,54 @@ final class GeminiAI: ObservableObject {
                                   albumCover: nil, previewURL: nil, reason: "AI pick for you"))
         }
         return out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MARK: - Gemini model self-healing (Auto model)
+// ---------------------------------------------------------------------------
+
+/// Verifies model ids against Google's ListModels API and the remote
+/// registry, so retired ids (2.0 → 2.5 → 3.x …) are replaced silently
+/// without an app update. Read-only: it never touches the classic AI flow
+/// beyond supplying a working model id.
+enum GeminiDiscovery {
+    /// Ordered model candidates: remote registry first, hardcoded backup.
+    static func candidates() -> [String] {
+        let reg = RegistryStore.shared.current
+        if let list = reg.geminiFallbacks, !list.isEmpty { return list }
+        if let pref = reg.preferredGeminiModel, !pref.isEmpty { return [pref] }
+        return ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"]
+    }
+
+    /// Next candidate after `current` (nil when current is last/unknown-end).
+    static func nextModel(after current: String) -> String? {
+        let list = candidates()
+        guard let i = list.firstIndex(of: current) else { return list.first }
+        return (i + 1 < list.count) ? list[i + 1] : nil
+    }
+
+    /// Fire-and-forget pre-check: if `current` already vanished from Google's
+    /// model list, complete with a verified replacement (else nil = keep).
+    static func preSwitchIfGone(key: String, current: String, completion: @escaping (String?) -> Void) {
+        guard let ke = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(ke)&pageSize=100") else {
+            completion(nil); return
+        }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.httpMethod = "GET"
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            guard let data = data,
+                  (resp as? HTTPURLResponse)?.statusCode == 200,
+                  let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let arr = j["models"] as? [[String: Any]] else {
+                completion(nil); return
+            }
+            let names = arr.compactMap { ($0["name"] as? String)?.replacingOccurrences(of: "models/", with: "") }
+            if names.contains(current) { completion(nil); return }
+            for c in candidates() where names.contains(c) { completion(c); return }
+            completion(names.filter { $0.contains("flash") }.sorted().last)
+        }.resume()
     }
 }
 
