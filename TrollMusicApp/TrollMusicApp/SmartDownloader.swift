@@ -596,7 +596,10 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
         let winnerQueue = DispatchQueue(label: "asMusic.race")
         var resolved = false
         var failedCount = 0
-        let totalContenders = 3
+        // NEW: extra alternative-engine contenders join the classic 3.
+        // Additive: with none configured this is exactly the classic race.
+        let extraRacers = NewExtractors.racers()
+        let totalContenders = 3 + extraRacers.count
         func tryWin(_ label: String, downloadURL: URL, finalName: String, referer: String = "https://mp3juice.sc/") {
             winnerQueue.async { [weak self] in
                 guard let self = self else { return }
@@ -655,6 +658,14 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
         // for short songs. Detect the limit error quickly and move on.
         cnvmp3Race(task: task, win: { url,name in tryWin("cnvmp3", downloadURL:url, finalName:name, referer:"https://cnvmp3.com/v55") },
                    lose: { oneFailed("cnvmp3") })
+
+        // NEW contenders 4+: Piped / Invidious / Cobalt / MyServer. Each must
+        // probe-validate its URL before it may win; losers just call oneFailed.
+        for c in extraRacers {
+            c.run(task,
+                  { url, name in tryWin(c.label, downloadURL: url, finalName: name, referer: c.referer) },
+                  { oneFailed(c.label) })
+        }
     }
 
     // ---- Fast-race: worker mirrors (parallel within the group) -----------
@@ -744,7 +755,9 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
 
     /// Probe a URL quickly: send a small Range request and return true if it
     /// looks like a real audio response (right content-type or magic bytes).
-    private func probeForAudio(url: URL, referer: String, completion: @escaping (Bool) -> Void) {
+    /// Internal (not private) so NEW race contenders in ExtractorKit can
+    /// validate their URLs too — zero behavior change to existing callers.
+    func probeForAudio(url: URL, referer: String, completion: @escaping (Bool) -> Void) {
         var req = URLRequest(url: url, timeoutInterval: 8)
         req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
         req.setValue(referer, forHTTPHeaderField: "Referer")
@@ -758,7 +771,7 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
             if ct.contains("audio") || ct.contains("mpeg") || ct.contains("mp4") { completion(true); return }
             // Magic byte sniff
             if let d = data, d.count >= 3 {
-                let b = [UInt8](d.prefix(4))
+                let b = [UInt8](d.prefix(8))
                 if b[0] == 0x49 && b[1] == 0x44 && b[2] == 0x33 { completion(true); return }
                 if b[0] == 0xFF && (b[1] & 0xE0) == 0xE0 { completion(true); return }
                 if d.count >= 8 && b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70 { completion(true); return }
@@ -985,6 +998,48 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
             self.startNext()
         }
     }
+    /// Task ids that already consumed their one SoundCloud fallback attempt.
+    private var scFallbackTried = Set<UUID>()
+    private let scFallbackLock = NSLock()
+
+    /// One additive SoundCloud-API attempt after the classic engines failed.
+    /// Returns true when an attempt was launched (caller must return without
+    /// marking failed — this method re-invokes failOrRetry when the attempt
+    /// resolves). Returns false to proceed with the classic failure path.
+    private func soundCloudFallback(task: DownloadTask, message: String) -> Bool {
+        if task.isCancelled { return false }
+        let q = task.proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { return false }
+        scFallbackLock.lock()
+        let already = scFallbackTried.contains(task.id)
+        if !already { scFallbackTried.insert(task.id) }
+        scFallbackLock.unlock()
+        if already { return false }
+        log.debug("[scapi] classic engines failed — trying SoundCloud API fallback")
+        SoundCloudResolver.resolve(pageURL: nil, titleQuery: q) { [weak self] url in
+            guard let self = self else { return }
+            if task.isCancelled { return }
+            guard let u = url else {
+                self.failOrRetry(task: task, message: message)
+                return
+            }
+            self.probeForAudio(url: u, referer: "https://soundcloud.com/") { [weak self] ready in
+                guard let self = self else { return }
+                if task.isCancelled { return }
+                if !ready {
+                    self.failOrRetry(task: task, message: message)
+                    return
+                }
+                BackendHealth.shared.recordSuccess("scapi")
+                var name = task.proposedName
+                if !name.lowercased().hasSuffix(".mp3") { name += ".mp3" }
+                self.startMediaDownload(task: task, url: u, finalName: name,
+                                        referer: "https://soundcloud.com/", backendLabel: "SoundCloud")
+            }
+        }
+        return true
+    }
+
     private func failOrRetry(task: DownloadTask, message: String) {
         if task.isCancelled { return }
         if task.autoRetries < 3 {
@@ -1004,6 +1059,8 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
             }
             return
         }
+        // NEW: one additive SoundCloud-API attempt before terminal failure.
+        if self.soundCloudFallback(task: task, message: message) { return }
         DispatchQueue.main.async {
             task.status = .failed(message)
             log.error("Download failed: \(message, privacy: .public)")

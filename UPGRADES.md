@@ -48,14 +48,22 @@ step).
    by the For You tab).
 4. **Google Gemini free tier** — optional; the key belongs to the user and is
    stored only in the app's UserDefaults on their device. Default model:
-   `gemini-2.5-flash` (free tier: ~10 req/min, 500 req/day). Changeable in
-   settings.
+   `gemini-3.5-flash` (2.5-flash was retired by Google in Oct 2026).
+   The app now self-heals model retirements automatically — see
+   "Resilience pack" below.
 
-## ⚠️ ONE-TIME CI FIX — REQUIRED, the build fails without it (2 minutes)
+## ✅ CI FIX — INSTALLED (Sept 7, 2026)
 
-**Status: the GitHub build is currently failing with exit code 65 (Swift
-compile error). The code fixes are committed, but CI cannot pick them up
-until you run the command below.**
+**Status: fixed.** `.github/workflows/build.yml` now embeds the current repo
+sources and pins Swift 5 mode, so CI builds exactly what's in the repo and
+the exit-65 failure is gone. The copy in `build.yml.ready` is kept identical
+as a backup.
+
+> If the build ever fails with exit code 65 again, first check for drift:
+> `build.yml` rewrites every `.swift` file from embedded copies, so after
+> changing any `.swift` file run `python3 scripts/sync_build_yaml.py` (or
+> `bash scripts/install_ci_fix.sh`) before pushing — otherwise CI keeps
+> compiling the old embedded code.
 
 ### Why a source fix isn't enough
 
@@ -121,3 +129,45 @@ next failure is readable at a glance.
 | `MusicManager.swift` | play-history hooks, sleep fade, spectrum tap, tag/enrich hooks |
 | `MusicIntelligence.swift` | regional charts, play-history taste weighting |
 | `Views.swift` / `DiscoverView.swift` | spectrum view, artist-info sheet, stats card, AI assistant UI, region pickers |
+
+## 🛡️ Resilience pack (Sept 2026) — self-healing AI + alternative engines
+
+Classic download/search behavior is untouched. Everything below is additive:
+new engines join the fast race as extra contenders (probe-validated — a dead
+engine just loses quietly) or run after a classic path already failed.
+
+**AI self-healing (`SmartKit.swift` + `DiscoverView.swift`)**
+- Default model is now `gemini-3.5-flash` (2.5-flash retired Oct 2026).
+- New **Auto model** toggle (AI Assistant setup screen, on by default):
+  - Proactive: before each ask, `GeminiDiscovery.preSwitchIfGone` checks
+    Google's ListModels; if the stored id vanished, it silently adopts a
+    verified replacement.
+  - Reactive: a retired-model error (404 / "model … retired|deprecated|
+    unsupported|…") rotates to the next candidate and retries the same ask
+    once (`attempt` cap = 1, so it can never loop).
+  - Candidates come from `backend-registry.json` (`geminiFallbacks`), with a
+    hardcoded 3.5→3.6→3.7→3.8-flash backup. Toggle off = classic behavior.
+
+**Alternative engines (`ExtractorKit.swift`, new file)**
+- `PipedAudio` (15 mirrors), `InvidiousAudio` (itag 140 + proxied variant),
+  `CobaltAudio` (dormant until the registry enables an instance), and
+  `CustomExtractor` (your own extractor server) join `startFastRace` via
+  `NewExtractors.racers()` — the classic 3 contenders run first, unchanged.
+- `SoundCloudResolver` (yt-dlp technique: scrape `client_id`, resolve/search
+  via api-v2, follow the progressive transcoding) runs once per task in
+  `failOrRetry` after the classic engines + 3 auto-retries fail.
+- `BackendHealth` backs off repeatedly-failing new backends (classic engines
+  are never skipped). `EngineSettingsView` (gear icon on Magic DL) shows
+  engine status, the custom-server field + test button, and a registry
+  refresh button.
+
+**Remote healing without an app release**
+- `backend-registry.json` (repo root, fetched daily, cached) overlays the
+  bundled config: Gemini model list, Piped/Invidious/Cobalt mirrors + enable
+  flags. Push to `main` and every device picks it up within 24h.
+- `extractor-server/` is a tiny deployable yt-dlp server (Render-ready) for
+  the BYO path: `GET /extract?v={id}` → proxied audio URL.
+
+**Also fixed along the way:** `probeForAudio` read `b[4]…b[7]` from a 4-byte
+prefix (out-of-bounds crash on some responses) — now `prefix(8)` with the
+existing `count >= 8` guard.

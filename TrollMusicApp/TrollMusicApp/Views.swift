@@ -1508,6 +1508,13 @@ struct SmartDownloaderView: View {
                 }
             }
             .navigationTitle("Magic DL").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink(destination: EngineSettingsView()) {
+                        Image(systemName: "gearshape").font(.body)
+                    }
+                }
+            }
             .alert("Save As", isPresented: $downloader.showNamePrompt) {
                 TextField("Song name", text: $downloader.nameInput)
                 Button("Download") { downloader.confirmNamedDownload() }
