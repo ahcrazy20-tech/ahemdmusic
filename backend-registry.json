@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "updated": "2026-09-07",
+  "notes": "Remote config for AS Music. The app overlays these values on top of its bundled defaults, so you can fix dead mirrors or add engines WITHOUT rebuilding the IPA. Everything is optional: delete a key to fall back to the built-in default, or delete this whole file to freeze the bundled behaviour. Fetching happens at most once per 24h.",
+  "preferredGeminiModel": "gemini-3.5-flash",
+  "geminiFallbacks": [
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash"
+  ],
+  "pipedEnabled": true,
+  "pipedMirrors": [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi-libre.kavin.rocks",
+    "https://pipedapi.leptons.xyz",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.nosebs.ru",
+    "https://piped-api.privacy.com.de",
+    "https://api.piped.yt",
+    "https://pipedapi.drgns.space",
+    "https://pipedapi.owo.si",
+    "https://pipedapi.ducks.party",
+    "https://piped-api.codespace.cz",
+    "https://pipedapi.reallyaweso.me",
+    "https://pipedapi.darkness.services",
+    "https://pipedapi.orangenet.cc"
+  ],
+  "invidiousEnabled": true,
+  "invidiousInstances": [
+    "https://inv.nadeko.net",
+    "https://yewtu.be",
+    "https://vid.puffyan.us",
+    "https://invidious.snopyta.org",
+    "https://inv.in.projectsegfau.lt"
+  ],
+  "cobaltEnabled": false,
+  "cobaltInstances": []
+}

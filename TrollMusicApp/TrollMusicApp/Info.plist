@@ -23,6 +23,10 @@
         <key>NSAllowsArbitraryLoadsInWebContent</key>
         <true/>
     </dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>AS Music uses the microphone only for two things you start yourself: searching by voice, and recording a vocal take over a song in Vocal Studio. Audio never leaves your device.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Voice search transcribes what you say so you can find songs without typing. On-device recognition is used when the language supports it.</string>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UIApplicationSceneManifest</key>

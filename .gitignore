@@ -1,0 +1,6 @@
+.ci-copy/
+__pycache__/
+build.log
+TrollMusicApp.ipa
+Payload/
+DerivedData/

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 
 // ===========================================================================
 // MARK: - Discover ("For You")
@@ -42,6 +43,8 @@ struct DiscoverView: View {
                         }
 
                         statsSection
+                        SmartPlaylistsSection()
+                            .environmentObject(musicManager)
                         aiSection
                         playlistSuggestionsSection
                         tasteSection
@@ -69,7 +72,17 @@ struct DiscoverView: View {
             }
             .navigationTitle("For You")
             .navigationBarTitleDisplayMode(.inline)
-            .onAppear { disco.refresh() }
+            .onAppear {
+                disco.refresh()
+                // The suggestion list is computed from the library + the audio
+                // analysis cache, so show it even before any auto-run fired.
+                if SmartPlaylistEngine.shared.suggestions.isEmpty {
+                    SmartPlaylistEngine.shared.rebuild()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .smartPlaylistsChanged)) { _ in
+                SmartPlaylistEngine.shared.rebuild()
+            }
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .sheet(isPresented: $showAIKey) {
@@ -517,7 +530,11 @@ struct AIKeySetupView: View {
                     footer: Text("1. Open aistudio.google.com and sign in with Google\n2. Tap “Get API key” → “Create API key”\n3. Paste it below — it is stored only on this device. Free tier: generous daily limit.")) {
                 VStack(alignment: .leading, spacing: 8) {
                     SecureField("Paste your Gemini API key", text: $keyInput)
-                    TextField("Model (default: gemini-2.5-flash)", text: $ai.model)
+                    TextField("Model (default: gemini-3.5-flash)", text: $ai.model)
+                    Toggle("Auto model (self-healing)", isOn: $ai.autoModel)
+                        .font(.subheadline)
+                    Text(ai.autoModel ? "On: the app switches models automatically when Google retires one." : "Off: always use the model above.")
+                        .font(.caption).foregroundColor(.secondary)
                 }
                 .autocorrectionDisabled()
             }
