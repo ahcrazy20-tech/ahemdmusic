@@ -397,7 +397,7 @@ struct QueueControlIntent: AppIntent {
             case .shuffle: mm.isShuffle.toggle(); return mm.isShuffle ? "Shuffle on." : "Shuffle off."
             }
         }
-        return .result(dialog: Text(said.isEmpty ? "Done." : said))
+        return .result(dialog: IntentDialog(content: Text(said.isEmpty ? "Done." : said)))
     }
 }
 
@@ -456,7 +456,7 @@ struct GeneratePlaylistIntent: AppIntent {
                 }
             }
         }
-        return .result(dialog: Text(said))
+        return .result(dialog: IntentDialog(content: Text(said)))
     }
 }
 
