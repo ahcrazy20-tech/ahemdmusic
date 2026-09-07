@@ -16,8 +16,11 @@ struct DiscoverView: View {
     @ObservedObject private var disco = DiscoveryManager.shared
     @StateObject private var downloader = SmartDownloaderManager()
     @ObservedObject private var dc = DownloadCenter.shared
+    @ObservedObject private var ai = GeminiAI.shared
 
     @State private var queuedIDs: Set<String> = []
+    @State private var aiPrompt = ""
+    @State private var showAIKey = false
 
     var body: some View {
         NavigationView {
@@ -38,6 +41,8 @@ struct DiscoverView: View {
                             errorCard(err)
                         }
 
+                        statsSection
+                        aiSection
                         playlistSuggestionsSection
                         tasteSection
                         recommendationsSection
@@ -67,6 +72,9 @@ struct DiscoverView: View {
             .onAppear { disco.refresh() }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .sheet(isPresented: $showAIKey) {
+            NavigationView { AIKeySetupView() }
+        }
     }
 
     // MARK: Header
@@ -286,7 +294,28 @@ struct DiscoverView: View {
         Group {
             if !disco.trending.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
-                    sectionTitle("Trending Now", icon: "chart.line.uptrend.xyaxis", tint: .green)
+                    HStack {
+                        sectionTitle("Trending Now", icon: "chart.line.uptrend.xyaxis", tint: .green)
+                        Spacer()
+                        Menu {
+                            ForEach(ChartRegion.allCases) { r in
+                                Button {
+                                    disco.setChart(r.rawValue)
+                                } label: {
+                                    if disco.chartCode == r.rawValue {
+                                        Label(r.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(r.displayName)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Text(ChartRegion(rawValue: disco.chartCode)?.displayName ?? "Egypt")
+                                .font(.caption.bold()).foregroundColor(AppTheme.accent)
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(Color.white.opacity(0.1)).cornerRadius(12)
+                        }
+                    }
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
                             ForEach(disco.trending) { track in
@@ -329,6 +358,142 @@ struct DiscoverView: View {
         }
     }
 
+    // MARK: Your Listening stats
+
+    private var statsSection: some View {
+        let stats = ListenHistory.shared.stats()
+        return Group {
+            if stats.totalPlays > 0 {
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionTitle("Your Listening", icon: "chart.bar.fill", tint: .orange)
+                    VStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            statCell(value: String(stats.totalPlays), label: "Total plays", icon: "play.circle.fill")
+                            statCell(value: String(stats.weekPlays), label: "This week", icon: "calendar")
+                        }
+                        HStack(spacing: 10) {
+                            if !stats.topSongTitle.isEmpty {
+                                statCell(value: stats.topSongTitle, label: "Most played", icon: "crown.fill", isText: true)
+                            }
+                            if !stats.topArtistName.isEmpty {
+                                statCell(value: stats.topArtistName, label: "Top artist", icon: "person.fill", isText: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func statCell(value: String, label: String, icon: String, isText: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: icon).font(.caption2).foregroundColor(AppTheme.accent)
+                Text(value)
+                    .font(isText ? .caption2.bold() : .title3.bold())
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+            }
+            Text(label).font(.system(size: 10)).foregroundColor(.gray)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color.white.opacity(0.06))
+        .cornerRadius(10)
+    }
+
+    // MARK: AI assistant (optional — user's own free Gemini key)
+
+    private var aiSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("AI Music Assistant", icon: "sparkles.tv", tint: AppTheme.accent)
+            if !ai.isConfigured {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Ask for songs in plain language — for example “5 new Egyptian pop songs about summer” — and download the results in one tap. Free, powered by your own Google Gemini key.")
+                        .font(.caption).foregroundColor(.gray)
+                    Button {
+                        showAIKey = true
+                    } label: {
+                        Label("Set up (free key)", systemImage: "key.fill")
+                            .font(.subheadline.bold()).foregroundColor(.white)
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                            .background(AppTheme.accent).cornerRadius(16)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(Color.white.opacity(0.05))
+                .cornerRadius(14)
+            } else {
+                HStack(spacing: 8) {
+                    TextField("Ask… e.g. 5 new Wegz songs", text: $aiPrompt)
+                        .font(.subheadline)
+                        .submitLabel(.send)
+                        .onSubmit { sendAIPrompt() }
+                        .padding(.horizontal, 12).padding(.vertical, 9)
+                        .background(Color.white.opacity(0.08)).cornerRadius(12)
+                    Button { sendAIPrompt() } label: {
+                        Image(systemName: "paperplane.fill").foregroundColor(.white)
+                            .padding(10)
+                            .background(AppTheme.accent).clipShape(Circle())
+                    }
+                    .disabled(ai.isThinking || aiPrompt.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if ai.isThinking {
+                    HStack(spacing: 8) {
+                        ProgressView().tint(.white)
+                        Text("Thinking…").font(.caption).foregroundColor(.white.opacity(0.7))
+                    }
+                }
+                if let err = ai.lastError {
+                    Text(err).font(.caption).foregroundColor(.orange)
+                }
+                ForEach(ai.suggestions) { track in
+                    aiRow(track)
+                }
+            }
+        }
+    }
+
+    private func sendAIPrompt() {
+        let p = aiPrompt.trimmingCharacters(in: .whitespaces)
+        guard !p.isEmpty, !ai.isThinking else { return }
+        hideKeyboard()
+        ai.ask(p)
+    }
+
+    private func aiRow(_ track: DiscoTrack) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                generateColor(for: track.title)
+                Image(systemName: "music.note").foregroundColor(.white)
+            }
+            .frame(width: 46, height: 46).cornerRadius(8)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(track.title).font(.subheadline.bold()).foregroundColor(.white).lineLimit(1)
+                Text(track.artist).font(.caption).foregroundColor(.gray).lineLimit(1)
+                Text(track.reason).font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(AppTheme.accent).lineLimit(1)
+            }
+            Spacer()
+            if queuedIDs.contains(track.id) {
+                Image(systemName: "checkmark.circle.fill").font(.title2).foregroundColor(.green)
+            } else {
+                Button {
+                    queuedIDs.insert(track.id)
+                    downloader.downloadDiscoTrack(artist: track.artist, title: track.title,
+                                                  thumbnail: track.albumCover) { ok in
+                        if !ok { queuedIDs.remove(track.id) }
+                    }
+                } label: {
+                    Image(systemName: "arrow.down.circle.fill").font(.title2).foregroundColor(AppTheme.accent)
+                }.buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 6).padding(.horizontal, 10)
+        .background(Color.white.opacity(0.05)).cornerRadius(10)
+    }
+
     // MARK: Helpers
 
     private func sectionTitle(_ text: String, icon: String, tint: Color) -> some View {
@@ -336,5 +501,42 @@ struct DiscoverView: View {
             Image(systemName: icon).foregroundColor(tint)
             Text(text).font(.headline).foregroundColor(.white)
         }
+    }
+}
+
+// MARK: - AI key setup sheet
+
+struct AIKeySetupView: View {
+    @ObservedObject private var ai = GeminiAI.shared
+    @State private var keyInput = ""
+    @Environment(\.presentationMode) var pm
+
+    var body: some View {
+        Form {
+            Section(header: Text("Get your free key"),
+                    footer: Text("1. Open aistudio.google.com and sign in with Google\n2. Tap “Get API key” → “Create API key”\n3. Paste it below — it is stored only on this device. Free tier: generous daily limit.")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    SecureField("Paste your Gemini API key", text: $keyInput)
+                    TextField("Model (default: gemini-2.5-flash)", text: $ai.model)
+                }
+                .autocorrectionDisabled()
+            }
+            Button {
+                ai.key = keyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                keyInput = ""
+                pm.wrappedValue.dismiss()
+            } label: {
+                Text("Save key").frame(maxWidth: .infinity).bold()
+            }
+            .disabled(keyInput.trimmingCharacters(in: .whitespaces).count < 10)
+        }
+        .navigationTitle("AI Assistant")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Cancel") { pm.wrappedValue.dismiss() }
+            }
+        }
+        .onAppear { keyInput = ai.key }
     }
 }

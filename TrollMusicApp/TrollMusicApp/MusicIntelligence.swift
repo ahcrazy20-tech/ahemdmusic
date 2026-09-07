@@ -102,9 +102,12 @@ enum DeezerAPI {
         }
     }
 
-    /// Global / regional chart tracks.
-    static func chartTracks(limit: Int = 25, completion: @escaping ([DiscoTrack]) -> Void) {
-        get("/chart/0/tracks?limit=\(limit)") { j in
+    /// Global / regional chart tracks (free, no key).
+    /// `region` is a Deezer country code ("eg", "sa", "ma", "us", "gb", "fr")
+    /// or "0" for worldwide.
+    static func chartTracks(limit: Int = 25, region: String = "0", completion: @escaping ([DiscoTrack]) -> Void) {
+        let code = region.isEmpty ? "0" : region
+        get("/chart/\(code)/tracks?limit=\(limit)") { j in
             completion(parseTracks(j?["data"] as? [[String: Any]], reasonFallback: "Trending now"))
         }
     }
@@ -158,23 +161,45 @@ class DiscoveryManager: ObservableObject {
     @Published var trending: [DiscoTrack] = []
     @Published var isLoading = false
     @Published var lastError: String? = nil
+    /// Chart region for the trending row (Deezer country code).
+    @Published var chartCode: String = UserDefaults.standard.string(forKey: "asmusic_chart") ?? "eg" {
+        didSet { UserDefaults.standard.set(chartCode, forKey: "asmusic_chart") }
+    }
 
     private var lastRefresh: Date = .distantPast
 
     private init() {}
 
+    /// Switch the trending region and reload it immediately.
+    func setChart(_ code: String) {
+        chartCode = code
+        loadTrending()
+    }
+
+    /// (Re)loads the trending row for the selected region.
+    func loadTrending() {
+        DeezerAPI.chartTracks(limit: 25, region: chartCode) { [weak self] tracks in
+            guard let self = self else { return }
+            let have = self.librarySignatures()
+            let filtered = tracks.filter { !have.contains($0.id) }
+            DispatchQueue.main.async { self.trending = filtered }
+        }
+    }
+
     // ---- Taste profile ---------------------------------------------------
 
-    /// Count how often each artist appears in the Library, weighting Liked
-    /// songs more heavily. Returns the artists sorted by that weight.
+    /// Weight each artist by how much you actually enjoy them: Liked songs
+    /// count 3x, plus real play history (what you press play on, not just
+    /// what you download). Returns the artists sorted by that weight.
     private func libraryArtistWeights() -> [(artist: String, weight: Int)] {
         let mm = MusicManager.shared
+        let history = ListenHistory.shared
         let likedIDs = Set(mm.playlists.first(where: { $0.name == "Liked Songs" })?.songIDs ?? [])
         var weights: [String: Int] = [:]
         for song in mm.songs {
             let a = song.artist.trimmingCharacters(in: .whitespaces)
             guard !a.isEmpty, a != "AS Music", a != "YouTube", a != "SoundCloud" else { continue }
-            weights[a, default: 0] += likedIDs.contains(song.id) ? 3 : 1
+            weights[a, default: 0] += history.tasteWeight(for: song, isLiked: likedIDs.contains(song.id))
         }
         return weights.sorted { $0.value > $1.value }.map { (artist: $0.key, weight: $0.value) }
     }
@@ -198,16 +223,11 @@ class DiscoveryManager: ObservableObject {
         }
 
         // Always load a trending row as a fallback / discovery source.
-        DeezerAPI.chartTracks(limit: 25) { [weak self] tracks in
-            guard let self = self else { return }
-            let have = self.librarySignatures()
-            let filtered = tracks.filter { !have.contains($0.id) }
-            DispatchQueue.main.async { self.trending = filtered }
-        }
+        loadTrending()
 
         guard !weighted.isEmpty else {
             // Empty library — recommend from the chart so there's still value.
-            DeezerAPI.chartTracks(limit: 30) { [weak self] tracks in
+            DeezerAPI.chartTracks(limit: 30, region: chartCode) { [weak self] tracks in
                 guard let self = self else { return }
                 DispatchQueue.main.async {
                     self.recommendations = Array(tracks.prefix(30))

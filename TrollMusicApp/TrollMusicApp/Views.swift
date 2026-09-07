@@ -43,6 +43,117 @@ struct VisualizerView: View {
     }
 }
 
+// Real audio-reactive spectrum: 24 log-spaced bands from a live FFT in the
+// audio engine (SpectrumMeter), not fake jitter.
+struct SpectrumView: View {
+    @ObservedObject private var mm = MusicManager.shared
+    @State private var bars: [CGFloat] = Array(repeating: 3, count: SpectrumMeter.bands)
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<SpectrumMeter.bands, id: \.self) { i in
+                Capsule()
+                    .fill(LinearGradient(colors: [AppTheme.accent.opacity(0.55), AppTheme.accent],
+                                         startPoint: .bottom, endPoint: .top))
+                    .frame(width: 3, height: max(3, bars[i]))
+            }
+        }
+        .frame(height: 36, alignment: .bottom)
+        .onReceive(Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()) { _ in
+            guard mm.isPlaying else {
+                withAnimation(.easeOut(duration: 0.35)) { bars = bars.map { _ in 3 } }
+                return
+            }
+            let vals = mm.spectrum.read()
+            let target: [CGFloat] = vals.map { db in
+                // -55 dB … -10 dB maps to the full bar height.
+                let n = max(0.0, min(1.0, (Double(db) + 55.0) / 45.0))
+                return 3 + CGFloat(n) * 31
+            }
+            withAnimation(.easeOut(duration: 0.05)) { bars = target }
+        }
+    }
+}
+
+// "About the artist" — short bio + photo from the free Wikipedia API.
+struct ArtistInfoView: View {
+    let artist: String
+    var genre: String? = nil
+    @State private var bio: ArtistBio? = nil
+    @State private var failed = false
+    @Environment(\.presentationMode) var pm
+
+    var body: some View {
+        ZStack {
+            if bio == nil && !failed {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Finding \(artist)…").font(.caption).foregroundColor(.secondary)
+                }
+            } else if let bio = bio {
+                ScrollView {
+                    VStack(spacing: 16) {
+                        ZStack {
+                            if let t = bio.thumbnail, let u = URL(string: t) {
+                                AsyncImage(url: u) { phase in
+                                    if let im = phase.image { im.resizable().scaledToFill() }
+                                    else { generateColor(for: bio.name) }
+                                }
+                            } else {
+                                generateColor(for: bio.name)
+                                Text(String(bio.name.prefix(1))).font(.system(size: 64, weight: .black))
+                                    .foregroundColor(.white)
+                            }
+                        }
+                        .frame(width: 180, height: 180)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .shadow(radius: 12, y: 6)
+                        .padding(.top, 20)
+
+                        Text(bio.name).font(.title2.bold())
+                        if let g = genre, !g.isEmpty {
+                            Text(g)
+                                .font(.caption.bold())
+                                .padding(.horizontal, 10).padding(.vertical, 4)
+                                .background(AppTheme.accent.opacity(0.15))
+                                .foregroundColor(AppTheme.accent)
+                                .cornerRadius(12)
+                        }
+                        Text(bio.extract)
+                            .font(.subheadline)
+                            .foregroundColor(.primary.opacity(0.85))
+                            .lineSpacing(5)
+                            .padding(.horizontal)
+                        Link(destination: URL(string: bio.pageURL) ?? URL(string: "https://en.wikipedia.org")!) {
+                            Label("Open full article", systemImage: "arrow.up.forward.square")
+                                .font(.subheadline.bold())
+                        }
+                        .padding(.bottom, 24)
+                    }
+                }
+            } else {
+                VStack(spacing: 10) {
+                    Image(systemName: "person.crop.circle.badge.questionmark")
+                        .font(.system(size: 44)).foregroundColor(.secondary)
+                    Text("No info found for \(artist)").font(.subheadline).foregroundColor(.secondary)
+                }
+            }
+        }
+        .navigationTitle(artist)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Done") { pm.wrappedValue.dismiss() }
+            }
+        }
+        .onAppear {
+            WikipediaAPI.fetch(artist) { b in
+                bio = b
+                if b == nil { failed = true }
+            }
+        }
+    }
+}
+
 // Reusable artwork view with async image + blur support
 struct ArtworkView: View {
     let song: Song
@@ -520,6 +631,7 @@ struct FullPlayerView: View {
     @State private var showLyrics = false
     @State private var showEQ = false
     @State private var showTheme = false
+    @State private var showArtistInfo = false
 
     var body: some View {
         ZStack {
@@ -549,10 +661,20 @@ struct FullPlayerView: View {
                             .font(.subheadline).bold().foregroundColor(.white).lineLimit(1)
                     }
                     Spacer()
+                    if let song = musicManager.currentSong {
+                        Button { showArtistInfo = true } label: {
+                            Image(systemName: "info.circle").font(.title3).foregroundColor(.white)
+                        }
+                        .accessibilityLabel("About the artist")
+                    }
                     Menu {
                         Button { musicManager.setSleepTimer(minutes: 15) } label: { Label("15 min sleep", systemImage: "moon.zzz") }
                         Button { musicManager.setSleepTimer(minutes: 30) } label: { Label("30 min sleep", systemImage: "moon.zzz") }
                         Button { musicManager.setSleepTimer(minutes: 60) } label: { Label("60 min sleep", systemImage: "moon.zzz") }
+                        Toggle("Stop at song end", isOn: Binding(
+                            get: { musicManager.stopAtSongEnd },
+                            set: { musicManager.stopAtSongEnd = $0 }
+                        ))
                         if musicManager.sleepTimerMinutes > 0 {
                             Button(role: .destructive) { musicManager.setSleepTimer(minutes: 0) } label: { Label("Cancel sleep", systemImage: "moon.zzz.slash") }
                         }
@@ -610,6 +732,12 @@ struct FullPlayerView: View {
                         HStack(spacing: 6) {
                             Text(musicManager.currentSong?.artist.isEmpty == false ? musicManager.currentSong!.artist : "AS Music")
                                 .font(.subheadline).foregroundColor(.white.opacity(0.7)).lineLimit(1)
+                            if let g = musicManager.currentSong?.genre, !g.isEmpty {
+                                Text(g)
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(AppTheme.accent.opacity(0.9))
+                                    .lineLimit(1)
+                            }
                             if musicManager.isPlaying && !showLyrics { VisualizerView().padding(.leading, 4) }
                         }
                     }
@@ -650,6 +778,11 @@ struct FullPlayerView: View {
                         Text(musicManager.formatTime(musicManager.duration)).font(.caption).foregroundColor(.gray)
                     }
                 }.padding(.horizontal, 30)
+
+                if !showLyrics {
+                    SpectrumView()
+                        .padding(.horizontal, 8)
+                }
 
                 HStack(spacing: 32) {
                     Button { musicManager.isShuffle.toggle() } label: {
@@ -721,6 +854,11 @@ struct FullPlayerView: View {
         }
         .sheet(isPresented: $showTheme) {
             NavigationView { ThemePickerView() }.environmentObject(musicManager)
+        }
+        .sheet(isPresented: $showArtistInfo) {
+            if let song = musicManager.currentSong {
+                NavigationView { ArtistInfoView(artist: song.artist, genre: song.genre) }
+            }
         }
     }
 
@@ -798,6 +936,16 @@ struct EQView: View {
                     Label("Resume last song on launch", systemImage: "arrow.counterclockwise")
                 }
             }
+            Section(header: Text("AI Music Assistant (optional)"),
+                    footer: Text("Paste your FREE Google AI Studio key (aistudio.google.com) to ask for songs in plain language — e.g. \"5 new Egyptian pop songs about summer\". With no key the feature is off and nothing is sent anywhere.")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    SecureField("Gemini API key", text: $ai.key)
+                        .font(.subheadline)
+                    TextField("Model (default: gemini-2.5-flash)", text: $ai.model)
+                        .font(.subheadline)
+                }
+                .autocorrectionDisabled()
+            }
             Section(footer: Text("Tip: Arabic/Maqaam preset boosts oud/qanun highs while keeping warm lows, great for Amr Diab, Sherine, Nancy Ajram.")) {
                 EmptyView()
             }
@@ -859,6 +1007,10 @@ struct LibraryView: View {
         return musicManager.songs.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
     }
 
+    private var recentlyPlayed: [Song] {
+        ListenHistory.shared.recentSongs(limit: 5)
+    }
+
     var body: some View {
         NavigationView {
             List {
@@ -869,6 +1021,15 @@ struct LibraryView: View {
                         Text("Use Magic DL or Web Hub to download songs")
                             .font(.subheadline).foregroundColor(.secondary).multilineTextAlignment(.center)
                     }.padding(.vertical, 60).frame(maxWidth: .infinity)
+                }
+                if !recentlyPlayed.isEmpty {
+                    Section {
+                        ForEach(recentlyPlayed) { song in
+                            songRow(song, isQueued: false)
+                        }
+                    } header: {
+                        Label("Recently Played", systemImage: "clock.arrow.circlepath")
+                    }
                 }
                 Section {
                     if !musicManager.upNextQueue.isEmpty {
@@ -920,8 +1081,11 @@ struct LibraryView: View {
                 }
             }
             .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search your library")
-            .navigationTitle("Your Library").onAppear { musicManager.loadSongs() }
-            .refreshable { musicManager.loadSongs() }
+            .navigationTitle("Your Library").onAppear {
+                musicManager.loadSongs()
+                ITunesEnricher.shared.enrichLibrary()
+            }
+            .refreshable { musicManager.loadSongs(); ITunesEnricher.shared.enrichLibrary() }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
@@ -1188,12 +1352,29 @@ struct SmartDownloaderView: View {
                             }
                         }.padding(.horizontal)
 
-                        // Trending in Egypt
+                        // Trending (region selectable — free Deezer/Piped charts)
                         VStack(alignment: .leading, spacing: 10) {
                             HStack {
                                 Image(systemName: "chart.bar.fill").foregroundColor(.green)
-                                Text("Trending in Egypt").font(.subheadline.bold()).foregroundColor(.white)
+                                Text("Trending in \(ChartRegion(rawValue: downloader.trendRegion)?.displayName ?? "Egypt")")
+                                    .font(.subheadline.bold()).foregroundColor(.white)
                                 Spacer()
+                                Menu {
+                                    ForEach(ChartRegion.allCases) { r in
+                                        Button {
+                                            downloader.trendingResults = []
+                                            downloader.loadTrending(region: r.rawValue)
+                                        } label: {
+                                            if downloader.trendRegion == r.rawValue {
+                                                Label(r.displayName, systemImage: "checkmark")
+                                            } else {
+                                                Text(r.displayName)
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "globe").foregroundColor(AppTheme.accent).font(.caption.bold())
+                                }
                                 if downloader.isLoadingTrending {
                                     ProgressView().tint(.white)
                                 } else {
