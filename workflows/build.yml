@@ -1,17 +1,21 @@
 name: Build TrollMusicApp
 
 # ---------------------------------------------------------------------------
-# THIS IS THE FIXED WORKFLOW — copy it over .github/workflows/build.yml once.
+# This is the workflow that belongs at .github/workflows/build.yml.
 #
-# The old build.yml carried a COPY of every Swift file inside itself: its first
-# steps deleted the real sources (`find . -name "*.swift" -delete`) and wrote
-# those embedded copies back. So editing the app in this repo changed nothing
-# in the IPA — the build kept compiling whatever snapshot was pasted into the
-# workflow months ago.
+# The OLD one carried a copy of every Swift file inside itself: its first steps
+# deleted the real sources (`find . -name "*.swift" -delete`) and wrote those
+# frozen copies back. Editing the app in this repo therefore changed nothing in
+# the IPA — the build kept compiling a snapshot from months ago. That is why
+# whole features (AI playlists, duplicate finder, lyrics, …) "were added" and
+# still never showed up in the installed app.
 #
-# This version simply compiles the files that are in the repository. It is
-# ~140 lines instead of ~8000, and it never needs to be regenerated again:
-# from now on, whatever is in TrollMusicApp/TrollMusicApp/ is what ships.
+# This one is 30 lines and never needs to be regenerated: it runs
+# `scripts/ci_build.sh`, which compiles whatever is in
+# TrollMusicApp/TrollMusicApp/. Add a .swift file to the repo and it ships.
+#
+# INSTALL (once, by hand — the assistant's GitHub App cannot write here):
+#   keep this file's contents at .github/workflows/build.yml
 # ---------------------------------------------------------------------------
 
 on:
@@ -22,7 +26,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # post compile errors back on the commit
+  actions: write    # upload the IPA + build log
 
 concurrency:
   group: build-${{ github.ref }}
@@ -41,141 +46,8 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Clean build leftovers
-        run: |
-          # Only build artifacts and the unused legacy project stub — the
-          # SOURCES ARE NEVER DELETED any more.
-          rm -rf TrollMusicApp/*.xcodeproj
-          rm -rf TrollMusicApp.xcodeproj build Payload TrollMusicApp.ipa
-
-      - name: Show what will be compiled
-        run: |
-          echo "Swift files in the repo:"
-          ls -1 TrollMusicApp/TrollMusicApp/*.swift | sed 's|.*/||'
-          echo "count: $(ls -1 TrollMusicApp/TrollMusicApp/*.swift | wc -l | tr -d ' ')"
-
-      - name: Create Project Config (Signing Disabled)
-        run: |
-          cat << 'YAML' > project.yml
-          name: TrollMusicApp
-          options:
-            bundleIdPrefix: com.ahmedsoliman
-            deploymentTarget:
-              iOS: "16.0"
-          settings:
-            # Pin the language mode. Xcode 26's toolchain defaults new targets
-            # to Swift 6, whose strict-concurrency checking turns this app's
-            # perfectly valid Swift 5 code into hard errors.
-            SWIFT_VERSION: "5.0"
-            CODE_SIGNING_ALLOWED: NO
-            CODE_SIGNING_REQUIRED: NO
-            CODE_SIGN_IDENTITY: ""
-            DEVELOPMENT_TEAM: ""
-            PROVISIONING_PROFILE: ""
-          targets:
-            TrollMusicApp:
-              type: application
-              platform: iOS
-              deploymentTarget: "16.0"
-              sources:
-                - path: TrollMusicApp/TrollMusicApp
-                  excludes:
-                    - "Preview Content"
-              info:
-                path: TrollMusicApp/TrollMusicApp/Info.plist
-                properties:
-                  UILaunchScreen: {}
-                  UIBackgroundModes: [audio]
-                  # ATS stays ON for our own API traffic (every backend we use
-                  # is HTTPS). Only the in-app WKWebView is allowed to load
-                  # plain HTTP pages.
-                  NSAppTransportSecurity:
-                    NSAllowsArbitraryLoads: false
-                    NSAllowsArbitraryLoadsInWebContent: true
-              settings:
-                GENERATE_INFOPLIST_FILE: NO
-                ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-                DEVELOPMENT_ASSET_PATHS: "DummyAssets"
-                CODE_SIGNING_ALLOWED: NO
-                CODE_SIGNING_REQUIRED: NO
-                CODE_SIGN_IDENTITY: ""
-                DEVELOPMENT_TEAM: ""
-          YAML
-          mkdir -p TrollMusicApp/TrollMusicApp/Preview\ Content
-          mkdir -p DummyAssets
-          test -f TrollMusicApp/TrollMusicApp/Info.plist
-
-      - name: Generate Icon
-        run: |
-          mkdir -p TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset
-          cat << 'ICON' > /tmp/make_icon.swift
-          import AppKit
-          let size = CGSize(width: 1024, height: 1024)
-          let img = NSImage(size: size)
-          img.lockFocus()
-          let ctx = NSGraphicsContext.current!.cgContext
-          let colors = [NSColor.systemPurple.cgColor, NSColor.black.cgColor] as CFArray
-          let grad = CGGradient(colorsSpace: nil, colors: colors, locations: [0.0, 1.0])!
-          ctx.drawLinearGradient(grad, start: CGPoint(x: 0, y: 1024), end: CGPoint(x: 1024, y: 0), options: [])
-          let attr: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 500), .foregroundColor: NSColor.white]
-          let str = NSAttributedString(string: "AS", attributes: attr)
-          let r = str.boundingRect(with: size, options: .usesLineFragmentOrigin)
-          str.draw(at: NSPoint(x: (size.width - r.width)/2, y: (size.height - r.height)/2 - 80))
-          img.unlockFocus()
-          let data = img.tiffRepresentation!
-          let rep = NSBitmapImageRep(data: data)!
-          let png = rep.representation(using: .png, properties: [:])!
-          let u = URL(fileURLWithPath: "TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/icon-1024.png")
-          try! png.write(to: u)
-          ICON
-          swift /tmp/make_icon.swift
-          echo '{ "images": [ { "filename": "icon-1024.png", "idiom": "universal", "platform": "ios", "size": "1024x1024" } ], "info": { "author": "xcode", "version": 1 } }' > TrollMusicApp/TrollMusicApp/Assets.xcassets/AppIcon.appiconset/Contents.json
-          echo '{ "info": { "version": 1, "author": "xcode" } }' > TrollMusicApp/TrollMusicApp/Assets.xcassets/Contents.json
-
-      - name: Install XcodeGen
-        run: |
-          if ! command -v xcodegen >/dev/null 2>&1; then
-            brew install xcodegen
-          fi
-          xcodegen --version
-
-      - name: Generate Project
-        run: xcodegen generate --spec project.yml
-
-      - name: Build and Archive
-        run: |
-          set -o pipefail
-          xcodebuild archive \
-            -project TrollMusicApp.xcodeproj \
-            -scheme TrollMusicApp \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination "generic/platform=iOS" \
-            -archivePath "$PWD/build/TrollMusicApp.xcarchive" \
-            SWIFT_VERSION=5.0 \
-            IPHONEOS_DEPLOYMENT_TARGET=16.0 \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE="" \
-            DEVELOPMENT_ASSET_PATHS="" \
-            2>&1 | tee build.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            echo "----- COMPILE ERRORS -----"
-            grep -E "error:" build.log | sort -u | head -40 | while IFS= read -r line; do
-              echo "::error::${line}"
-            done
-            {
-              echo "### Build failed"
-              echo ""
-              echo '```'
-              grep -E "error:" build.log | sort -u | head -40
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-          exit "$status"
+      - name: Build the app from the repo's own sources
+        run: bash scripts/ci_build.sh
 
       - name: Upload build log
         if: always()
@@ -186,17 +58,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Package IPA
-        run: |
-          mkdir -p Payload
-          cp -R "build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app" Payload/
-          /usr/bin/zip -r TrollMusicApp.ipa Payload
-          test -f TrollMusicApp.ipa
-
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: TrollMusicApp-IPA
           path: TrollMusicApp.ipa
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30

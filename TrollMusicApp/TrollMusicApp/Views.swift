@@ -1012,13 +1012,34 @@ struct LibraryView: View {
     @State private var showRecentlyDeleted = false
     @State private var showHealth = false
     @State private var showBackup = false
+    @State private var showArtists = false
+    @State private var showNameTidy = false
+    @State private var songToEdit: Song? = nil
     @AppStorage("asmusic_lib_sort") private var sortRaw: String = LibrarySort.title.rawValue
+    @AppStorage("asmusic_lib_filter") private var filterRaw: String = LibraryFilter.all.rawValue
+
+    private var currentFilter: LibraryFilter { LibraryFilter(rawValue: filterRaw) ?? .all }
+
+    private var filterBinding: Binding<LibraryFilter> {
+        Binding(get: { LibraryFilter(rawValue: filterRaw) ?? .all },
+                set: { filterRaw = $0.rawValue })
+    }
+
+    private var filterCounts: [LibraryFilter: Int] {
+        var out: [LibraryFilter: Int] = [:]
+        for f in LibraryFilter.allCases {
+            out[f] = applyLibraryFilter(f, to: musicManager.songs).count
+        }
+        return out
+    }
 
     /// Searches title AND artist AND genre, ranked by where the match is —
-    /// a title hit beats an artist hit beats a genre hit.
+    /// a title hit beats an artist hit beats a genre hit. The lens (All / New /
+    /// Unplayed / …) is applied first, so search works inside it.
     var filteredSongs: [Song] {
+        let base = applyLibraryFilter(currentFilter, to: musicManager.songs)
         let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return sorted(musicManager.songs) }
+        guard !q.isEmpty else { return sorted(base) }
         func score(_ s: Song) -> Int {
             let t = s.title.lowercased()
             let a = s.artist.lowercased()
@@ -1029,7 +1050,7 @@ struct LibraryView: View {
             if g.contains(q) { return 1 }
             return 0
         }
-        return musicManager.songs
+        return base
             .compactMap { s -> (song: Song, rank: Int)? in
                 let r = score(s)
                 return r > 0 ? (s, r) : nil
@@ -1039,6 +1060,23 @@ struct LibraryView: View {
                 return l.song.title.localizedCaseInsensitiveCompare(r.song.title) == .orderedAscending
             }
             .map { $0.song }
+    }
+
+    private var emptyReason: String {
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        if !q.isEmpty {
+            return currentFilter == .all
+                ? "No matches for “\(q)”"
+                : "No “\(q)” in \(currentFilter.rawValue)"
+        }
+        return "Nothing in \(currentFilter.rawValue) yet"
+    }
+
+    private var emptyHint: String {
+        if searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+            return currentFilter.explanation + " Tap All to see the whole library."
+        }
+        return "Search looks at titles, artists and genres."
     }
 
     private func sorted(_ list: [Song]) -> [Song] {
@@ -1114,6 +1152,70 @@ struct LibraryView: View {
                         Label("Recently Played", systemImage: "clock.arrow.circlepath")
                     }
                 }
+
+                // The duplicate check used to live only as a small icon in the
+                // nav bar, which is exactly why it kept being reported as
+                // "missing". It is now a labelled row in the library itself.
+                if !musicManager.songs.isEmpty {
+                    Section {
+                        Button { showDuplicateDoctor = true } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.body)
+                                    .foregroundColor(doctor.redundantCount > 0 ? .red : AppTheme.accent)
+                                    .frame(width: 26)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(doctor.redundantCount > 0
+                                         ? "Duplicates found — \(doctor.redundantCount) extra copies"
+                                         : "Check for duplicate songs")
+                                        .font(.subheadline.bold())
+                                        .foregroundColor(.primary)
+                                    Text(doctor.redundantCount > 0
+                                         ? "\(doctor.groups.count) group\(doctor.groups.count == 1 ? "" : "s") · \(DoctorFormat.mb(doctor.totalReclaimable)) to reclaim · you decide what goes"
+                                         : "Compares names, then how the files actually sound.")
+                                        .font(.caption2).foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                if doctor.isScanning {
+                                    ProgressView().scaleEffect(0.7)
+                                } else {
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption).foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        HStack(spacing: 8) {
+                            Button { musicManager.shuffleAll() } label: {
+                                Label("Shuffle all", systemImage: "shuffle")
+                            }
+                            Spacer()
+                            Button { PlayQueues.play(filteredSongs, shuffled: false) } label: {
+                                Label("Play \(filteredSongs.count)", systemImage: "play.fill")
+                            }
+                            .disabled(filteredSongs.isEmpty)
+                            Spacer()
+                            Button { showArtists = true } label: {
+                                Label("Artists", systemImage: "person.2")
+                            }
+                        }
+                        .font(.subheadline.bold())
+                        .foregroundColor(AppTheme.accent)
+                        .buttonStyle(.borderless)
+                    } header: {
+                        Label("Library tools", systemImage: "wrench.and.screwdriver")
+                    }
+                }
+
+                if !musicManager.songs.isEmpty {
+                    Section {
+                        FilterChipRow(selection: filterBinding) { f in filterCounts[f] ?? 0 }
+                            .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                        if currentFilter != .all {
+                            Text(currentFilter.explanation)
+                                .font(.caption2).foregroundColor(.secondary)
+                        }
+                    }
+                }
                 Section {
                     if !musicManager.upNextQueue.isEmpty {
                         ForEach(musicManager.upNextQueue) { song in
@@ -1132,14 +1234,16 @@ struct LibraryView: View {
                     }
                 }
                 Section {
-                    if filteredSongs.isEmpty && !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+                    if filteredSongs.isEmpty && !musicManager.songs.isEmpty {
                         VStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass")
+                            Image(systemName: currentFilter == .all ? "magnifyingglass" : currentFilter.icon)
                                 .font(.title2).foregroundColor(.secondary)
-                            Text("No matches for “\(searchText)”")
+                            Text(emptyReason)
                                 .font(.subheadline).foregroundColor(.secondary)
-                            Text("Search finds titles, artists and genres.")
+                                .multilineTextAlignment(.center)
+                            Text(emptyHint)
                                 .font(.caption2).foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 24)
@@ -1172,7 +1276,11 @@ struct LibraryView: View {
                                     }
                                 }
                                 Button { musicManager.shareSong(song) } label: { Label("Share", systemImage: "square.and.arrow.up") }
+                                Button { _ = AcousticRadio.play(similarTo: song) } label: {
+                                    Label("More like this", systemImage: "waveform.path.ecg")
+                                }
                                 Button { showingRenameFor = song; newNameInput = song.title } label: { Label("Rename", systemImage: "pencil") }
+                                Button { songToEdit = song } label: { Label("Song info…", systemImage: "info.circle") }
                                 Divider()
                                 Button(role: .destructive) { musicManager.deleteSong(song) } label: { Label("Delete", systemImage: "trash") }
                             }
@@ -1212,6 +1320,15 @@ struct LibraryView: View {
             }
             .sheet(isPresented: $showBackup) {
                 BackupView().environmentObject(musicManager)
+            }
+            .sheet(isPresented: $showArtists) {
+                ArtistsBrowserView().environmentObject(musicManager)
+            }
+            .sheet(isPresented: $showNameTidy) {
+                NameTidyView().environmentObject(musicManager)
+            }
+            .sheet(item: $songToEdit) { song in
+                SongInfoEditorView(song: song).environmentObject(musicManager)
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -1268,6 +1385,14 @@ struct LibraryView: View {
                                   : "Find Duplicates",
                                   systemImage: "doc.on.doc")
                         }
+                        Button { showArtists = true } label: {
+                            Label("Artists", systemImage: "person.2")
+                        }
+                        let messy = filterCounts[.messy] ?? 0
+                        Button { showNameTidy = true } label: {
+                            Label(messy > 0 ? "Tidy up names (\(messy))" : "Tidy up names",
+                                  systemImage: "textformat.abc")
+                        }
                         Button { showHealth = true } label: {
                             Label("Library Health", systemImage: "heart.text.square")
                         }
@@ -1295,7 +1420,9 @@ struct LibraryView: View {
                         ForEach(musicManager.playlists) { pl in
                             Button("Add to \(pl.name)") { musicManager.addSongToPlaylist(song: song, playlist: pl) }
                         }
+                        Button("More Like This") { _ = AcousticRadio.play(similarTo: song) }
                         Button("Rename Song") { showingRenameFor = song; newNameInput = song.title }
+                        Button("Song Info…") { songToEdit = song }
                         Button("Share") { musicManager.shareSong(song) }
                         Button("Delete", role: .destructive) { musicManager.deleteSong(song) }
                     }
