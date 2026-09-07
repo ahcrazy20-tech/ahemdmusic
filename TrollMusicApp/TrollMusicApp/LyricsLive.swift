@@ -222,10 +222,12 @@ final class LiveLyrics: ObservableObject {
     func pinToFile(for song: Song) -> Bool {
         let text: String
         if kind == .synced {
-            text = lines.map { l in
-                let m = Int(l.time) / 60, s = Int(l.time) % 60
+            text = lines.map { l -> String in
+                let m = Int(l.time) / 60
+                let sec = Int(l.time) % 60
                 let cs = Int((l.time - floor(l.time)) * 100)
-                return String(format: "[%02d:%02d.%02d]%@", m, s, cs, l.text)
+                let stamp = String(format: "[%02d:%02d.%02d]", m, sec, cs)
+                return stamp + l.text
             }.joined(separator: "\n")
         } else {
             text = plain

@@ -249,7 +249,7 @@ final class LibraryDoctor: ObservableObject {
     /// Groups un-matched songs by their measured sound.
     private func acousticGroups(from songs: [Song], likedIDs: Set<UUID>) -> [DuplicateGroup] {
         let lab = AudioLab.shared
-        let measured: [(Song, TrackFeatures)] = songs.compactMap { s in
+        let measured: [(Song, TrackFeatures)] = songs.compactMap { s -> (Song, TrackFeatures)? in
             guard let f = lab.features(for: s), f.duration > 20 else { return nil }
             return (s, f)
         }
@@ -280,8 +280,8 @@ final class LibraryDoctor: ObservableObject {
 
         let history = ListenHistory.shared
         let fm = FileManager.default
-        return clusters.compactMap { cluster in
-            var facts: [DuplicateSong] = cluster.map { pair in
+        return clusters.compactMap { cluster -> DuplicateGroup? in
+            var facts: [DuplicateSong] = cluster.map { pair -> DuplicateSong in
                 let (s, f) = pair
                 let size = ((try? fm.attributesOfItem(atPath: s.url.path)[.size]) as? Int64) ?? 0
                 let kbps = f.duration > 1 ? Int(Double(size) * 8.0 / (f.duration * 1000.0)) : 0

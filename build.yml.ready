@@ -13286,7 +13286,7 @@ jobs:
               /// Groups un-matched songs by their measured sound.
               private func acousticGroups(from songs: [Song], likedIDs: Set<UUID>) -> [DuplicateGroup] {
                   let lab = AudioLab.shared
-                  let measured: [(Song, TrackFeatures)] = songs.compactMap { s in
+                  let measured: [(Song, TrackFeatures)] = songs.compactMap { s -> (Song, TrackFeatures)? in
                       guard let f = lab.features(for: s), f.duration > 20 else { return nil }
                       return (s, f)
                   }
@@ -13317,8 +13317,8 @@ jobs:
 
                   let history = ListenHistory.shared
                   let fm = FileManager.default
-                  return clusters.compactMap { cluster in
-                      var facts: [DuplicateSong] = cluster.map { pair in
+                  return clusters.compactMap { cluster -> DuplicateGroup? in
+                      var facts: [DuplicateSong] = cluster.map { pair -> DuplicateSong in
                           let (s, f) = pair
                           let size = ((try? fm.attributesOfItem(atPath: s.url.path)[.size]) as? Int64) ?? 0
                           let kbps = f.duration > 1 ? Int(Double(size) * 8.0 / (f.duration * 1000.0)) : 0
@@ -14782,10 +14782,12 @@ jobs:
               func pinToFile(for song: Song) -> Bool {
                   let text: String
                   if kind == .synced {
-                      text = lines.map { l in
-                          let m = Int(l.time) / 60, s = Int(l.time) % 60
+                      text = lines.map { l -> String in
+                          let m = Int(l.time) / 60
+                          let sec = Int(l.time) % 60
                           let cs = Int((l.time - floor(l.time)) * 100)
-                          return String(format: "[%02d:%02d.%02d]%@", m, s, cs, l.text)
+                          let stamp = String(format: "[%02d:%02d.%02d]", m, sec, cs)
+                          return stamp + l.text
                       }.joined(separator: "\n")
                   } else {
                       text = plain
