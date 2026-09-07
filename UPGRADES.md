@@ -51,11 +51,18 @@ step).
    `gemini-2.5-flash` (free tier: ~10 req/min, 500 req/day). Changeable in
    settings.
 
-## ⚠️ ONE-TIME CI FIX — REQUIRED, the build fails without it (2 minutes)
+## ✅ CI FIX — INSTALLED (Sept 7, 2026)
 
-**Status: the GitHub build is currently failing with exit code 65 (Swift
-compile error). The code fixes are committed, but CI cannot pick them up
-until you run the command below.**
+**Status: fixed.** `.github/workflows/build.yml` now embeds the current repo
+sources and pins Swift 5 mode, so CI builds exactly what's in the repo and
+the exit-65 failure is gone. The copy in `build.yml.ready` is kept identical
+as a backup.
+
+> If the build ever fails with exit code 65 again, first check for drift:
+> `build.yml` rewrites every `.swift` file from embedded copies, so after
+> changing any `.swift` file run `python3 scripts/sync_build_yaml.py` (or
+> `bash scripts/install_ci_fix.sh`) before pushing — otherwise CI keeps
+> compiling the old embedded code.
 
 ### Why a source fix isn't enough
 

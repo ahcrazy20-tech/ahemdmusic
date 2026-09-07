@@ -3992,7 +3992,7 @@ jobs:
                       if ct.contains("audio") || ct.contains("mpeg") || ct.contains("mp4") { completion(true); return }
                       // Magic byte sniff
                       if let d = data, d.count >= 3 {
-                          let b = [UInt8](d.prefix(4))
+                          let b = [UInt8](d.prefix(8))
                           if b[0] == 0x49 && b[1] == 0x44 && b[2] == 0x33 { completion(true); return }
                           if b[0] == 0xFF && (b[1] & 0xE0) == 0xE0 { completion(true); return }
                           if d.count >= 8 && b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70 { completion(true); return }
