@@ -51,26 +51,65 @@ step).
    `gemini-2.5-flash` (free tier: ~10 req/min, 500 req/day). Changeable in
    settings.
 
-## ONE-TIME CI FIX (do this once — 2 minutes)
+## ⚠️ ONE-TIME CI FIX — REQUIRED, the build fails without it (2 minutes)
 
-The app build (`.github/workflows/build.yml`) embeds copies of the source
-files. Those copies were stale, so the GitHub build was shipping an app that
-pre-dated the For You tab. The synced file is ready in this repo as
-`build.yml.ready`. To install it:
+**Status: the GitHub build is currently failing with exit code 65 (Swift
+compile error). The code fixes are committed, but CI cannot pick them up
+until you run the command below.**
+
+### Why a source fix isn't enough
+
+`.github/workflows/build.yml` doesn't just build the app — it **deletes every
+`.swift` file and rewrites them from copies embedded inside the workflow**.
+So fixing a bug in `TrollMusicApp/TrollMusicApp/*.swift` changes nothing on
+CI until those embedded copies are refreshed too. (This is exactly why the
+previous fix attempt still failed: it corrected the sources but not the
+workflow, so CI kept recompiling the same broken code.)
+
+The Arena GitHub App is not allowed to push to `.github/workflows/` — that
+requires the *workflows* permission — so the corrected workflow ships here as
+**`build.yml.ready`**.
+
+### Install it
+
+```bash
+bash scripts/install_ci_fix.sh && git push
+```
+
+<details>
+<summary>…or do it by hand</summary>
 
 ```bash
 cp build.yml.ready .github/workflows/build.yml
 git add .github/workflows/build.yml
-git commit -m "Sync CI build with current sources"
+git commit -m "Sync CI build with the fixed sources"
 git push
 ```
+</details>
 
-(Alternatively: pull the repo and run `python3 scripts/sync_build_yaml.py` —
-it generates the same file from the real sources.)
+**Permanent fix:** grant the Arena GitHub App the *workflows* permission for
+this repo. Then every code push can auto-sync the build and it can never
+drift again. Until then, after changing any `.swift` file run
+`python3 scripts/sync_build_yaml.py` (or the script above) before pushing.
 
-After that you can delete `build.yml.ready`. **Even better:** give the Arena
-GitHub App *workflows* permission for this repo — then every code push
-auto-syncs the build and nothing can drift again.
+## What was broken (Sept 2026 build failure)
+
+All of it came in with the Smart Pack commit, which never compiled
+successfully — the green checkmarks before it were builds of the *older*
+embedded sources.
+
+| File | Bug |
+|---|---|
+| `SpectrumAnalyzer.swift` | The FFT used APIs that don't exist: a made-up type `vDSP_FFT_ZEROPHASE_STAGGERED_DIT64_INPLACEDescriptor`, a constant `FFTRADIX2`, a `withUnsafeMutableBufferPointer(of:)` helper, and the wrong `vDSP_fft_zrip` signature. Rewritten on the real `vDSP_create_fftsetup` / `vDSP_ctoz` / `vDSP_fft_zrip` / `vDSP_zvmags` pipeline, still allocation-free on the render thread. |
+| `SmartKit.swift` | `override private init()` on `ListenHistory`, `ITunesEnricher`, `GeminiAI` — none has a superclass, so `override` is illegal. |
+| `MusicManager.swift` | Sleep fade multiplied a `Float` by a `Double`; the `Bool` from `ID3TagWriter.tagIfNeeded` was discarded. |
+| `Views.swift` | `EQView` used `$ai` without declaring it; unused `song` binding. |
+
+Also hardened in the workflow: `SWIFT_VERSION` is pinned to 5.0 (Xcode 26
+would otherwise compile this as Swift 6 and fail on strict concurrency), the
+deployment target is iOS 16.0 (installs on iOS 16.4), and the build step now
+prints compile errors as GitHub annotations and uploads `build.log`, so the
+next failure is readable at a glance.
 
 ## Files
 
