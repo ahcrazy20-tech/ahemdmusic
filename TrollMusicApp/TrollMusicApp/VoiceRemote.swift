@@ -465,16 +465,13 @@ extension IntentDialog {
     /// AI-playlist replies), instead of a compile-time literal.
     ///
     /// `IntentDialog` has no plain-string initialiser, which is why the literal
-    /// replies above say `IntentDialog(stringLiteral:)`. So we produce the very
-    /// same string-literal type here and hand it to that initialiser.
+    /// replies above say `IntentDialog(stringLiteral:)`. A runtime string reaches
+    /// the same path through a *contextual* interpolation: the compiler works out
+    /// the literal type for us, so we never have to name `StringLiteralType` or
+    /// its interpolation builder (neither is importable, and `verbatim:` is not a
+    /// member of it). No strings file and no lookup are involved.
     static func spoken(_ text: String) -> IntentDialog {
-        // `IntentDialog`'s literal path is built out of a
-        // LocalizableStringInterpolation; that type is not importable, so we
-        // get hold of one via the one literal form the compiler can produce for
-        // us. `"\(verbatim:)"` interpolates as-is — no lookup, no strings file,
-        // and nothing is re-escaped (unlike interpolating a quoted string).
-        let literal: IntentDialog.StringLiteralType = "\(verbatim: text)"
-        return IntentDialog(stringLiteral: literal)
+        "\(text)"
     }
 }
 
