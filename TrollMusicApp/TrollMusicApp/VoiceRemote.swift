@@ -461,13 +461,12 @@ struct GeneratePlaylistIntent: AppIntent {
 }
 
 extension IntentDialog {
-    /// A dialog built from a string produced at runtime.
+    /// A dialog built from a string produced at runtime (the queue-control and
+    /// AI-playlist replies), instead of a compile-time literal.
     ///
-    /// `IntentDialog` has no plain-string initialiser (the available ones take a
-    /// `LocalizedStringResource`), which is why the literal replies above use
-    /// `IntentDialog(stringLiteral:)`. A runtime string is exactly one
-    /// interpolation segment of a `LocalizableStringInterpolation`, so that is how
-    /// we hand it over — no strings file or lookup involved.
+    /// `IntentDialog` has no plain-string initialiser, which is why the literal
+    /// replies above say `IntentDialog(stringLiteral:)`. So we produce the very
+    /// same string-literal type here and hand it to that initialiser.
     static func spoken(_ text: String) -> IntentDialog {
         // `IntentDialog`'s literal path is built out of a
         // LocalizableStringInterpolation; that type is not importable, so we
