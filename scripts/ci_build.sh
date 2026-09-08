@@ -19,7 +19,8 @@
 #
 # WHAT IT DOES
 #   1. refuses to run if the sources look deleted (the old broken workflow used
-#      to `find . -name "*.swift" -delete` and paste its own frozen copies);
+#      to `find . -name "*.swift" -delete` and paste its own frozen copies), and
+#      refuses to spend an archive on sources that are structurally broken;
 #   2. generates the XcodeGen spec + app icon;
 #   3. archives with signing disabled and prints every compile error as a
 #      GitHub annotation, in the job summary, and on the commit;
@@ -59,11 +60,41 @@ if [ "${FILE_COUNT:-0}" -lt 15 ]; then
     exit 2
 fi
 
-# Structural pre-flight (unbalanced braces, stray heredoc markers, …). Cheap,
-# and it catches the mistakes that would otherwise cost a full 3-minute build.
+# Structural pre-flight (unbalanced braces, invalid escapes, stray heredoc
+# markers, …). It costs two seconds and it stops CI from spending eight minutes
+# reaching the point where it would have told us the same thing, usually with
+# the real cause pushed off-screen by the 20-error cap.
 if command -v python3 >/dev/null 2>&1; then
     echo "    structure check:"
-    python3 scripts/check_swift_syntax.py 2>&1 | sed 's/^/      /' || true
+    STRUCT_LOG="build-structure.log"
+    if python3 scripts/check_swift_syntax.py > "$STRUCT_LOG" 2>&1; then
+        sed 's/^/      /' "$STRUCT_LOG"
+    else
+        sed 's/^/      /' "$STRUCT_LOG"
+        fail "The Swift sources are structurally broken — the archive was NOT started."
+        fail "Fix the lines listed above, then push again."
+        fail ""
+        fail 'Typical causes:'
+        fail '  * a missing } or ) — an unterminated string looks exactly like that'
+        fail '  * an invalid escape in a string: Summary("Play \.$moment") must be'
+        fail '    Summary("Play \(\.$moment)") — App Intents wants the parens'
+        fail '  * a heredoc marker (SWIFT / YAML / EOF) left inside a source file'
+        while IFS= read -r line; do
+            case "$line" in
+                *"line "*) echo "::error::$line" ;;
+            esac
+        done < "$STRUCT_LOG"
+        {
+            echo "### ❌ Build failed before compiling"
+            echo
+            echo "Structural pre-flight (no Xcode involved) rejected the sources:"
+            echo
+            echo '```'
+            cat "$STRUCT_LOG"
+            echo '```'
+        } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        exit 2
+    fi
 fi
 
 # ---------------------------------------------------------------------------

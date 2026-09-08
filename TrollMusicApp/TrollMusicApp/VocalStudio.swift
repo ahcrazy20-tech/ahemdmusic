@@ -399,7 +399,7 @@ enum VocalProcessor {
             try? FileManager.default.removeItem(at: outURL)
             return .failure(VocalStudio.VocalError.unreadable)
         }
-        writer.close()
+        if #available(iOS 18.0, *) { try? writer.close() }
         // Files in Documents must not be iCloud-backed for this app's layout.
         try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none],
                                                ofItemAtPath: outURL.path)
@@ -572,7 +572,7 @@ final class KaraokeRecorder: ObservableObject {
             if !keep { lastNote("Take discarded.") }
             return
         }
-        out?.close()
+        if #available(iOS 18.0, *) { try? out?.close() }
         outQueue.async {
             try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.none],
                                                    ofItemAtPath: url.path)
@@ -605,7 +605,7 @@ final class KaraokeRecorder: ObservableObject {
         let sr = format.sampleRate
         // One-pole high-pass at 90 Hz (removes desk rumble and plosive boom).
         let a = 1 - exp(-2 * Double.pi * 90 / sr)
-        var peak: Float = 0
+        var peak: Double = 0
         let ch = Int(format.channelCount)
 
         for c in 0..<min(ch, 2) {
@@ -615,12 +615,12 @@ final class KaraokeRecorder: ObservableObject {
                 hpInput += a * (x - hpInput)
                 let y = x - hpInput                      // high-passed
                 let ay = abs(y)
-                if ay > peak { peak = Float(ay) }
-                let gated = gateEnabled ? (gateHold > 0.12 ? y * Double(boost) : 0) : y * Double(boost)
+                if ay > peak { peak = ay }
+                let gated = gateEnabled ? (peak > 0.12 ? y * Double(boost) : 0) : y * Double(boost)
                 p[i] = max(-0.95, min(0.95, Float(gated)))
             }
         }
-        let lvl = peak > 0 ? min(1, Double(20 * log10(max(1e-6, peak)) + 55) / 55) : 0
+        let lvl = peak > 0 ? min(1, (20 * log10(max(1e-6, peak)) + 55) / 55) : 0
         gateHold = max(lvl > 0.10 ? 1.0 : gateHold - Double(n) / sr * 4, 0)
 
         if let f = file {

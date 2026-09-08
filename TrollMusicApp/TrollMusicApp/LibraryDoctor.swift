@@ -657,7 +657,7 @@ struct DuplicateReviewView: View {
                     HStack(spacing: 6) {
                         Text(d.song.title).font(.subheadline).foregroundColor(.primary).lineLimit(1)
                         if d.id == g.recommendedKeepID {
-                            Text(d.aiReviewed ? "AI PICK" : "BEST")
+                            Text(g.aiReviewed ? "AI PICK" : "BEST")
                                 .font(.system(size: 8, weight: .black))
                                 .padding(.horizontal, 5).padding(.vertical, 2)
                                 .background(AppTheme.accent.opacity(0.18))

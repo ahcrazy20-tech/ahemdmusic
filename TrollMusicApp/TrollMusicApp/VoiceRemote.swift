@@ -92,7 +92,12 @@ final class VoiceSearchController: ObservableObject {
     }
 
     private func begin(useArabic: Bool) {
-        let tags = useArabic ? ["ar-SA", "ar-EG", "ar"] : [Locale.current.language.identifier, "en-US"]
+        // `Locale.Language` has no `identifier` — the tag is assembled from the
+        // language/region codes (and an unknown tag is simply skipped below).
+        let lang = Locale.current.language.languageCode?.identifier ?? "en"
+        let region = Locale.current.region?.identifier
+        let current = region.map { "\(lang)-\($0)" } ?? lang
+        let tags = useArabic ? ["ar-SA", "ar-EG", "ar"] : [current, lang, "en-US"]
         var rec: SFSpeechRecognizer? = nil
         for t in tags {
             if let r = SFSpeechRecognizer(locale: Locale(identifier: t)), r.isAvailable {
@@ -321,14 +326,14 @@ struct PlayMomentIntent: AppIntent {
 
     @Parameter(title: "Moment") var moment: MusicMoment
 
-    static var parameterSummary: some ParameterSummary { Summary("Play \.$moment") }
+    static var parameterSummary: some ParameterSummary { Summary("Play \(\.$moment)") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let kind = moment.recipeKind
         let picked = await MainActor.run { () -> String in
             SmartPlaylistEngine.shared.playMoment(kind)
         }
-        return .result(dialog: "Playing \(picked).")
+        return .result(dialog: IntentDialog(stringLiteral: "Playing \(picked)."))
     }
 }
 
@@ -340,7 +345,7 @@ struct PlayPlaylistIntent: AppIntent {
 
     @Parameter(title: "Playlist") var name: String
 
-    static var parameterSummary: some ParameterSummary { Summary("Play \.$name") }
+    static var parameterSummary: some ParameterSummary { Summary("Play \(\.$name)") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let asked = name
@@ -362,9 +367,9 @@ struct PlayPlaylistIntent: AppIntent {
             return ("shuffled Library", mm.songs.count)
         }
         if outcome.1 == 0 {
-            return .result(dialog: "I couldn't find anything to play.")
+            return .result(dialog: IntentDialog(stringLiteral: "I couldn't find anything to play."))
         }
-        return .result(dialog: "Playing \(outcome.0) — \(outcome.1) songs.")
+        return .result(dialog: IntentDialog(stringLiteral: "Playing \(outcome.0) — \(outcome.1) songs."))
     }
 }
 
@@ -376,7 +381,7 @@ struct QueueControlIntent: AppIntent {
 
     @Parameter(title: "Action") var action: PlaybackAction
 
-    static var parameterSummary: some ParameterSummary { Summary("\.$action") }
+    static var parameterSummary: some ParameterSummary { Summary("\(\.$action)") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let said = await MainActor.run { () -> String in
@@ -392,7 +397,7 @@ struct QueueControlIntent: AppIntent {
             case .shuffle: mm.isShuffle.toggle(); return mm.isShuffle ? "Shuffle on." : "Shuffle off."
             }
         }
-        return .result(dialog: said.isEmpty ? "Done." : said)
+        return .result(dialog: IntentDialog.spoken(said.isEmpty ? "Done." : said))
     }
 }
 
@@ -414,13 +419,13 @@ struct SleepTimerIntent: AppIntent {
 
     @Parameter(title: "Minutes") var minutes: Int
 
-    static var parameterSummary: some ParameterSummary { Summary("Sleep in \.$minutes minutes") }
+    static var parameterSummary: some ParameterSummary { Summary("Sleep in \(\.$minutes) minutes") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let m = max(1, min(180, minutes))
         await MainActor.run { MusicManager.shared.setSleepTimer(minutes: m) }
-        if m == 1 { return .result(dialog: "Sleeping in one minute.") }
-        return .result(dialog: "Sleeping in \(m) minutes.")
+        if m == 1 { return .result(dialog: IntentDialog(stringLiteral: "Sleeping in one minute.")) }
+        return .result(dialog: IntentDialog(stringLiteral: "Sleeping in \(m) minutes."))
     }
 }
 
@@ -432,7 +437,7 @@ struct GeneratePlaylistIntent: AppIntent {
 
     @Parameter(title: "Description") var request: String
 
-    static var parameterSummary: some ParameterSummary { Summary("Build a playlist for \.$request") }
+    static var parameterSummary: some ParameterSummary { Summary("Build a playlist for \(\.$request)") }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let text = request
@@ -451,7 +456,22 @@ struct GeneratePlaylistIntent: AppIntent {
                 }
             }
         }
-        return .result(dialog: said)
+        return .result(dialog: IntentDialog.spoken(said))
+    }
+}
+
+extension IntentDialog {
+    /// A dialog built from a string produced at runtime (the queue-control and
+    /// AI-playlist replies), instead of a compile-time literal.
+    ///
+    /// `IntentDialog` has no plain-string initialiser, which is why the literal
+    /// replies above say `IntentDialog(stringLiteral:)`. A runtime string reaches
+    /// the same path through a *contextual* interpolation: the compiler works out
+    /// the literal type for us, so we never have to name `StringLiteralType` or
+    /// its interpolation builder (neither is importable, and `verbatim:` is not a
+    /// member of it). No strings file and no lookup are involved.
+    static func spoken(_ text: String) -> IntentDialog {
+        "\(text)"
     }
 }
 
