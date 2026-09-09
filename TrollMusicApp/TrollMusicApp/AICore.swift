@@ -308,7 +308,7 @@ enum AITransport {
             if let text = Self.geminiContentText(j) {
                 completion(.success(text))
             } else {
-                completion(.failure(status: s, error: "The model returned an empty answer."))
+                completion(.failure(status: status, error: "The model returned an empty answer."))
             }
         }.resume()
     }
