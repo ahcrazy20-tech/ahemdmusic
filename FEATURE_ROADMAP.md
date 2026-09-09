@@ -279,7 +279,7 @@ everything else smarter, then lands two headline features.
 | 5 | **ShazamKit identify unknown rips** | 2.1 | M | Headline. Fixes the root data problem | ✅ shipped |
 | 6 | **Crossfade / gapless / auto-DJ** | 3.1 | M–L | Headline. The thing you *hear* in 3 seconds | ✅ shipped |
 | 7 | Key detection + harmonic flow | 2.2 | M | Turns good playlists into DJ sets | ✅ shipped |
-| 8 | Widget + Live Activity | 3.2 | M | Makes the app visible all day | ⏳ **only item left** |
+| 8 | Widget + Live Activity | 3.2 | M | Makes the app visible all day | ✅ shipped (widgets; Live Activity deferred) |
 | 9 | Arabic localization + RTL | 4.1 | M | The audience you actually built this for | ✅ shipped |
 
 **Prototype-first items** (verify the entitlement on your TrollStore install *before* building
@@ -287,7 +287,7 @@ the feature around them): ShazamKit (2.1), CarPlay (3.3), App Groups for widgets
 
 ### Pack 6 delivery notes
 
-Eight of the nine landed in one pass; the build is green and the IPA is produced.
+All nine landed; the build is green and the IPA is produced.
 
 * **ShazamKit** is behind `#if canImport(ShazamKit)` and a settings toggle, with a
   cleaned-name iTunes lookup as the fallback, so a refused entitlement degrades instead of
@@ -299,18 +299,34 @@ Eight of the nine landed in one pass; the build is green and the IPA is produced
 * **Auto-DJ** reads the already-measured `TrackFeatures`: long blends only when both tracks
   have a strong beat, similar tempo (<8 BPM apart) and similar energy; short ones into
   quiet, spoken or rubato material.
-* **Widget (3.2)** is deliberately last and still open. It is the only item here that needs
-  a *second build target* plus an App Group — i.e. the one thing on this list that can fail
-  at install time on a TrollStore signing setup rather than at compile time. Worth
-  prototyping the App Group on-device before wiring the extension into CI.
+* **Widget (3.2)** shipped as two Home-Screen widgets (Now Playing, Moments), small and
+  medium. It needed a second build target and an App Group, so it is the one item that can
+  fail at *install* time on a TrollStore signing setup rather than at compile time —
+  everything therefore degrades instead of crashing: `SharedStore` returns nil, the
+  publisher no-ops, the app is unaffected, and the widget shows an explicit "can't reach
+  the app's data yet" state. **Live Activity / Dynamic Island is deliberately deferred**:
+  ActivityKit needs `NSSupportsLiveActivities` and a physical device to verify, and it is
+  the part most likely to be silently refused by the signing setup.
+* Because the deployment target is iOS 16, `Button(intent:)` does not exist. Widget controls
+  are `Link`s to `asmusic://` URLs — a tap opens the app and acts, which is honest on iOS 16
+  rather than a button that looks interactive and isn't.
 
 **Verification without a Mac.** `scripts/test_pack6_logic.py` mirrors the pure maths in
 Python and asserts it — 44 checks over key detection, Camelot distances, affinity
-thresholds, auto-DJ lengths and the crossfade curve. `scripts/check_localization.py` diffs
-the `.strings` files against the literals in the sources (it caught two strings that were
-already broken). `scripts/check_swift_syntax.py` gained a rule for `self.<file-level global>`
-after CI caught one. The build itself now fails if a repo `.lproj` is missing from the
-packaged app, since that failure is otherwise invisible.
+thresholds, auto-DJ lengths and the crossfade curve. `scripts/test_widget_logic.py` adds 43
+checks for the cross-target mistakes a compiler cannot catch: app and widget agreeing on the
+App Group id and URL scheme, every link the widget builds being one the app routes, a
+`file://` URL never being mistaken for a widget link, the widget referencing no app-only
+types, and the generated XcodeGen spec embedding the extension with a case-sensitive bundle
+id prefix. `scripts/check_localization.py` is bundle-aware (app and widget have separate
+string tables) and diffs each against its own sources. `scripts/check_swift_syntax.py`
+gained a rule for `self.<file-level global>` after CI caught one, and now covers the widget
+target too.
+
+The build is a gate, not just a compile: it fails if a repo `.lproj` is missing from the
+packaged app, and if the `.appex` was built but not embedded. Both failures are otherwise
+invisible — you get a green build and an app that is quietly English-only, or quietly has
+no widget.
 
 ---
 
