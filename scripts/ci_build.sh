@@ -308,7 +308,26 @@ fi
 # ---------------------------------------------------------------------------
 say "Packaging TrollMusicApp.ipa"
 mkdir -p Payload
-cp -R "build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app" Payload/
+APP_BUNDLE="build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app"
+cp -R "$APP_BUNDLE" Payload/
+
+# Confirm the localizations actually made it INTO the bundle. XcodeGen has to
+# recognise the .lproj folders as variant groups for this to happen, and a
+# silent miss looks identical to a working build until you open the app and
+# find it stubbornly English.
+say "Verifying bundled localizations"
+LPROJ_FOUND=""
+for L in en ar; do
+    if [ -f "Payload/TrollMusicApp.app/$L.lproj/Localizable.strings" ]; then
+        N=$(plutil -convert json -o - "Payload/TrollMusicApp.app/$L.lproj/Localizable.strings" 2>/dev/null \
+            | tr ',' '\n' | grep -c ':' || echo "?")
+        echo "      $L.lproj  ($N strings)"
+        LPROJ_FOUND="$LPROJ_FOUND $L"
+    else
+        echo "      ::warning::$L.lproj/Localizable.strings is NOT in the app bundle — that language will fall back to the base strings"
+    fi
+done
+
 /usr/bin/zip -q -r TrollMusicApp.ipa Payload
 test -f TrollMusicApp.ipa || { fail "IPA was not produced"; exit 1; }
 
@@ -316,6 +335,7 @@ test -f TrollMusicApp.ipa || { fail "IPA was not produced"; exit 1; }
     echo "### ✅ Build OK"
     echo
     echo "* Swift sources compiled: **$FILE_COUNT**"
+    echo "* Localizations in bundle:**${LPROJ_FOUND:- none}**"
     echo "* Artifact: **TrollMusicApp.ipa** ($(du -h TrollMusicApp.ipa | cut -f1))"
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
