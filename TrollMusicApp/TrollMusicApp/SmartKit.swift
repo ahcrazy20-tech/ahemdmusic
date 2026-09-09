@@ -479,17 +479,21 @@ final class GeminiAI: ObservableObject {
 
     private init() {
         let d = UserDefaults.standard
-        key = d.string(forKey: Self.keyDefaultsKey) ?? ""
+        // Read defaults into locals first: touching `self.key` before every
+        // stored property has a value is a compile error in Swift.
+        let savedGeminiKey = d.string(forKey: Self.keyDefaultsKey) ?? ""
+        let savedApinexKey = d.string(forKey: Self.apinexKeyDefaultsKey) ?? ""
+        key = savedGeminiKey
         autoModel = d.object(forKey: Self.autoDefaultsKey) as? Bool ?? true
         model = d.string(forKey: Self.modelDefaultsKey) ?? "gemini-3.5-flash"
-        apinexKey = d.string(forKey: Self.apinexKeyDefaultsKey) ?? ""
+        apinexKey = savedApinexKey
         apinexModel = d.string(forKey: Self.apinexModelDefaultsKey) ?? "free/glm-5.3-flash"
         autoFailover = d.object(forKey: Self.failoverDefaultsKey) as? Bool ?? true
         // Migration: anyone who already pasted a Gemini key keeps it working;
         // everyone else starts on-device until they pick a provider.
         if let raw = d.string(forKey: Self.providerDefaultsKey), let p = AIProvider(rawValue: raw) {
             provider = p
-        } else if !key.trimmingCharacters(in: .whitespaces).isEmpty {
+        } else if !savedGeminiKey.trimmingCharacters(in: .whitespaces).isEmpty {
             provider = .gemini
         } else {
             provider = .onDevice
