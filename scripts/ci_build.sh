@@ -317,16 +317,28 @@ cp -R "$APP_BUNDLE" Payload/
 # find it stubbornly English.
 say "Verifying bundled localizations"
 LPROJ_FOUND=""
+LPROJ_MISSING=""
 for L in en ar; do
+    # Only check languages the repo actually ships, so adding/removing one
+    # doesn't require editing this list in two places.
+    test -f "$APP_DIR/$L.lproj/Localizable.strings" || continue
     if [ -f "Payload/TrollMusicApp.app/$L.lproj/Localizable.strings" ]; then
         N=$(plutil -convert json -o - "Payload/TrollMusicApp.app/$L.lproj/Localizable.strings" 2>/dev/null \
             | tr ',' '\n' | grep -c ':' || echo "?")
-        echo "      $L.lproj  ($N strings)"
+        echo "      $L.lproj  ($N strings)  in bundle"
         LPROJ_FOUND="$LPROJ_FOUND $L"
     else
-        echo "      ::warning::$L.lproj/Localizable.strings is NOT in the app bundle — that language will fall back to the base strings"
+        LPROJ_MISSING="$LPROJ_MISSING $L"
     fi
 done
+if [ -n "$LPROJ_MISSING" ]; then
+    # Not cosmetic: the app would install and run, silently English-only, and
+    # look exactly like a successful build. Fail loudly instead.
+    echo "::error::Localizations present in the repo but missing from the built app:$LPROJ_MISSING"
+    fail "These .lproj bundles did not make it into TrollMusicApp.app:$LPROJ_MISSING"
+    fail "XcodeGen did not treat them as variant groups — check the 'sources:' block."
+    exit 2
+fi
 
 /usr/bin/zip -q -r TrollMusicApp.ipa Payload
 test -f TrollMusicApp.ipa || { fail "IPA was not produced"; exit 1; }
