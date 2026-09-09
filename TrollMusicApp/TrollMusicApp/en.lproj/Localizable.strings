@@ -1,0 +1,312 @@
+/*
+   Localizable.strings (English — base)
+
+   The development language. SwiftUI resolves Text("Play") against this file,
+   so the keys and values are identical here by design; the file exists so the
+   set of localizable strings is explicit and reviewable, and so a missing
+   Arabic entry falls back to real English rather than a raw key.
+*/
+
+// MARK: - General
+"Done" = "Done";
+"Cancel" = "Cancel";
+"Save" = "Save";
+"Delete" = "Delete";
+"Erase" = "Erase";
+"Restore" = "Restore";
+"Rename" = "Rename";
+"Retry" = "Retry";
+"Try Again" = "Try Again";
+"Close" = "Close";
+"Stop" = "Stop";
+"OK" = "OK";
+"Undo" = "Undo";
+"Apply" = "Apply";
+"Create" = "Create";
+"Go" = "Go";
+"Paste" = "Paste";
+"Refresh" = "Refresh";
+"Rescan" = "Rescan";
+"Recheck" = "Recheck";
+"Scan again" = "Scan again";
+"Search again" = "Search again";
+"Clear" = "Clear";
+"Share" = "Share";
+"Discard" = "Discard";
+"Select…" = "Select…";
+"Thinking…" = "Thinking…";
+"Checking…" = "Checking…";
+"auto" = "auto";
+"AI" = "AI";
+"— OR —" = "— OR —";
+
+// MARK: - Library
+"Your Library" = "Your Library";
+"Your Library is Empty" = "Your Library is Empty";
+"Use Magic DL or Web Hub to download songs" = "Use Magic DL or Web Hub to download songs";
+"Songs" = "Songs";
+"Artists" = "Artists";
+"No artists yet" = "No artists yet";
+"Songs get an artist from their file name or from the free iTunes lookup." = "Songs get an artist from their file name or from the free iTunes lookup.";
+"Recently Played" = "Recently Played";
+"Shuffle all" = "Shuffle all";
+"Library tools" = "Library tools";
+"Sort by" = "Sort by";
+"Import from Files" = "Import from Files";
+"Song info" = "Song info";
+"Song info…" = "Song info…";
+"Song Info…" = "Song Info…";
+"Rename Song" = "Rename Song";
+"More like this" = "More like this";
+"More Like This" = "More Like This";
+"Shown everywhere" = "Shown everywhere";
+"Current file" = "Current file";
+"Re-read the name from the file" = "Re-read the name from the file";
+"Songs in library" = "Songs in library";
+"It's in Recently Deleted — nothing is gone yet." = "It's in Recently Deleted — nothing is gone yet.";
+
+// MARK: - Playback
+"Play" = "Play";
+"Play now" = "Play now";
+"Play Now" = "Play Now";
+"Play Next" = "Play Next";
+"Play Later" = "Play Later";
+"Shuffle" = "Shuffle";
+"Shuffle Play" = "Shuffle Play";
+"Up Next" = "Up Next";
+"NOW PLAYING" = "NOW PLAYING";
+"SMART RADIO" = "SMART RADIO";
+"FROM LIKED SONGS" = "FROM LIKED SONGS";
+"Smart Radio" = "Smart Radio";
+"About the artist" = "About the artist";
+"Resume last song on launch" = "Resume last song on launch";
+
+// MARK: - Sleep timer
+"15 min sleep" = "15 min sleep";
+"30 min sleep" = "30 min sleep";
+"60 min sleep" = "60 min sleep";
+"Stop at song end" = "Stop at song end";
+"Cancel sleep" = "Cancel sleep";
+
+// MARK: - Transitions (Pack 6)
+"Between songs" = "Between songs";
+"Transition" = "Transition";
+"Off (hard cut)" = "Off (hard cut)";
+"Gapless" = "Gapless";
+"Crossfade" = "Crossfade";
+"Auto-DJ" = "Auto-DJ";
+"Blend length" = "Blend length";
+"Maximum blend" = "Maximum blend";
+"Each song stops, the next begins. The classic behaviour." = "Each song stops, the next begins. The classic behaviour.";
+"Removes the silence between tracks without blending them. Best for albums, live sets and long recitations." = "Removes the silence between tracks without blending them. Best for albums, live sets and long recitations.";
+"The next song fades in while this one fades out, over a length you choose." = "The next song fades in while this one fades out, over a length you choose.";
+"Like crossfade, but the length adapts to what the two songs actually sound like — long blends between steady beats, short ones into quiet or spoken tracks." = "Like crossfade, but the length adapts to what the two songs actually sound like — long blends between steady beats, short ones into quiet or spoken tracks.";
+
+// MARK: - Audio settings
+"Audio Settings" = "Audio Settings";
+"Audio & Playback" = "Audio & Playback";
+"Equalizer, loudness & playback" = "Equalizer, loudness & playback";
+"Equalizer" = "Equalizer";
+"Equalizer Preset" = "Equalizer Preset";
+"Loudness Boost" = "Loudness Boost";
+"Preamp" = "Preamp";
+"Audio Enhancements" = "Audio Enhancements";
+"Spatial / 3D sound" = "Spatial / 3D sound";
+"Automatic mastering" = "Automatic mastering";
+"Smart Master (per-song EQ)" = "Smart Master (per-song EQ)";
+"Match loudness across songs" = "Match loudness across songs";
+"Skip dead air at the start" = "Skip dead air at the start";
+"Correction strength" = "Correction strength";
+"Loudness target" = "Loudness target";
+"Streaming services use about −14. Lower numbers are quieter but keep more punch." = "Streaming services use about −14. Lower numbers are quieter but keep more punch.";
+"Voices" = "Voices";
+"Vocal Focus" = "Vocal Focus";
+"Night / low-volume mode" = "Night / low-volume mode";
+"Rip repair (de-hiss, tame sibilance)" = "Rip repair (de-hiss, tame sibilance)";
+"What the app hears right now" = "What the app hears right now";
+"Re-analyze the whole library" = "Re-analyze the whole library";
+"This file looks like a rough rip — Rip Repair helps here." = "This file looks like a rough rip — Rip Repair helps here.";
+"Measuring this track…" = "Measuring this track…";
+"Play a song to see its measured numbers." = "Play a song to see its measured numbers.";
+"Library analyzed" = "Library analyzed";
+"Vocal & Sound Studio" = "Vocal & Sound Studio";
+
+// MARK: - Karaoke
+"Karaoke / acapella export" = "Karaoke / acapella export";
+"Mode" = "Mode";
+"Play the song you want to export first." = "Play the song you want to export first.";
+"Record over the song" = "Record over the song";
+"System voice processing (echo cancel + AGC)" = "System voice processing (echo cancel + AGC)";
+"Noise gate between lines" = "Noise gate between lines";
+"Stop & save" = "Stop & save";
+"Start take" = "Start take";
+"Microphone not available in this build" = "Microphone not available in this build";
+
+// MARK: - Voice control
+"Voice control" = "Voice control";
+"Speech rate" = "Speech rate";
+"Let the app talk back" = "Let the app talk back";
+"Announce the song that starts" = "Announce the song that starts";
+
+// MARK: - Downloads
+"Downloads" = "Downloads";
+"Download" = "Download";
+"Download All" = "Download All";
+"No downloads" = "No downloads";
+"Cancel download" = "Cancel download";
+"Clear Finished" = "Clear Finished";
+"Queued" = "Queued";
+"Cancelled" = "Cancelled";
+"Saved" = "Saved";
+"Saved to Library" = "Saved to Library";
+"Connecting…" = "Connecting…";
+"Connecting to server…" = "Connecting to server…";
+"Finding fastest server…" = "Finding fastest server…";
+"Racing servers for fastest link…" = "Racing servers for fastest link…";
+"Searching multiple sources…" = "Searching multiple sources…";
+"Failed downloads" = "Failed downloads";
+"Transfers" = "Transfers";
+"Downloads at once" = "Downloads at once";
+"Wi-Fi only" = "Wi-Fi only";
+
+// MARK: - Download engines
+"Download engines" = "Download engines";
+"Download Engines" = "Download Engines";
+"Classic engines" = "Classic engines";
+"Classic engines always on" = "Classic engines always on";
+"y2jar • Mp3Juice • cnvmp3 • Theta — always on, never modified." = "y2jar • Mp3Juice • cnvmp3 • Theta — always on, never modified.";
+"Alternative engines" = "Alternative engines";
+"Your own extractor (optional)" = "Your own extractor (optional)";
+"Backend list" = "Backend list";
+"Mirror lists refresh automatically once a day." = "Mirror lists refresh automatically once a day.";
+"Refresh now" = "Refresh now";
+
+// MARK: - Magic DL / search
+"Magic DL" = "Magic DL";
+"Smart Magic DL" = "Smart Magic DL";
+"Search YouTube & SoundCloud • Paste any link" = "Search YouTube & SoundCloud • Paste any link";
+"Magic Search" = "Magic Search";
+"Quick Picks" = "Quick Picks";
+"Load Trending" = "Load Trending";
+"Extract MP3" = "Extract MP3";
+"Edit the name before saving to your Library." = "Edit the name before saving to your Library.";
+
+// MARK: - Web hub
+"Tabs" = "Tabs";
+"New Tab" = "New Tab";
+"Google" = "Google";
+"YouTube" = "YouTube";
+"SoundCloud" = "SoundCloud";
+"Audiomack" = "Audiomack";
+"SpotifyDown" = "SpotifyDown";
+"Anghami" = "Anghami";
+"YTMP3" = "YTMP3";
+"CNVMP3" = "CNVMP3";
+
+// MARK: - Playlists
+"Playlists" = "Playlists";
+"Smart Playlists" = "Smart Playlists";
+"Liked Songs" = "Liked Songs";
+"No playlists yet — let the AI build one above, or tap +." = "No playlists yet — let the AI build one above, or tap +.";
+"No songs yet. Add from Library." = "No songs yet. Add from Library.";
+"Play playlist in order" = "Play playlist in order";
+"Shuffle playlist" = "Shuffle playlist";
+"Rename Playlist" = "Rename Playlist";
+"Delete Playlist" = "Delete Playlist";
+"Sort playlists" = "Sort playlists";
+"smart order" = "smart order";
+"Rebuild smart playlists now" = "Rebuild smart playlists now";
+"Describe a playlist…" = "Describe a playlist…";
+"AI Playlist Generator" = "AI Playlist Generator";
+"Generate AI playlist" = "Generate AI playlist";
+"Regenerate with AI" = "Regenerate with AI";
+"Build it" = "Build it";
+"Auto-create ✨ playlists" = "Auto-create ✨ playlists";
+"Order tracks like a DJ set" = "Order tracks like a DJ set";
+"Rebuild ✨ playlists" = "Rebuild ✨ playlists";
+"Delete all ✨ playlists" = "Delete all ✨ playlists";
+"Smart playlist — refreshed automatically" = "Smart playlist — refreshed automatically";
+"Analyze library and suggest playlists" = "Analyze library and suggest playlists";
+"AI curation on" = "AI curation on";
+"Offline mode — works with no key" = "Offline mode — works with no key";
+
+// MARK: - For You / discover
+"For You" = "For You";
+"Made for You" = "Made for You";
+"Recommendations based on the music you love" = "Recommendations based on the music you love";
+"Analyzing your taste…" = "Analyzing your taste…";
+"We grouped your Library by artist — tap to create." = "We grouped your Library by artist — tap to create.";
+"Open full article" = "Open full article";
+
+// MARK: - Library health & maintenance
+"Library Health" = "Library Health";
+"AI · on-device" = "AI · on-device";
+"Fetch missing artists & covers" = "Fetch missing artists & covers";
+"Rough sounding rips" = "Rough sounding rips";
+"Duplicate Finder" = "Duplicate Finder";
+"Comparing your songs…" = "Comparing your songs…";
+"Delete extra copies" = "Delete extra copies";
+"No duplicates found" = "No duplicates found";
+"SAME AUDIO" = "SAME AUDIO";
+"DIFFERENT VERSIONS" = "DIFFERENT VERSIONS";
+"Lengths differ — could be a live/remix version. Double-check before deleting." = "Lengths differ — could be a live/remix version. Double-check before deleting.";
+"Tidy up names" = "Tidy up names";
+"Every file name looks clean" = "Every file name looks clean";
+"Ask AI" = "Ask AI";
+
+// MARK: - Identify (Pack 6)
+"Identify songs" = "Identify songs";
+"Songs that need it" = "Songs that need it";
+"Matching engine" = "Matching engine";
+"Matches" = "Matches";
+
+// MARK: - Trash
+"Recently Deleted" = "Recently Deleted";
+"Safety net" = "Safety net";
+"Deleted songs wait here instead of vanishing." = "Deleted songs wait here instead of vanishing.";
+"Keep for" = "Keep for";
+"Nothing deleted recently" = "Nothing deleted recently";
+"When you delete a song — or clean duplicates — it lands here first." = "When you delete a song — or clean duplicates — it lands here first.";
+"Restore everything" = "Restore everything";
+
+// MARK: - Lyrics
+"Looking for the words…" = "Looking for the words…";
+"Re-download lyrics" = "Re-download lyrics";
+"Reset timing" = "Reset timing";
+"Play a song to see its lyrics." = "Play a song to see its lyrics.";
+
+// MARK: - Backup
+"Backup & Restore" = "Backup & Restore";
+"Export backup & share…" = "Export backup & share…";
+"Save a copy in the app's Documents" = "Save a copy in the app's Documents";
+"Choose a backup file…" = "Choose a backup file…";
+"on this device" = "on this device";
+"Replace my playlists instead of merging" = "Replace my playlists instead of merging";
+
+// MARK: - AI
+"AI Assistant" = "AI Assistant";
+"AI Music Assistant (optional)" = "AI Music Assistant (optional)";
+"AI Intelligence" = "AI Intelligence";
+"Open AI Intelligence settings" = "Open AI Intelligence settings";
+"Open full AI settings (models & failover)" = "Open full AI settings (models & failover)";
+"Pick your AI" = "Pick your AI";
+"Provider" = "Provider";
+"AI provider" = "AI provider";
+"Model" = "Model";
+"Auto model (self-healing)" = "Auto model (self-healing)";
+"Switches to a verified newer Gemini when Google retires one." = "Switches to a verified newer Gemini when Google retires one.";
+"Auto-failover — never stop" = "Auto-failover — never stop";
+"On-device only — nothing is sent anywhere." = "On-device only — nothing is sent anywhere.";
+"Set up (free key)" = "Set up (free key)";
+"Get 15" = "Get 15";
+
+// MARK: - Settings / about
+"Settings" = "Settings";
+"Appearance" = "Appearance";
+"Accent color & theme" = "Accent color & theme";
+"App Accent Color" = "App Accent Color";
+"Theme" = "Theme";
+"Theme color" = "Theme color";
+"About" = "About";
+"App version" = "App version";
+"Share / Export" = "Share / Export";

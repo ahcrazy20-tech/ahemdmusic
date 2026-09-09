@@ -932,7 +932,9 @@ struct EQView: View {
                 if mm.transitionMode.blends {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text(mm.transitionMode == .autoDJ ? "Maximum blend" : "Blend length")
+                            Text(mm.transitionMode == .autoDJ
+                                 ? LocalizedStringKey("Maximum blend")
+                                 : LocalizedStringKey("Blend length"))
                                 .foregroundColor(.primary)
                             Spacer()
                             Text(String(format: "%.1f s", mm.crossfadeSeconds))
@@ -1042,6 +1044,7 @@ enum LibrarySort: String, CaseIterable, Identifiable {
 
 struct LibraryView: View {
     @EnvironmentObject var musicManager: MusicManager
+    @Environment(\.layoutDirection) private var layoutDirection
     @ObservedObject private var doctor = LibraryDoctor.shared
     @ObservedObject private var trash = LibraryTrash.shared
     @State private var showingOptionsFor: Song?
@@ -1228,7 +1231,9 @@ struct LibraryView: View {
                                 if doctor.isScanning {
                                     ProgressView().scaleEffect(0.7)
                                 } else {
-                                    Image(systemName: "chevron.right")
+                                    // .forward instead of .right so it points
+                                    // the correct way in Arabic (RTL).
+                                    Image(systemName: "chevron.forward")
                                         .font(.caption).foregroundColor(.secondary)
                                 }
                             }
@@ -1421,7 +1426,10 @@ struct LibraryView: View {
                                         .padding(3)
                                         .background(Color.red)
                                         .clipShape(Circle())
-                                        .offset(x: 9, y: -9)
+                                        // Nudge the badge outward on whichever
+                                        // side "trailing" is — +x would push it
+                                        // back over the icon in Arabic (RTL).
+                                        .offset(x: layoutDirection == .rightToLeft ? -9 : 9, y: -9)
                                 }
                             }
                     }
@@ -2688,7 +2696,7 @@ struct SettingsTabView: View {
             HStack {
                 Label(title, systemImage: icon).foregroundColor(.primary)
                 Spacer()
-                Image(systemName: "chevron.right")
+                Image(systemName: "chevron.forward")
                     .font(.caption).foregroundColor(Color(UIColor.tertiaryLabel))
             }
         }

@@ -97,6 +97,13 @@ if command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
+# Localization coverage. Advisory, not fatal: a new Text("…") that hasn't been
+# translated yet should be visible in the log, not a reason to block a build.
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/check_localization.py ]; then
+    echo "    localization check:"
+    python3 scripts/check_localization.py 2>&1 | sed 's/^/      /' || true
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Clean leftovers — NEVER the sources
 # ---------------------------------------------------------------------------
@@ -169,6 +176,13 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
           NSAllowsArbitraryLoadsInWebContent: true
+        # Arabic + English. Without CFBundleLocalizations iOS will not offer
+        # Arabic in Settings > AS Music > Language, and the whole ar.lproj
+        # bundle is ignored on an English device.
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations:
+          - en
+          - ar
     settings:
       GENERATE_INFOPLIST_FILE: NO
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

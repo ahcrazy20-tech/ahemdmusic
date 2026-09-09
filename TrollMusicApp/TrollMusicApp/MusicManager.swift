@@ -57,21 +57,24 @@ enum TransitionMode: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    // NSLocalizedString, not a bare literal: these are read into `String`
+    // properties, and Text/Label given a String VARIABLE use the non-localizing
+    // overload — the literal would stay English on an Arabic device.
     var title: String {
         switch self {
-        case .off:       return "Off (hard cut)"
-        case .gapless:   return "Gapless"
-        case .crossfade: return "Crossfade"
-        case .autoDJ:    return "Auto-DJ"
+        case .off:       return NSLocalizedString("Off (hard cut)", comment: "Transition mode")
+        case .gapless:   return NSLocalizedString("Gapless", comment: "Transition mode")
+        case .crossfade: return NSLocalizedString("Crossfade", comment: "Transition mode")
+        case .autoDJ:    return NSLocalizedString("Auto-DJ", comment: "Transition mode")
         }
     }
 
     var subtitle: String {
         switch self {
-        case .off:       return "Each song stops, the next begins. The classic behaviour."
-        case .gapless:   return "Removes the silence between tracks without blending them. Best for albums, live sets and long recitations."
-        case .crossfade: return "The next song fades in while this one fades out, over a length you choose."
-        case .autoDJ:    return "Like crossfade, but the length adapts to what the two songs actually sound like — long blends between steady beats, short ones into quiet or spoken tracks."
+        case .off:       return NSLocalizedString("Each song stops, the next begins. The classic behaviour.", comment: "Transition mode explanation")
+        case .gapless:   return NSLocalizedString("Removes the silence between tracks without blending them. Best for albums, live sets and long recitations.", comment: "Transition mode explanation")
+        case .crossfade: return NSLocalizedString("The next song fades in while this one fades out, over a length you choose.", comment: "Transition mode explanation")
+        case .autoDJ:    return NSLocalizedString("Like crossfade, but the length adapts to what the two songs actually sound like — long blends between steady beats, short ones into quiet or spoken tracks.", comment: "Transition mode explanation")
         }
     }
 

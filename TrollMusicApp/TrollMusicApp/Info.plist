@@ -69,5 +69,14 @@
         <key>UIApplicationSupportsMultipleScenes</key>
         <false/>
     </dict>
+    <!-- Arabic + English. Keep in sync with the properties: block in
+         scripts/ci_build.sh, which overwrites this file during the build. -->
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>ar</string>
+    </array>
 </dict>
 </plist>
