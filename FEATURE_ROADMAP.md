@@ -270,20 +270,47 @@ Wrapped-style story waiting to happen: top artists, listening clock, "your sound
 If it were my call, this is the exact build order. It front-loads the cheap fixes that make
 everything else smarter, then lands two headline features.
 
-| Order | Item | § | Cost | Why here |
-|---|---|---|---|---|
-| 1 | Completion-ratio history + dislike | 1.1 | S | Every other AI feature is trained on this data |
-| 2 | Smart Radio → real vectors + history stack | 1.5 | S | 15 lines, fixes a feature that's lying in its name |
-| 3 | Import your own music (plist + importer) | 1.4 | S | Opens the front door of the app |
-| 4 | Background + parallel downloads | 1.2/1.3 | M | The #1 daily frustration |
-| 5 | **ShazamKit identify unknown rips** | 2.1 | M | Headline. Fixes the root data problem |
-| 6 | **Crossfade / gapless / auto-DJ** | 3.1 | M–L | Headline. The thing you *hear* in 3 seconds |
-| 7 | Key detection + harmonic flow | 2.2 | M | Turns good playlists into DJ sets |
-| 8 | Widget + Live Activity | 3.2 | M | Makes the app visible all day |
-| 9 | Arabic localization + RTL | 4.1 | M | The audience you actually built this for |
+| Order | Item | § | Cost | Why here | Status |
+|---|---|---|---|---|---|
+| 1 | Completion-ratio history + dislike | 1.1 | S | Every other AI feature is trained on this data | ✅ shipped |
+| 2 | Smart Radio → real vectors + history stack | 1.5 | S | 15 lines, fixes a feature that's lying in its name | ✅ shipped |
+| 3 | Import your own music (plist + importer) | 1.4 | S | Opens the front door of the app | ✅ shipped |
+| 4 | Background + parallel downloads | 1.2/1.3 | M | The #1 daily frustration | ✅ shipped |
+| 5 | **ShazamKit identify unknown rips** | 2.1 | M | Headline. Fixes the root data problem | ✅ shipped |
+| 6 | **Crossfade / gapless / auto-DJ** | 3.1 | M–L | Headline. The thing you *hear* in 3 seconds | ✅ shipped |
+| 7 | Key detection + harmonic flow | 2.2 | M | Turns good playlists into DJ sets | ✅ shipped |
+| 8 | Widget + Live Activity | 3.2 | M | Makes the app visible all day | ⏳ **only item left** |
+| 9 | Arabic localization + RTL | 4.1 | M | The audience you actually built this for | ✅ shipped |
 
 **Prototype-first items** (verify the entitlement on your TrollStore install *before* building
 the feature around them): ShazamKit (2.1), CarPlay (3.3), App Groups for widgets (3.2).
+
+### Pack 6 delivery notes
+
+Eight of the nine landed in one pass; the build is green and the IPA is produced.
+
+* **ShazamKit** is behind `#if canImport(ShazamKit)` and a settings toggle, with a
+  cleaned-name iTunes lookup as the fallback, so a refused entitlement degrades instead of
+  breaking the build.
+* **Crossfade** needed a real change to the audio graph: a second `AVAudioPlayerNode`, both
+  decks summing into a `blendMixer` ahead of the EQ. Ramps are equal-power (`cos`/`sin`) —
+  a linear fade drops to 0.5 power mid-blend and you hear the dip. `Off` leaves the old
+  hard-cut path byte-for-byte intact.
+* **Auto-DJ** reads the already-measured `TrackFeatures`: long blends only when both tracks
+  have a strong beat, similar tempo (<8 BPM apart) and similar energy; short ones into
+  quiet, spoken or rubato material.
+* **Widget (3.2)** is deliberately last and still open. It is the only item here that needs
+  a *second build target* plus an App Group — i.e. the one thing on this list that can fail
+  at install time on a TrollStore signing setup rather than at compile time. Worth
+  prototyping the App Group on-device before wiring the extension into CI.
+
+**Verification without a Mac.** `scripts/test_pack6_logic.py` mirrors the pure maths in
+Python and asserts it — 44 checks over key detection, Camelot distances, affinity
+thresholds, auto-DJ lengths and the crossfade curve. `scripts/check_localization.py` diffs
+the `.strings` files against the literals in the sources (it caught two strings that were
+already broken). `scripts/check_swift_syntax.py` gained a rule for `self.<file-level global>`
+after CI caught one. The build itself now fails if a repo `.lproj` is missing from the
+packaged app, since that failure is otherwise invisible.
 
 ---
 
