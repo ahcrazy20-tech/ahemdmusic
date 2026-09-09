@@ -250,10 +250,25 @@ if m:
                   for d in deps), str(deps))
         check("widget is an app-extension target",
               wid_t.get("type") == "app-extension", str(wid_t.get("type")))
-        check("widget bundle id is nested under the app's",
-              str(wid_t.get("settings", {}).get("PRODUCT_BUNDLE_IDENTIFIER", ""))
-              .startswith("com.ahmedsoliman.trollmusicapp."),
-              str(wid_t.get("settings", {}).get("PRODUCT_BUNDLE_IDENTIFIER")))
+        # Xcode refuses to embed an extension whose bundle id is not prefixed
+        # with the host app's -- and the comparison is case-sensitive. The app
+        # id must be PINNED, because XcodeGen otherwise derives it from the
+        # target NAME ("TrollMusicApp", capital T) and the embed step fails.
+        app_id = app_t.get("settings", {}).get("PRODUCT_BUNDLE_IDENTIFIER")
+        wid_id = wid_t.get("settings", {}).get("PRODUCT_BUNDLE_IDENTIFIER")
+        check("the app pins its bundle id explicitly", app_id is not None,
+              "not set — XcodeGen would derive it from the target name")
+        check("widget bundle id is prefixed with the app's (case-sensitive)",
+              bool(app_id) and bool(wid_id) and wid_id.startswith(app_id + "."),
+              f"app={app_id!r} widget={wid_id!r}")
+        # And the pinned id has to match what the plist and App Group say.
+        plist_id = None
+        pm = re.search(r"<key>CFBundleIdentifier</key>\s*<string>([^<]+)</string>",
+                       read(os.path.join(APP, "Info.plist")))
+        if pm:
+            plist_id = pm.group(1)
+        check("pinned bundle id matches Info.plist", app_id == plist_id,
+              f"spec={app_id!r} plist={plist_id!r}")
         check("widget declares the WidgetKit extension point",
               wid_t.get("info", {}).get("properties", {})
               .get("NSExtension", {})

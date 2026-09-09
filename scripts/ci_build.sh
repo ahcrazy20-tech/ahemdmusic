@@ -221,6 +221,11 @@ targets:
             CFBundleURLSchemes:
               - asmusic
     settings:
+      # Pin this explicitly. XcodeGen otherwise derives it from bundleIdPrefix
+      # + the TARGET NAME, giving com.ahmedsoliman.TrollMusicApp (capital T) --
+      # which disagrees with Info.plist, with the App Group id, and with the
+      # widget's prefix, and the embed step rejects the mismatch.
+      PRODUCT_BUNDLE_IDENTIFIER: com.ahmedsoliman.trollmusicapp
       GENERATE_INFOPLIST_FILE: NO
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       DEVELOPMENT_ASSET_PATHS: "DummyAssets"
