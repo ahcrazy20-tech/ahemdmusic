@@ -76,19 +76,19 @@ enum AIProvider: String, CaseIterable, Identifiable {
 // MARK: - Model catalog
 
 /// One row of the APInex model list (Settings → AI Intelligence).
+///
+/// NOTE: deliberately NO custom init that consults APInexCatalog.knownModels.
+/// Pack 5 shipped one, and it deadlocked the app: the first touch of
+/// `knownModels` ran its initializer, which called AIModelInfo.init, which
+/// read `knownModels` again → Swift's one-time init re-entered itself on the
+/// main thread → frozen app (killed by the watchdog) whenever the user opened
+/// Settings, For You or Playlists. Memberwise init only; enrich unknown ids
+/// through APInexCatalog.info(for:) instead.
 struct AIModelInfo: Identifiable, Equatable {
     let id: String        // e.g. "free/glm-5.3-flash" — the exact string sent to the API
     let label: String     // e.g. "GLM-5.3 Flash"
     let price: String     // "FREE" / "$0.05 / 1M"
     let isFree: Bool
-
-    init(id: String, label: String? = nil, price: String? = nil, isFree: Bool? = nil) {
-        self.id = id
-        let known = APInexCatalog.knownModels[id]
-        self.label = label ?? known?.label ?? id
-        self.price = price ?? known?.price ?? "—"
-        self.isFree = isFree ?? known?.isFree ?? id.lowercased().hasPrefix("free/")
-    }
 }
 
 /// Everything we know about the APInex platform's catalog.
@@ -99,34 +99,47 @@ enum APInexCatalog {
     /// Bundled snapshot of the catalog (Sept 2026) so the very first run has
     /// a working model list even offline. Live list: GET /v1/models.
     /// Free tiers first, then the cheapest paid models.
+    ///
+    /// The table is a plain array built with AIModelInfo's MEMBERWISE init —
+    /// nothing in here may read `knownModels` (see the note on AIModelInfo:
+    /// reading it from inside its own initializer deadlocks the app).
     static let knownModels: [String: AIModelInfo] = {
-        let rows: [(String, String, String, Bool)] = [
+        let table: [AIModelInfo] = [
             // id,                          label,              price,        free
-            ("free/glm-5.3-flash",          "GLM-5.3 Flash",    "FREE",       true),
-            ("free/gpt-5.6-luna",           "GPT-5.6 Luna",     "FREE",       true),
-            ("free/gemini-3.8-flash",       "Gemini 3.8 Flash", "FREE",       true),
-            ("free/muse-spark-1.3",         "Muse Spark 1.3",   "FREE",       true),
-            ("free/qwen-3.8-max",           "Qwen 3.8 MAX",     "FREE",       true),
-            ("free/deepseek-v4-flash-0731", "DeepSeek V4 Flash","FREE",       true),
-            ("free/deepseek-v4-pro-0813",   "DeepSeek V4 Pro",  "FREE",       true),
-            ("free/gemini-3.1-pro",         "Gemini 3.1 Pro",   "FREE",       true),
-            ("gemini/3.8-flash",            "Gemini 3.8 Flash", "$0.10 / 1M", false),
-            ("deepseek/v4-flash",           "DeepSeek V4 Flash","$0.05 / 1M", false),
-            ("deepseek/v4-pro",             "DeepSeek V4 Pro",  "$0.07 / 1M", false),
-            ("glm/5.3-flash",               "GLM-5.3 Flash",    "$0.05 / 1M", false),
-            ("gpt/5.6-luna",                "GPT-5.6 Luna",     "$0.05 / 1M", false),
-            ("glm/5.3",                     "GLM 5.3",          "$0.15 / 1M", false),
-            ("gemini/3.1-pro",              "Gemini 3.1 Pro",   "$0.15 / 1M", false),
-            ("kimi/k3",                     "Kimi K3",          "$0.20 / 1M", false),
-            ("grok/4.6",                    "Grok 4.6",         "$0.25 / 1M", false),
-            ("gpt/5.6-sol",                 "GPT-5.6 Sol",      "$0.20 / 1M", false),
+            AIModelInfo(id: "free/glm-5.3-flash",          label: "GLM-5.3 Flash",     price: "FREE",        isFree: true),
+            AIModelInfo(id: "free/gpt-5.6-luna",           label: "GPT-5.6 Luna",      price: "FREE",        isFree: true),
+            AIModelInfo(id: "free/gemini-3.8-flash",       label: "Gemini 3.8 Flash",  price: "FREE",        isFree: true),
+            AIModelInfo(id: "free/muse-spark-1.3",         label: "Muse Spark 1.3",    price: "FREE",        isFree: true),
+            AIModelInfo(id: "free/qwen-3.8-max",           label: "Qwen 3.8 MAX",      price: "FREE",        isFree: true),
+            AIModelInfo(id: "free/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash", price: "FREE",        isFree: true),
+            AIModelInfo(id: "free/deepseek-v4-pro-0813",   label: "DeepSeek V4 Pro",   price: "FREE",        isFree: true),
+            AIModelInfo(id: "free/gemini-3.1-pro",         label: "Gemini 3.1 Pro",    price: "FREE",        isFree: true),
+            AIModelInfo(id: "gemini/3.8-flash",            label: "Gemini 3.8 Flash",  price: "$0.10 / 1M",  isFree: false),
+            AIModelInfo(id: "deepseek/v4-flash",           label: "DeepSeek V4 Flash", price: "$0.05 / 1M",  isFree: false),
+            AIModelInfo(id: "deepseek/v4-pro",             label: "DeepSeek V4 Pro",   price: "$0.07 / 1M",  isFree: false),
+            AIModelInfo(id: "glm/5.3-flash",               label: "GLM-5.3 Flash",     price: "$0.05 / 1M",  isFree: false),
+            AIModelInfo(id: "gpt/5.6-luna",                label: "GPT-5.6 Luna",      price: "$0.05 / 1M",  isFree: false),
+            AIModelInfo(id: "glm/5.3",                     label: "GLM 5.3",           price: "$0.15 / 1M",  isFree: false),
+            AIModelInfo(id: "gemini/3.1-pro",              label: "Gemini 3.1 Pro",    price: "$0.15 / 1M",  isFree: false),
+            AIModelInfo(id: "kimi/k3",                     label: "Kimi K3",           price: "$0.20 / 1M",  isFree: false),
+            AIModelInfo(id: "gpt/5.6-sol",                 label: "GPT-5.6 Sol",       price: "$0.20 / 1M",  isFree: false),
+            AIModelInfo(id: "grok/4.6",                    label: "Grok 4.6",          price: "$0.25 / 1M",  isFree: false),
         ]
         var map: [String: AIModelInfo] = [:]
-        for (id, label, price, free) in rows {
-            map[id] = AIModelInfo(id: id, label: label, price: price, isFree: free)
-        }
+        for m in table { map[m.id] = m }
         return map
     }()
+
+    /// Model row for ANY id: bundled info when we have it, a sensible
+    /// generic row when we don't (live /v1/models ids, custom ids the user
+    /// typed, ids from a saved catalog). Safe to call from anywhere — this
+    /// only READS knownModels after it is fully initialized.
+    static func info(for id: String) -> AIModelInfo {
+        if let m = knownModels[id] { return m }
+        return AIModelInfo(id: id, label: id,
+                           price: id.lowercased().hasPrefix("free/") ? "FREE" : "—",
+                           isFree: id.lowercased().hasPrefix("free/"))
+    }
 
     /// The bundled list, ordered: free models first, then cheapest paid.
     static var bundled: [AIModelInfo] {
@@ -333,7 +346,7 @@ enum AITransport {
         URLSession.shared.dataTask(with: req) { data, resp, err in
             let status = (resp as? HTTPURLResponse)?.statusCode
             if let data = data, status == 200, let ids = APInexCatalog.parseModelIDs(data) {
-                let models = APInexCatalog.ordered(ids.map { AIModelInfo(id: $0) })
+                let models = APInexCatalog.ordered(ids.map { APInexCatalog.info(for: $0) })
                 completion(models, nil)
             } else if let data = data, status == 401 || status == 403 {
                 completion(APInexCatalog.bundled, "Key rejected (\(status ?? 0)).")

@@ -258,6 +258,7 @@ struct MainTabView: View {
                     TabButton(label: "Playlists", icon: "music.mic", id: .playlists, selection: $selected)
                     TabButton(label: "Magic DL", icon: "sparkles", id: .magic, selection: $selected)
                     TabButton(label: "Web Hub", icon: "safari", id: .browser, selection: $selected)
+                    TabButton(label: "Settings", icon: "gearshape", id: .settings, selection: $selected)
                 }
                 .padding(.top, 6)
                 .padding(.bottom, 4)

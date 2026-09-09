@@ -499,7 +499,7 @@ final class GeminiAI: ObservableObject {
             provider = .onDevice
         }
         if let saved = d.stringArray(forKey: "asmusic_apinex_catalog"), !saved.isEmpty {
-            apinexCatalog = APInexCatalog.ordered(saved.map { AIModelInfo(id: $0) })
+            apinexCatalog = APInexCatalog.ordered(saved.map { APInexCatalog.info(for: $0) })
         }
         if provider == .apinex { refreshApinexCatalog() }
     }

@@ -85,6 +85,29 @@ the remote registry.
 
 ## 4. 🐛 Hidden bugs found & fixed in this pack
 
+> **Pack 5.1 (same day, after the first test on a phone):** the first build
+> of this pack shipped two bugs of its own, both found via the user's report
+> "Settings tab doesn't appear + tapping AI crashes" — items 6 and 7 below.
+> Lesson: always install the IPA from the LATEST green Actions run.
+
+6. **The Settings tab button was missing from the tab bar** *(Pack 5.1)* —
+   the `case .settings` handler existed but the 6th tab button never rendered,
+   so there was literally nothing to tap. Cause: two same-file edits were
+   applied in parallel while writing Pack 5; they raced and the button edit
+   was silently lost while its sibling survived. The code compiled (valid but
+   unreachable). Fix: re-added the button; audited every other Pack 5 edit
+   for the same race — all verified present. *(Views.swift)*
+7. **Static-initializer deadlock → the AI crash** *(Pack 5.1)* —
+   `AIModelInfo` had a custom init that read `APInexCatalog.knownModels`,
+   and `knownModels`' own initializer built `AIModelInfo`s. The first touch
+   of the AI engine (opening Settings, For You, Playlists, the EQ sheet, or
+   any "add a key" hint) re-entered Swift's one-time static init on the main
+   thread → app froze → watchdog kill = "crash on clicking AI". Fix:
+   `AIModelInfo` is now memberwise-only; unknown ids are enriched via
+   `APInexCatalog.info(for:)`, which only reads the table after it exists —
+   the cycle is structurally impossible now. A re-entrance audit over all
+   `static let` initializers found no other cases. *(AICore.swift)*
+
 1. **`completeJSON` had no self-healing at all** — `ask()` (song requests)
    could rotate to a newer model when Google retired one, but the four other
    AI features (playlists, duplicates, name tidy, ExtrasKit) failed
