@@ -32,6 +32,16 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 APP = ROOT / "TrollMusicApp" / "TrollMusicApp"
+# The widget extension is a second compiled target, so its sources need the
+# same gate — a brace error there fails the build exactly as loudly.
+WIDGET = ROOT / "TrollMusicApp" / "ASMusicWidget"
+
+
+def source_files():
+    files = sorted(APP.glob("*.swift"))
+    if WIDGET.is_dir():
+        files += sorted(WIDGET.glob("*.swift"))
+    return files
 
 # The only sequences a Swift *escaped* string literal may contain after a
 # backslash. Raw strings and regex literals are exempt.
@@ -563,7 +573,7 @@ def main() -> int:
     ap.add_argument("paths", nargs="*")
     args = ap.parse_args()
 
-    files = [pathlib.Path(p) for p in args.paths] if args.paths else sorted(APP.glob("*.swift"))
+    files = [pathlib.Path(p) for p in args.paths] if args.paths else source_files()
     problems_total = 0
     declared = {}
     scrubbed_all = {}

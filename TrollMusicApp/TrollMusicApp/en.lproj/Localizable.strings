@@ -310,3 +310,20 @@
 "About" = "About";
 "App version" = "App version";
 "Share / Export" = "Share / Export";
+
+// MARK: - Widget
+"Now Playing" = "Now Playing";
+"What's playing, with controls." = "What's playing, with controls.";
+"Moments" = "Moments";
+"One tap to start a smart mix." = "One tap to start a smart mix.";
+"Start a mix" = "Start a mix";
+"Nothing playing" = "Nothing playing";
+"Open AS Music" = "Open AS Music";
+"Tap to open your library" = "Tap to open your library";
+"The widget can't reach the app's data yet" = "The widget can't reach the app's data yet";
+"Gym" = "Gym";
+"Focus" = "Focus";
+"Chill" = "Chill";
+"Party" = "Party";
+"Arabic" = "Arabic";
+"Drive" = "Drive";

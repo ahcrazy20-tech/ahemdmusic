@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Overwritten by the properties: block in scripts/ci_build.sh at build time.
+     Kept in the repo so the target is openable in Xcode without generating. -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>AS Music</string>
+    <key>CFBundleName</key>
+    <string>ASMusicWidget</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.widgetkit-extension</string>
+    </dict>
+</dict>
+</plist>

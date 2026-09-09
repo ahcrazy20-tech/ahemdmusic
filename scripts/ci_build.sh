@@ -47,6 +47,17 @@ FILE_COUNT=$(ls -1 "$APP_DIR"/*.swift 2>/dev/null | wc -l | tr -d ' ')
 ls -1 "$APP_DIR"/*.swift 2>/dev/null | sed 's|.*/||' | sed 's/^/    /'
 echo "    count: $FILE_COUNT"
 
+# The widget extension is a second target with its own sources.
+WIDGET_DIR="TrollMusicApp/ASMusicWidget"
+if [ -d "$WIDGET_DIR" ]; then
+    WIDGET_COUNT=$(ls -1 "$WIDGET_DIR"/*.swift 2>/dev/null | wc -l | tr -d ' ')
+    echo "    widget extension: $WIDGET_COUNT source(s)"
+    if [ "${WIDGET_COUNT:-0}" -lt 1 ]; then
+        fail "$WIDGET_DIR exists but has no Swift sources — the widget target would fail to link."
+        exit 2
+    fi
+fi
+
 if [ "${FILE_COUNT:-0}" -lt 15 ]; then
     fail "Only $FILE_COUNT Swift files found in $APP_DIR (expected 20)."
     fail ""
@@ -104,6 +115,20 @@ if command -v python3 >/dev/null 2>&1 && [ -f scripts/check_localization.py ]; t
     python3 scripts/check_localization.py 2>&1 | sed 's/^/      /' || true
 fi
 
+# Widget bridge consistency (App Group id, URL scheme, target isolation, the
+# generated spec). These are cross-target mistakes the compiler cannot catch:
+# a mismatched App Group id compiles perfectly and produces a dead widget.
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/test_widget_logic.py ]; then
+    echo "    widget bridge check:"
+    if python3 scripts/test_widget_logic.py > /tmp/widget_check.log 2>&1; then
+        tail -1 /tmp/widget_check.log | sed 's/^/      /'
+    else
+        sed 's/^/      /' /tmp/widget_check.log
+        fail "The widget bridge is inconsistent — see the failures above."
+        exit 2
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Clean leftovers — NEVER the sources
 # ---------------------------------------------------------------------------
@@ -143,6 +168,11 @@ targets:
       - path: TrollMusicApp/TrollMusicApp
         excludes:
           - "Preview Content"
+    entitlements:
+      path: TrollMusicApp/TrollMusicApp/TrollMusicApp.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.ahmedsoliman.trollmusicapp
     info:
       path: TrollMusicApp/TrollMusicApp/Info.plist
       properties:
@@ -183,10 +213,64 @@ targets:
         CFBundleLocalizations:
           - en
           - ar
+        # asmusic:// — how the widget (and Shortcuts) talk back to the app.
+        # Without this registered the widget's Links silently do nothing.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.ahmedsoliman.trollmusicapp
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - asmusic
     settings:
       GENERATE_INFOPLIST_FILE: NO
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       DEVELOPMENT_ASSET_PATHS: "DummyAssets"
+      CODE_SIGNING_ALLOWED: NO
+      CODE_SIGNING_REQUIRED: NO
+      CODE_SIGN_IDENTITY: ""
+      DEVELOPMENT_TEAM: ""
+      PROVISIONING_PROFILE: ""
+    dependencies:
+      - target: ASMusicWidgetExtension
+        embed: true
+
+  # Home-Screen widget. Its own process, its own sandbox — it reaches the app's
+  # state through the App Group container, which is why SharedNowPlaying.swift
+  # is compiled into BOTH targets rather than shared at runtime.
+  ASMusicWidgetExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: TrollMusicApp/ASMusicWidget
+      # The single file the two targets agree on. Everything else in the app
+      # (MusicManager, AVFoundation, the views) must stay out of the widget.
+      - path: TrollMusicApp/TrollMusicApp/SharedNowPlaying.swift
+      # A widget is its OWN bundle: Text("Now Playing") inside the extension
+      # looks up the extension's resources, not the app's. Without these the
+      # widget would stay English on an Arabic device even though the app
+      # itself translates correctly.
+      - path: TrollMusicApp/TrollMusicApp/en.lproj
+      - path: TrollMusicApp/TrollMusicApp/ar.lproj
+    info:
+      path: TrollMusicApp/ASMusicWidget/Info.plist
+      properties:
+        CFBundleDisplayName: AS Music
+        CFBundleName: ASMusicWidget
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations:
+          - en
+          - ar
+    entitlements:
+      path: TrollMusicApp/ASMusicWidget/ASMusicWidget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.ahmedsoliman.trollmusicapp
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.ahmedsoliman.trollmusicapp.widget
+      GENERATE_INFOPLIST_FILE: NO
+      SKIP_INSTALL: YES
       CODE_SIGNING_ALLOWED: NO
       CODE_SIGNING_REQUIRED: NO
       CODE_SIGN_IDENTITY: ""
@@ -338,6 +422,30 @@ if [ -n "$LPROJ_MISSING" ]; then
     fail "These .lproj bundles did not make it into TrollMusicApp.app:$LPROJ_MISSING"
     fail "XcodeGen did not treat them as variant groups — check the 'sources:' block."
     exit 2
+fi
+
+# The widget is embedded inside the app bundle, not installed separately, so
+# "did it build?" and "did it get embedded?" are different questions. A missing
+# extension is invisible until the user goes looking for the widget.
+if [ -d "$WIDGET_DIR" ]; then
+    say "Verifying the embedded widget extension"
+    EXT="Payload/TrollMusicApp.app/PlugIns/ASMusicWidgetExtension.appex"
+    if [ -d "$EXT" ]; then
+        echo "      ASMusicWidgetExtension.appex embedded"
+        for L in en ar; do
+            test -f "$APP_DIR/$L.lproj/Localizable.strings" || continue
+            if [ -f "$EXT/$L.lproj/Localizable.strings" ]; then
+                echo "      widget $L.lproj in bundle"
+            else
+                echo "::warning::The widget extension has no $L.lproj — the widget will render in English even when the app is in $L"
+            fi
+        done
+    else
+        echo "::error::The widget extension was not embedded into the app bundle"
+        fail "Expected $EXT"
+        fail "The target built but was not embedded — check the app target's dependencies: block."
+        exit 2
+    fi
 fi
 
 /usr/bin/zip -q -r TrollMusicApp.ipa Payload

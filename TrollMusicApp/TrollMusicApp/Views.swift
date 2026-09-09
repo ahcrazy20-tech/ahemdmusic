@@ -271,6 +271,14 @@ struct MainTabView: View {
         .tint(AppTheme.accent)
         .sheet(isPresented: $showFullPlayer) { FullPlayerView() }
         .sheet(isPresented: $showDownloads) { DownloadsQueueView() }
+        .onReceive(NotificationCenter.default.publisher(for: .widgetDidRequestNowPlaying)) { _ in
+            // Tapping the widget's artwork or a Moment button should land on
+            // the player, not wherever the app happened to be last.
+            // A moment mix needs a beat to build before there's a song to show.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                if musicManager.currentSong != nil { showFullPlayer = true }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .openAISettings)) { _ in
             // Anywhere in the app can send the user straight to the AI
             // settings ("tap to add a free key" hints, EQ screen, Discover).

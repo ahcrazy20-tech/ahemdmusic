@@ -26,6 +26,8 @@ import glob
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 APP = os.path.join(ROOT, "TrollMusicApp", "TrollMusicApp")
+# The widget extension shows its own strings and shares the .strings files.
+WIDGET = os.path.join(ROOT, "TrollMusicApp", "ASMusicWidget")
 
 PAIR_RE = re.compile(r'"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"\s*;')
 LINE_RE = re.compile(r'^\s*"(?:[^"\\]|\\.)*"\s*=\s*"(?:[^"\\]|\\.)*"\s*;\s*$')
@@ -75,7 +77,9 @@ def load_strings(path):
 
 def ui_strings():
     found = {}
-    for f in sorted(glob.glob(os.path.join(APP, "*.swift"))):
+    sources = sorted(glob.glob(os.path.join(APP, "*.swift")))
+    sources += sorted(glob.glob(os.path.join(WIDGET, "*.swift")))
+    for f in sources:
         text = open(f, encoding="utf-8").read()
         for rx in (UI_RE, EXPLICIT_RE):
             for m in rx.finditer(text):
