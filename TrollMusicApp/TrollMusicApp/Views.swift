@@ -219,7 +219,7 @@ struct BlurredArtworkBackground: View {
     }
 }
 
-enum TabID: Hashable { case library, discover, playlists, magic, browser }
+enum TabID: Hashable { case library, discover, playlists, magic, browser, settings }
 
 struct MainTabView: View {
     @EnvironmentObject var musicManager: MusicManager
@@ -237,6 +237,7 @@ struct MainTabView: View {
                 case .playlists: PlaylistsView()
                 case .magic:     SmartDownloaderView()
                 case .browser:   BrowserMainView()
+                case .settings:  SettingsTabView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -257,6 +258,7 @@ struct MainTabView: View {
                     TabButton(label: "Playlists", icon: "music.mic", id: .playlists, selection: $selected)
                     TabButton(label: "Magic DL", icon: "sparkles", id: .magic, selection: $selected)
                     TabButton(label: "Web Hub", icon: "safari", id: .browser, selection: $selected)
+                    TabButton(label: "Settings", icon: "gearshape", id: .settings, selection: $selected)
                 }
                 .padding(.top, 6)
                 .padding(.bottom, 4)
@@ -268,6 +270,11 @@ struct MainTabView: View {
         .tint(AppTheme.accent)
         .sheet(isPresented: $showFullPlayer) { FullPlayerView() }
         .sheet(isPresented: $showDownloads) { DownloadsQueueView() }
+        .onReceive(NotificationCenter.default.publisher(for: .openAISettings)) { _ in
+            // Anywhere in the app can send the user straight to the AI
+            // settings ("tap to add a free key" hints, EQ screen, Discover).
+            selected = .settings
+        }
         .onReceive(dc.$tasks) { newTasks in
             // `dc.$tasks` fires *willSet*, so `dc.tasks` is still the old value
             // here — use the incoming value, and defer the write so we don't
@@ -922,14 +929,17 @@ struct EQView: View {
                 }
             }
             Section(header: Text("AI Music Assistant (optional)"),
-                    footer: Text("Paste your FREE Google AI Studio key (aistudio.google.com) to ask for songs in plain language — e.g. \"5 new Egyptian pop songs about summer\". With no key the feature is off and nothing is sent anywhere.")) {
-                VStack(alignment: .leading, spacing: 8) {
-                    SecureField("Gemini API key", text: $ai.key)
-                        .font(.subheadline)
-                    TextField("Model (default: gemini-2.5-flash)", text: $ai.model)
-                        .font(.subheadline)
+                    footer: Text(ai.isConfigured
+                                 ? "AI is on (\(ai.activeLabel) · \(ai.provider == .apinex ? ai.apinexModel : ai.model)). Providers, keys and models now live in the Settings tab."
+                                 : "Off — add a free key in the Settings tab. APInex gives you 20+ models (GPT, Gemini, DeepSeek, GLM…) incl. free tiers with ONE key.")) {
+                Button {
+                    pm.wrappedValue.dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        NotificationCenter.default.post(name: .openAISettings, object: nil)
+                    }
+                } label: {
+                    Label("Open AI Intelligence settings", systemImage: "brain.head.profile")
                 }
-                .autocorrectionDisabled()
             }
             VoiceSettingsSection()
             Section(footer: Text("Tip: the Vocal & Sound Studio sheet adds per-song corrections on top of these presets. Arabic/Maqaam boosts oud/qanun highs while keeping warm lows — great for Amr Diab, Sherine, Nancy Ajram.")) {
@@ -2117,10 +2127,15 @@ struct PlaylistAICard: View {
                         .font(.caption).foregroundColor(.secondary)
                 }
             } else {
-                Text(ai.isConfigured
-                     ? "Gemini AI picks & names it · no key = works offline"
-                     : "On-device AI · add a free Gemini key in Audio Settings for smarter picks")
-                    .font(.caption2).foregroundColor(.secondary)
+                Button {
+                    NotificationCenter.default.post(name: .openAISettings, object: nil)
+                } label: {
+                    Text(ai.isConfigured
+                         ? "AI (\(ai.activeLabel)) picks & names it · tap to change provider or model"
+                         : "On-device AI · tap to add a free key (APInex: 20+ models, one key)")
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
             }
             if let note = engine.lastNote {
                 Text(note).font(.caption).foregroundColor(.green)
@@ -2503,5 +2518,290 @@ struct TrendingCard: View {
                     .lineLimit(1).frame(width:130, alignment:.leading)
             }
         }.buttonStyle(.plain)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MARK: - Settings tab — every setting in one place
+// ---------------------------------------------------------------------------
+
+/// The Settings tab: AI Intelligence (provider · key · model · never-stop
+/// failover), Audio & Playback, Voice control, Appearance, Download engines,
+/// Library tools and About. Every screen that used to hide a setting behind
+/// a toolbar icon is reachable from here.
+struct SettingsTabView: View {
+    @EnvironmentObject var musicManager: MusicManager
+    @ObservedObject private var ai = GeminiAI.shared
+    @State private var showBackup = false
+    @State private var showHealth = false
+    @State private var showDuplicates = false
+    @State private var showTrash = false
+    @State private var showNameTidy = false
+    @State private var showArtists = false
+
+    var body: some View {
+        NavigationView {
+            Form {
+                AISettingsSection()
+                VoiceSettingsSection()
+                Section(header: Label("Audio & Playback", systemImage: "waveform"),
+                        footer: Text("Same screen as from the player: EQ preset, loudness boost, spatial sound, resume.")) {
+                    NavigationLink(destination: EQView()) {
+                        Label("Equalizer, loudness & playback", systemImage: "slider.horizontal.3")
+                    }
+                }
+                Section(header: Label("Appearance", systemImage: "paintpalette")) {
+                    NavigationLink(destination: ThemePickerView()) {
+                        Label("Accent color & theme", systemImage: "drop.fill")
+                    }
+                }
+                Section(header: Label("Downloads", systemImage: "arrow.down.circle"),
+                        footer: Text("Piped / Invidious / Cobalt / your own server, mirror lists and health — the engines that race to fetch your songs.")) {
+                    NavigationLink(destination: EngineSettingsView()) {
+                        Label("Download engines", systemImage: "bolt.horizontal.circle")
+                    }
+                }
+                Section(header: Label("Library tools", systemImage: "music.note.list")) {
+                    toolRow("Backup & restore", icon: "externaldrive.fill", active: $showBackup)
+                    toolRow("Library health report", icon: "heart.text.square", active: $showHealth)
+                    toolRow("Duplicate finder", icon: "doc.on.doc", active: $showDuplicates)
+                    toolRow("Recently deleted", icon: "trash", active: $showTrash)
+                    toolRow("Name tidy-up", icon: "textformat.abc", active: $showNameTidy)
+                    toolRow("Artists browser", icon: "person.2.fill", active: $showArtists)
+                }
+                Section(header: Label("About", systemImage: "info.circle")) {
+                    HStack {
+                        Text("App version")
+                        Spacer()
+                        Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("Songs in library")
+                        Spacer()
+                        Text("\(musicManager.songs.count)")
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("AI provider")
+                        Spacer()
+                        Text(ai.isConfigured ? "\(ai.activeLabel) · \(ai.provider == .apinex ? ai.apinexModel : ai.model)" : "On-device (no key)")
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+            .sheet(isPresented: $showBackup) { BackupView().environmentObject(musicManager) }
+            .sheet(isPresented: $showHealth) { LibraryHealthView().environmentObject(musicManager) }
+            .sheet(isPresented: $showDuplicates) { DuplicateReviewView().environmentObject(musicManager) }
+            .sheet(isPresented: $showTrash) { RecentlyDeletedView() }
+            .sheet(isPresented: $showNameTidy) { NameTidyView().environmentObject(musicManager) }
+            .sheet(isPresented: $showArtists) { ArtistsBrowserView().environmentObject(musicManager) }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    private func toolRow(_ title: String, icon: String, active: Binding<Bool>) -> some View {
+        Button {
+            active.wrappedValue = true
+        } label: {
+            HStack {
+                Label(title, systemImage: icon).foregroundColor(.primary)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption).foregroundColor(Color(UIColor.tertiaryLabel))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MARK: - AI Intelligence section (provider · key · model · never-stop)
+// ---------------------------------------------------------------------------
+
+struct AISettingsSection: View {
+    @ObservedObject private var ai = GeminiAI.shared
+    @State private var testing = false
+    @State private var testResult: String? = nil
+    @State private var refreshing = false
+
+    var body: some View {
+        Section(header: Label("AI Intelligence", systemImage: "brain.head.profile"),
+                footer: Text(aiFooter)) {
+            Picker("Provider", selection: $ai.provider) {
+                ForEach(AIProvider.allCases) { p in
+                    Text(p.displayName).tag(p)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+
+            switch ai.provider {
+            case .onDevice:
+                Text("Everything smart still works — playlists, duplicate checks, mood picks — computed fully on this phone. Add a key below whenever you want cloud models.")
+                    .font(.caption).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .apinex:
+                apinexBody
+            case .gemini:
+                geminiBody
+            }
+        }
+    }
+
+    // -- APInex -------------------------------------------------------------
+
+    @ViewBuilder
+    private var apinexBody: some View {
+        SecureField("APInex key (sk-apx…)", text: $ai.apinexKey)
+            .autocorrectionDisabled()
+            .autocapitalization(.none)
+            .font(.subheadline)
+
+        Menu {
+            ForEach(ai.apinexCatalog) { m in
+                Button {
+                    ai.apinexModel = m.id
+                } label: {
+                    Text(m.isFree ? "FREE · \(m.label) · \(m.price)" : "\(m.label) · \(m.price)")
+                }
+            }
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Model").font(.caption).foregroundColor(.secondary)
+                    Text(currentApinexLabel)
+                        .font(.subheadline).foregroundColor(.primary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+        }
+
+        TextField("Custom model id (advanced)", text: $ai.apinexModel)
+            .autocorrectionDisabled()
+            .autocapitalization(.none)
+            .font(.subheadline)
+
+        failoverToggle
+
+        Button {
+            refreshModels()
+        } label: {
+            Label(refreshing ? "Refreshing model list…" : "Refresh model list (live from apinex.bond)",
+                  systemImage: "arrow.clockwise")
+        }
+        .disabled(refreshing || ai.apinexKey.trimmingCharacters(in: .whitespaces).isEmpty)
+
+        Button {
+            testKey()
+        } label: {
+            Label(testing ? "Testing…" : "Test key now", systemImage: "checkmark.seal")
+        }
+        .disabled(testing || ai.apinexKey.trimmingCharacters(in: .whitespaces).isEmpty)
+
+        if let r = testResult {
+            Text(r).font(.caption).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var currentApinexLabel: String {
+        if let m = ai.apinexCatalog.first(where: { $0.id == ai.apinexModel }) {
+            return (m.isFree ? "★ FREE · " : "") + m.label + " · " + m.price
+        }
+        return ai.apinexModel
+    }
+
+    // -- Gemini (direct) ------------------------------------------------------
+
+    @ViewBuilder
+    private var geminiBody: some View {
+        SecureField("Gemini API key (aistudio.google.com)", text: $ai.key)
+            .autocorrectionDisabled()
+            .autocapitalization(.none)
+            .font(.subheadline)
+        TextField("Model (default: gemini-3.5-flash)", text: $ai.model)
+            .autocorrectionDisabled()
+            .autocapitalization(.none)
+            .font(.subheadline)
+        Toggle(isOn: $ai.autoModel) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Auto model (self-healing)").font(.subheadline)
+                Text("Switches to a verified newer Gemini when Google retires one.")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+        }
+        failoverToggle
+        Button {
+            testGemini()
+        } label: {
+            Label(testing ? "Testing…" : "Test key now", systemImage: "checkmark.seal")
+        }
+        .disabled(testing || ai.key.trimmingCharacters(in: .whitespaces).isEmpty)
+        if let r = testResult {
+            Text(r).font(.caption).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Shared "never stop" toggle (shown for both cloud providers).
+    private var failoverToggle: some View {
+        Toggle(isOn: $ai.autoFailover) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Auto-failover — never stop").font(.subheadline)
+                Text("Dead or retired model → next model → other provider → on-device. One silent retry, no dead ends.")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+        }
+    }
+
+    // -- Footer ----------------------------------------------------------------
+
+    private var aiFooter: String {
+        switch ai.provider {
+        case .onDevice:
+            return "No key, no account: nothing ever leaves this phone."
+        case .apinex:
+            return "Get ONE free key at apinex.bond (register → dashboard → create key, starts with sk-apx…). It unlocks 20+ models — GPT, Gemini, DeepSeek, GLM, Qwen, Kimi, Grok — free tiers included. The key is stored only on this device and only ever sent to api.apinex.bond."
+        case .gemini:
+            return "Free key from aistudio.google.com. Stored only on this device; only ever sent to Google."
+        }
+    }
+
+    // -- Actions ----------------------------------------------------------------
+
+    private func refreshModels() {
+        refreshing = true
+        testResult = nil
+        ai.refreshApinexCatalog {
+            refreshing = false
+            testResult = "Model list refreshed — \(ai.apinexCatalog.count) models available."
+        }
+    }
+
+    private func testKey() {
+        testing = true
+        testResult = nil
+        AITransport.testApinexKey(key: ai.apinexKey) { r in
+            DispatchQueue.main.async {
+                testing = false
+                testResult = r
+            }
+        }
+    }
+
+    private func testGemini() {
+        testing = true
+        testResult = nil
+        AITransport.testGeminiKey(key: ai.key, model: ai.model) { r in
+            DispatchQueue.main.async {
+                testing = false
+                testResult = r
+            }
+        }
     }
 }

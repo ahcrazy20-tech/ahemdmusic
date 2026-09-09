@@ -572,7 +572,7 @@ struct VoiceSearchButton: View {
     }
 }
 
-/// Voice/speech settings, shown inside the Audio Settings sheet.
+/// Voice/speech settings, shown in the Settings tab and the Audio sheet.
 struct VoiceSettingsSection: View {
     @ObservedObject private var speak = SpokenFeedback.shared
     @ObservedObject private var voice = VoiceSearchController.shared

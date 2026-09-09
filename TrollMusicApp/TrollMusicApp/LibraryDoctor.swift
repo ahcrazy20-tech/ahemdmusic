@@ -18,7 +18,8 @@ import UIKit
 //   2. DECIDE (local recommendation + optional AI)
 //      Every copy gets a keeper score: liked > most played > best measured
 //      sound quality > higher bitrate > has artwork. The best copy is
-//      pre-selected to KEEP. With a Gemini key configured, the model reviews
+//      pre-selected to KEEP. With an AI key configured (APInex or Gemini),
+//      the model reviews
 //      the same facts and may override the pick (with a short reason) — it
 //      only ever chooses between files you already own.
 //
@@ -338,7 +339,7 @@ final class LibraryDoctor: ObservableObject {
     /// recommendation simply stays.
     func aiReview(completion: (() -> Void)? = nil) {
         guard GeminiAI.shared.isConfigured else {
-            lastError = "Add your free Gemini key in the player's Audio Settings to let AI pick the best copies — without a key the app still recommends locally."
+            lastError = "Add a free AI key in the Settings tab (AI Intelligence — APInex or Gemini) to let AI pick the best copies — without a key the app still recommends locally."
             completion?()
             return
         }

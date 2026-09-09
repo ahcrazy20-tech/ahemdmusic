@@ -521,7 +521,7 @@ final class NameTidy: ObservableObject {
         guard !busy else { return }
         let ai = GeminiAI.shared
         guard ai.isConfigured else {
-            error = "Add a free Gemini key in Audio Settings and the AI will name these. The local suggestions work without one."
+            error = "Add a free AI key in the Settings tab (APInex or Gemini) and the AI will name these. The local suggestions work without one."
             return
         }
         guard !items.isEmpty else { return }

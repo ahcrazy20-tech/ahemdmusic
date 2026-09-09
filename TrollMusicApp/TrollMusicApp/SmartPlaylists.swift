@@ -15,7 +15,8 @@ import UIKit
 //                 and k-means groups whatever is left into "vibe" clusters
 //                 with generated names. Tracks are then ordered DJ-style:
 //                 smallest tempo/energy jumps, no back-to-back same artist.
-//   3. UPGRADE  — if a Gemini key is configured, a plain-language request
+//   3. UPGRADE  — if an AI key is configured (APInex or Gemini), a plain-
+//      language request
 //                 ("حماسية للجلد", "quiet arabic for a rainy drive") is turned
 //                 into a named playlist by the model, using YOUR library as the
 //                 catalog. Without a key the same request is handled by a local
@@ -899,7 +900,7 @@ enum PlaylistBriefParser {
 
 extension SmartPlaylistEngine {
 
-    /// Generate a playlist from a sentence. With a Gemini key configured the
+    /// Generate a playlist from a sentence. With an AI key configured the
     /// model picks and names it from your library; without one the local
     /// Arabic/English parser does the same job offline.
     func generate(from request: String, completion: ((String?) -> Void)? = nil) {

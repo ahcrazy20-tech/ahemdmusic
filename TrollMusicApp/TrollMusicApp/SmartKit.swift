@@ -13,10 +13,14 @@ import UIKit
 //                      missing cover art, real artist names and genres.
 //   • WikipediaAPI   — Wikipedia REST API (free, NO key): artist bios +
 //                      photos. Tries Arabic first for Arabic names.
-//   • GeminiAI       — optional Google Gemini (free tier). User pastes their
-//                      own free API key in settings; the AI suggests real
-//                      songs that download into the Library with one tap.
-//                      With no key set, NOTHING is sent anywhere.
+//   • GeminiAI       — the multi-provider AI engine (Settings → AI
+//                      Intelligence): APInex (apinex.bond — ONE key, 20+
+//                      models incl. free tiers) or the user's own free
+//                      Google Gemini key. It suggests real songs that
+//                      download into the Library with one tap, and rotates
+//                      models/providers automatically so a dead model never
+//                      stops a feature. With no key set, NOTHING is sent
+//                      anywhere — everything falls back to on-device logic.
 //
 // Free chart regions (Deezer, no key) are defined at the bottom.
 // ===========================================================================
@@ -394,25 +398,73 @@ enum WikipediaAPI {
     }
 }
 
-// MARK: - Optional AI assistant (Google Gemini free tier, user's own key)
+// MARK: - Optional AI assistant (multi-provider: APInex / Gemini / on-device)
 
-/// The AI Music Assistant. It does nothing until the user pastes their OWN
-/// free API key (Google AI Studio). With no key, no network calls are made.
+/// The AI Music Assistant — ONE engine, MANY providers.
+///
+/// The active provider is chosen in Settings → AI Intelligence:
+///   • .apinex   — apinex.bond: one key (sk-apx…) → 20+ models incl. FREE
+///                 tiers (GLM, GPT, Gemini, DeepSeek, Qwen…)
+///   • .gemini   — the user's own free Google AI Studio key (as before)
+///   • .onDevice — no key: nothing is ever sent anywhere
+///
+/// "Never stop" failover (on by default): a request walks the chain
+/// [chosen model → next models of the same provider → the OTHER provider
+/// if it has a key]. A retired model id, a rate limit, an empty reply or
+/// a dead endpoint only ever costs one silent retry — and when everything
+/// is unavailable, callers fall back to their on-device engine, so no
+/// feature ever shows the user a dead end.
 final class GeminiAI: ObservableObject {
     static let shared = GeminiAI()
 
+    // -- provider selection ---------------------------------------------------
+    @Published var provider: AIProvider {
+        didSet {
+            UserDefaults.standard.set(provider.rawValue, forKey: Self.providerDefaultsKey)
+            if provider == .apinex { refreshApinexCatalog() }
+        }
+    }
+    /// Master switch for model rotation + crossing to the other provider.
+    @Published var autoFailover: Bool {
+        didSet { UserDefaults.standard.set(autoFailover, forKey: Self.failoverDefaultsKey) }
+    }
+
+    // -- APInex (apinex.bond — many models, one key) ----------------------------
+    @Published var apinexKey: String {
+        didSet {
+            UserDefaults.standard.set(apinexKey, forKey: Self.apinexKeyDefaultsKey)
+            // Pasting a key while "On-device only" is selected obviously means
+            // the user wants this provider — switch for them.
+            if !apinexKey.trimmingCharacters(in: .whitespaces).isEmpty && provider == .onDevice {
+                provider = .apinex
+            }
+        }
+    }
+    @Published var apinexModel: String {
+        didSet { UserDefaults.standard.set(apinexModel, forKey: Self.apinexModelDefaultsKey) }
+    }
+    /// Live model list for the picker (bundled snapshot until refreshed).
+    @Published private(set) var apinexCatalog: [AIModelInfo] = APInexCatalog.bundled
+
+    // -- Google Gemini (direct, user's own key — unchanged semantics) -----------
     @Published var key: String {
-        didSet { UserDefaults.standard.set(key, forKey: "asmusic_gemini_key") }
+        didSet {
+            UserDefaults.standard.set(key, forKey: Self.keyDefaultsKey)
+            if !key.trimmingCharacters(in: .whitespaces).isEmpty && provider == .onDevice {
+                provider = .gemini
+            }
+        }
     }
     @Published var model: String {
-        didSet { UserDefaults.standard.set(model, forKey: "asmusic_gemini_model") }
+        didSet { UserDefaults.standard.set(model, forKey: Self.modelDefaultsKey) }
     }
-    /// NEW: Auto model (self-healing). On: the app silently switches to a
-    /// verified newer model id when Google retires the stored one. Off:
-    /// always use `model` exactly as before.
+    /// Auto model (self-healing) for the Gemini provider: silently switches
+    /// to a verified newer model id when Google retires the stored one.
     @Published var autoModel: Bool {
-        didSet { UserDefaults.standard.set(autoModel, forKey: "asmusic_gemini_auto") }
+        didSet { UserDefaults.standard.set(autoModel, forKey: Self.autoDefaultsKey) }
     }
+
+    // -- shared UI state ---------------------------------------------------------
     @Published var isThinking: Bool = false
     @Published var lastError: String? = nil
     @Published var suggestions: [DiscoTrack] = []
@@ -420,33 +472,161 @@ final class GeminiAI: ObservableObject {
     private static let keyDefaultsKey = "asmusic_gemini_key"
     private static let modelDefaultsKey = "asmusic_gemini_model"
     private static let autoDefaultsKey = "asmusic_gemini_auto"
+    private static let providerDefaultsKey = "asmusic_ai_provider"
+    private static let failoverDefaultsKey = "asmusic_ai_failover"
+    private static let apinexKeyDefaultsKey = "asmusic_apinex_key"
+    private static let apinexModelDefaultsKey = "asmusic_apinex_model"
 
     private init() {
-        key = UserDefaults.standard.string(forKey: Self.keyDefaultsKey) ?? ""
-        autoModel = UserDefaults.standard.object(forKey: Self.autoDefaultsKey) as? Bool ?? true
-        model = UserDefaults.standard.string(forKey: Self.modelDefaultsKey) ?? "gemini-3.5-flash"
+        let d = UserDefaults.standard
+        // Read defaults into locals first: touching `self.key` before every
+        // stored property has a value is a compile error in Swift.
+        let savedGeminiKey = d.string(forKey: Self.keyDefaultsKey) ?? ""
+        let savedApinexKey = d.string(forKey: Self.apinexKeyDefaultsKey) ?? ""
+        key = savedGeminiKey
+        autoModel = d.object(forKey: Self.autoDefaultsKey) as? Bool ?? true
+        model = d.string(forKey: Self.modelDefaultsKey) ?? "gemini-3.5-flash"
+        apinexKey = savedApinexKey
+        apinexModel = d.string(forKey: Self.apinexModelDefaultsKey) ?? "free/glm-5.3-flash"
+        autoFailover = d.object(forKey: Self.failoverDefaultsKey) as? Bool ?? true
+        // Migration: anyone who already pasted a Gemini key keeps it working;
+        // everyone else starts on-device until they pick a provider.
+        if let raw = d.string(forKey: Self.providerDefaultsKey), let p = AIProvider(rawValue: raw) {
+            provider = p
+        } else if !savedGeminiKey.trimmingCharacters(in: .whitespaces).isEmpty {
+            provider = .gemini
+        } else {
+            provider = .onDevice
+        }
+        if let saved = d.stringArray(forKey: "asmusic_apinex_catalog"), !saved.isEmpty {
+            apinexCatalog = APInexCatalog.ordered(saved.map { APInexCatalog.info(for: $0) })
+        }
+        if provider == .apinex { refreshApinexCatalog() }
     }
 
-    var isConfigured: Bool { !key.trimmingCharacters(in: .whitespaces).isEmpty }
+    var isConfigured: Bool {
+        switch provider {
+        case .onDevice: return false
+        case .apinex:   return !apinexKey.trimmingCharacters(in: .whitespaces).isEmpty
+        case .gemini:   return !key.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
 
-    /// Asks the model for song suggestions matching the user's request.
-    /// `attempt` is 0 for user asks; the self-heal retry uses 1 (one rotation
-    /// max per ask, so we can never loop).
-    func ask(_ prompt: String, completion: (([DiscoTrack]) -> Void)? = nil, attempt: Int = 0) {
+    /// Human name of whatever would answer right now (used in footers).
+    var activeLabel: String { provider.shortName }
+
+    // ------------------------------------------------------------------
+    // The never-stop chain
+    // ------------------------------------------------------------------
+
+    private struct AIAttempt { let provider: AIProvider; let model: String; let key: String }
+
+    /// Ordered attempts for one logical question:
+    ///   1. the chosen model of the chosen provider,
+    ///   2. its fallback models (Gemini: only when Auto model is on;
+    ///      APInex: free models first — only when Auto-failover is on),
+    ///   3. the OTHER provider's chain, if it has a key (Auto-failover only).
+    /// Capped at 8 attempts, so the worst case is a few quiet retries.
+    private func buildChain() -> [AIAttempt] {
+        var out: [AIAttempt] = []
+        func push(_ p: AIProvider) {
+            guard out.count < 8 else { return }
+            switch p {
+            case .onDevice:
+                break
+            case .gemini:
+                let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !k.isEmpty else { return }
+                var models = [model]
+                if autoModel { models.append(contentsOf: GeminiDiscovery.candidates()) }
+                for m in models where !m.isEmpty {
+                    guard !out.contains(where: { $0.provider == .gemini && $0.model == m }) else { continue }
+                    out.append(AIAttempt(provider: .gemini, model: m, key: k))
+                    if out.count >= 8 { break }
+                }
+            case .apinex:
+                let k = apinexKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !k.isEmpty else { return }
+                var models = [apinexModel]
+                if autoFailover { models.append(contentsOf: APInexCatalog.fallbackModels()) }
+                for m in models where !m.isEmpty {
+                    guard !out.contains(where: { $0.provider == .apinex && $0.model == m }) else { continue }
+                    out.append(AIAttempt(provider: .apinex, model: m, key: k))
+                    if out.count >= 8 { break }
+                }
+            }
+        }
+        push(provider)
+        if autoFailover { push(provider == .gemini ? .apinex : .gemini) }
+        return out
+    }
+
+    /// Walks the chain. Model-level failures rotate to the next model; a
+    /// rejected key skips the rest of THAT provider and crosses to the other
+    /// one; when everything failed the last error is reported so callers can
+    /// fall back to their on-device path.
+    private func runChat(system: String, user: String, temperature: Double, maxTokens: Int,
+                         chain: [AIAttempt]? = nil, index: Int = 0, lastFailure: String? = nil,
+                         completion: @escaping (String?, String?) -> Void) {
+        let attempts = chain ?? buildChain()
+        guard index < attempts.count else {
+            completion(nil, lastFailure ?? "No AI provider answered.")
+            return
+        }
+        let a = attempts[index]
+        AITransport.chat(provider: a.provider, key: a.key, model: a.model,
+                         system: system, user: user,
+                         temperature: temperature, maxTokens: maxTokens) { [weak self] outcome in
+            DispatchQueue.main.async {
+                guard let self = self else { completion(nil, lastFailure); return }
+                if let text = outcome.text {
+                    // Self-heal: remember whichever model actually answered.
+                    if a.provider == .gemini && a.model != self.model { self.model = a.model }
+                    if a.provider == .apinex && a.model != self.apinexModel { self.apinexModel = a.model }
+                    completion(text, nil)
+                    return
+                }
+                var next = index + 1
+                if outcome.keyRejected {
+                    // Wrong key: no point trying more models of this provider.
+                    while next < attempts.count && attempts[next].provider == a.provider { next += 1 }
+                }
+                if next < attempts.count {
+                    let who = a.provider == .apinex ? "APInex" : "Gemini"
+                    let note = "\(who): \(outcome.error ?? "no answer")"
+                    self.runChat(system: system, user: user, temperature: temperature,
+                                 maxTokens: maxTokens, chain: attempts, index: next,
+                                 lastFailure: note) { t, e in
+                        // Pass through untouched: `e` is nil exactly when a
+                        // deeper attempt succeeded, and the deepest failure
+                        // already carries the accumulated `note`.
+                        completion(t, e)
+                    }
+                } else {
+                    completion(nil, outcome.error ?? lastFailure)
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Public API (unchanged signatures — every existing caller keeps working)
+    // ------------------------------------------------------------------
+
+    /// Asks the active provider for song suggestions matching the request.
+    func ask(_ prompt: String, completion: (([DiscoTrack]) -> Void)? = nil) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isConfigured else {
-            lastError = "Add your free Gemini key in player settings first."
+            lastError = "Add a free AI key in Settings → AI Intelligence first."
             completion?([])
             return
         }
         guard !trimmed.isEmpty else { completion?([]); return }
-        // Proactive heal (fire-and-forget): if our stored model already
-        // vanished from Google's list, silently adopt a verified newer one.
-        if autoModel && attempt == 0 {
+        // Proactive heal (Gemini only, fire-and-forget): if the stored model
+        // already vanished from Google's list, silently adopt a verified one.
+        if provider == .gemini && autoModel {
             GeminiDiscovery.preSwitchIfGone(key: key, current: model) { [weak self] m in
-                if let m = m {
-                    DispatchQueue.main.async { self?.model = m }
-                }
+                if let m = m { DispatchQueue.main.async { self?.model = m } }
             }
         }
         isThinking = true
@@ -459,111 +639,69 @@ final class GeminiAI: ObservableObject {
         [{"artist":"Exact real artist name","title":"Exact real song title"}]
         Rules: only real, existing songs; prefer current/popular releases; honor the requested language, mood, genre or year exactly; artist and title must match how the songs are actually credited.
         """
-        let keyEnc = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
-        let modelEnc = model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? model
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelEnc):generateContent?key=\(keyEnc)") else {
-            isThinking = false
-            lastError = "Bad URL"
-            completion?([])
-            return
-        }
-        var req = URLRequest(url: url, timeoutInterval: 40)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = [
-            "systemInstruction": ["parts": [["text": system]]],
-            "contents": [["parts": [["text": trimmed]]]],
-            "generationConfig": ["temperature": 0.7, "maxOutputTokens": 1024]
-        ]
-        req.httpBody = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
-
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
-            guard let self = self else { return }
+        runChat(system: system, user: trimmed, temperature: 0.7, maxTokens: 1024) { [weak self] text, failure in
+            guard let self = self else { completion?([]); return }
             var tracks: [DiscoTrack] = []
-            var failure: String? = nil
-            if let err = err {
-                failure = err.localizedDescription
-            } else if let data = data {
-                if let status = (resp as? HTTPURLResponse)?.statusCode, status >= 400 {
-                    // Surface a short human reason (bad key, rate limit, model…).
-                    var msg: String? = nil
-                    if let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                       let errObj = j["error"] as? [String: Any],
-                       let m = errObj["message"] as? String {
-                        msg = String(m.prefix(140))
-                    }
-                    // NEW self-heal: retired-model error + Auto on + first
-                    // attempt → adopt the next verified model and retry once.
-                    if attempt == 0 && self.autoModel
-                        && self.modelGone(status: status, message: msg ?? ""),
-                       let next = GeminiDiscovery.nextModel(after: self.model) {
-                        let again = trimmed
-                        let cont = completion
-                        DispatchQueue.main.async {
-                            self.model = next
-                            self.ask(again, completion: cont, attempt: 1)
-                        }
-                        return
-                    }
-                    failure = msg ?? "Server error \(status)"
-                } else if let text = self.extractText(from: data) {
-                    tracks = self.parseTracks(from: text)
-                    if tracks.isEmpty { failure = "The AI returned nothing usable. Try again." }
-                } else {
-                    failure = "Unexpected reply from the AI."
-                }
+            var problem: String? = failure
+            if let text = text {
+                tracks = self.parseTracks(from: text)
+                if tracks.isEmpty { problem = "The AI returned nothing usable. Try again." }
             }
-            DispatchQueue.main.async {
-                self.isThinking = false
-                if let f = failure {
-                    self.lastError = f
-                } else {
-                    self.suggestions = tracks
-                }
-                completion?(tracks)
+            self.isThinking = false
+            if let p = problem, tracks.isEmpty {
+                self.lastError = p
+            } else {
+                self.suggestions = tracks
             }
-        }.resume()
+            completion?(tracks)
+        }
     }
 
     /// General JSON completion: sends `system` + `user`, expects the model to
-    /// answer with ONE JSON object, and hands back the parsed dictionary (nil on
-    /// any failure). Reuses the same key/model/self-heal path as `ask`, and is
-    /// the only way the AI is allowed to touch your library: the prompt always
-    /// contains only titles/artists you already own, so it can pick and name —
-    /// it can never invent songs that then get downloaded.
+    /// answer with ONE JSON object, and hands back the parsed dictionary (nil
+    /// on any failure — callers then use their on-device fallback). Now goes
+    /// through the same never-stop chain as `ask` (this was the hidden gap
+    /// before: it used to fail permanently on the first retired model id).
     func completeJSON(system: String, user: String,
                       temperature: Double = 0.4,
                       completion: @escaping ([String: Any]?) -> Void) {
         guard isConfigured else { completion(nil); return }
         var reqText = user
         if reqText.count > 24000 { reqText = String(reqText.prefix(24000)) }
-
-        let keyEnc = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
-        let modelEnc = model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? model
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelEnc):generateContent?key=\(keyEnc)") else {
-            completion(nil); return
+        runChat(system: system, user: reqText, temperature: temperature, maxTokens: 2048) { [weak self] text, _ in
+            guard let self = self, let text = text else { completion(nil); return }
+            completion(self.parseJSONObject(text))
         }
-        var req = URLRequest(url: url, timeoutInterval: 45)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = [
-            "systemInstruction": ["parts": [["text": system]]],
-            "contents": [["parts": [["text": reqText]]]],
-            "generationConfig": ["temperature": temperature, "maxOutputTokens": 2048]
-        ]
-        req.httpBody = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
-
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
-            guard let self = self else { completion(nil); return }
-            var out: [String: Any]? = nil
-            if err == nil, let data = data,
-               (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400,
-               let text = self.extractText(from: data) {
-                out = self.parseJSONObject(text)
-            }
-            DispatchQueue.main.async { completion(out) }
-        }.resume()
     }
+
+    // ------------------------------------------------------------------
+    // APInex catalog refresh (Settings UI calls this)
+    // ------------------------------------------------------------------
+
+    /// Loads the live model list from the platform. Keeps the bundled
+    /// snapshot on any failure, so the picker is never empty.
+    func refreshApinexCatalog(completion: (() -> Void)? = nil) {
+        AITransport.fetchApinexModels(key: apinexKey) { [weak self] models, _ in
+            DispatchQueue.main.async {
+                defer { completion?() }
+                guard let self = self, models != self.apinexCatalog else { return }
+                self.apinexCatalog = models
+                UserDefaults.standard.set(models.map { $0.id }, forKey: "asmusic_apinex_catalog")
+                // If the chosen model vanished from the LIVE list, move to the
+                // best free one — but never touch a custom id the user typed
+                // (rotation already covers a dead custom id at request time).
+                if !models.isEmpty, self.provider == .apinex,
+                   !models.contains(where: { $0.id == self.apinexModel }),
+                   APInexCatalog.knownModels[self.apinexModel] != nil {
+                    self.apinexModel = models[0].id
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Tolerant parsing (unchanged behaviour)
+    // ------------------------------------------------------------------
 
     /// Tolerant object extraction: strips accidental markdown fences and any
     /// prose around the first {...} block.
@@ -574,25 +712,6 @@ final class GeminiAI: ObservableObject {
         }
         guard let d = t.data(using: .utf8) else { return nil }
         return (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
-    }
-
-    /// True when an error plausibly means "this model id is retired".
-    private func modelGone(status: Int, message: String) -> Bool {
-        if status == 404 { return true }
-        let m = message.lowercased()
-        guard m.contains("model") else { return false }
-        return m.contains("not found") || m.contains("retired") || m.contains("deprecated")
-            || m.contains("unsupported") || m.contains("not supported")
-            || m.contains("expired") || m.contains("removed")
-    }
-
-    /// Pulls the text out of a generateContent reply.
-    private func extractText(from data: Data) -> String? {
-        guard let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let candidates = j["candidates"] as? [[String: Any]],
-              let content = candidates.first?["content"] as? [String: Any],
-              let parts = content["parts"] as? [[String: Any]] else { return nil }
-        return parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
     }
 
     /// Parses the JSON array (tolerating accidental markdown fences).
@@ -616,6 +735,7 @@ final class GeminiAI: ObservableObject {
         return out
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // MARK: - Gemini model self-healing (Auto model)

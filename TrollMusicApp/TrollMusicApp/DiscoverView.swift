@@ -415,14 +415,14 @@ struct DiscoverView: View {
         .cornerRadius(10)
     }
 
-    // MARK: AI assistant (optional — user's own free Gemini key)
+    // MARK: AI assistant (optional — APInex multi-model or the user's Gemini key)
 
     private var aiSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("AI Music Assistant", icon: "sparkles.tv", tint: AppTheme.accent)
             if !ai.isConfigured {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Ask for songs in plain language — for example “5 new Egyptian pop songs about summer” — and download the results in one tap. Free, powered by your own Google Gemini key.")
+                    Text("Ask for songs in plain language — for example “5 new Egyptian pop songs about summer” — and download the results in one tap. Free: one APInex key unlocks 20+ models (GPT, Gemini, DeepSeek, GLM…), or use your own Google Gemini key.")
                         .font(.caption).foregroundColor(.gray)
                     Button {
                         showAIKey = true
@@ -517,43 +517,61 @@ struct DiscoverView: View {
     }
 }
 
-// MARK: - AI key setup sheet
+// MARK: - AI key setup sheet (provider-aware)
 
+/// Quick setup from the Discover tab. The full control panel (model picker,
+/// live model list, auto-failover, key test) lives in the Settings tab —
+/// this sheet just gets a key pasted fast, then hands over.
 struct AIKeySetupView: View {
     @ObservedObject private var ai = GeminiAI.shared
-    @State private var keyInput = ""
     @Environment(\.presentationMode) var pm
 
     var body: some View {
         Form {
-            Section(header: Text("Get your free key"),
-                    footer: Text("1. Open aistudio.google.com and sign in with Google\n2. Tap “Get API key” → “Create API key”\n3. Paste it below — it is stored only on this device. Free tier: generous daily limit.")) {
-                VStack(alignment: .leading, spacing: 8) {
-                    SecureField("Paste your Gemini API key", text: $keyInput)
-                    TextField("Model (default: gemini-3.5-flash)", text: $ai.model)
-                    Toggle("Auto model (self-healing)", isOn: $ai.autoModel)
-                        .font(.subheadline)
-                    Text(ai.autoModel ? "On: the app switches models automatically when Google retires one." : "Off: always use the model above.")
-                        .font(.caption).foregroundColor(.secondary)
+            Section(header: Text("Pick your AI"),
+                    footer: Text(ai.provider == .apinex
+                                 ? "APInex: one free key → 20+ models (GPT, Gemini, DeepSeek, GLM, Qwen…) incl. free tiers. Get it at apinex.bond → register → dashboard → create key (sk-apx…)."
+                                 : ai.provider == .gemini
+                                 ? "Gemini: 1. Open aistudio.google.com and sign in with Google  2. Tap “Get API key” → “Create API key”  3. Paste it below."
+                                 : "No key? Everything smart still runs on this phone. A key only adds cloud models.")) {
+                Picker("Provider", selection: $ai.provider) {
+                    ForEach(AIProvider.allCases) { p in
+                        Text(p.shortName).tag(p)
+                    }
                 }
-                .autocorrectionDisabled()
+                .pickerStyle(.segmented)
+
+                switch ai.provider {
+                case .onDevice:
+                    Text("On-device only — nothing is sent anywhere.")
+                        .font(.caption).foregroundColor(.secondary)
+                case .apinex:
+                    SecureField("Paste your APInex key (sk-apx…)", text: $ai.apinexKey)
+                        .autocorrectionDisabled()
+                        .autocapitalization(.none)
+                case .gemini:
+                    SecureField("Paste your Gemini API key", text: $ai.key)
+                        .autocorrectionDisabled()
+                        .autocapitalization(.none)
+                }
             }
+
             Button {
-                ai.key = keyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                keyInput = ""
                 pm.wrappedValue.dismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    NotificationCenter.default.post(name: .openAISettings, object: nil)
+                }
             } label: {
-                Text("Save key").frame(maxWidth: .infinity).bold()
+                Text("Open full AI settings (models & failover)")
+                    .frame(maxWidth: .infinity).bold()
             }
-            .disabled(keyInput.trimmingCharacters(in: .whitespaces).count < 10)
         }
         .navigationTitle("AI Assistant")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                Button("Cancel") { pm.wrappedValue.dismiss() }
+                Button("Done") { pm.wrappedValue.dismiss() }
             }
         }
-        .onAppear { keyInput = ai.key }
     }
 }
