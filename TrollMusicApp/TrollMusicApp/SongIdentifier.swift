@@ -216,8 +216,11 @@ final class SongIdentifier: ObservableObject {
         let title = item.title ?? ""
         guard !title.isEmpty else { return nil }
 
+        // `creationDate` is iOS 17+, and this app targets iOS 16, so read the
+        // same value out of the property dictionary instead — same result,
+        // no availability gate, and it simply comes back nil on older systems.
         var year = ""
-        if let date = item.creationDate {
+        if let date = item[SHMediaItemProperty("creationDate")] as? Date {
             year = String(Calendar.current.component(.year, from: date))
         }
 

@@ -1580,7 +1580,7 @@ class MusicManager: NSObject, ObservableObject {
                 let endFrame = startFrame + AVAudioFramePosition(frames)
                 node.scheduleSegment(file, startingFrame: startFrame, frameCount: frames, at: nil) { [weak self] in
                     guard let self = self else { return }
-                    self.playerQueue.async {
+                    playerQueue.async {
                         if self.scheduleGeneration != gen { return }
                         self.isScheduled = false
                         if self.isPlaying && endFrame >= file.length - 1 {

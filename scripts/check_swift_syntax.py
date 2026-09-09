@@ -45,6 +45,12 @@ DECL = re.compile(r"^\s*(?:@\w+\s+)*(?:public |internal |private |fileprivate )?
                   re.M)
 USES = re.compile(r"\b([A-Z][A-Za-z0-9_]{2,})\b")
 
+# Top-level `let`/`var` at column 0 — file-scope globals, which are NOT members
+# and so must never be written as `self.name`.
+FILE_GLOBAL = re.compile(
+    r"^(?:private |fileprivate |internal |public )?(?:let|var)\s+([a-z_]\w*)",
+    re.M)
+
 BS = chr(92)          # backslash
 DQ = chr(34)          # one double quote
 TQ = DQ * 3           # the delimiter of a Swift multiline literal
@@ -495,6 +501,25 @@ def check_file(path: pathlib.Path):
                 problems.append("import after code — move it to the top of the file")
         else:
             seen_code = True
+
+    # `self.foo` where foo is a file-level global, not a member.
+    #
+    # This compiles in your head and fails in Xcode with "value of type 'X' has
+    # no member 'foo'". It is easy to write when moving code into a closure
+    # that already qualifies everything else with self, which is exactly how it
+    # reached CI once. Costs nothing to catch here instead of eight minutes in.
+    globals_here = set(FILE_GLOBAL.findall(raw))
+    if globals_here:
+        for i, ln in enumerate(raw.split(NL), 1):
+            st = ln.strip()
+            if st.startswith("//"):
+                continue
+            for m in re.finditer(r"\bself\.([A-Za-z_][A-Za-z0-9_]*)", ln):
+                if m.group(1) in globals_here:
+                    problems.append(
+                        f"line {i}: 'self.{m.group(1)}' — {m.group(1)} is a file-level "
+                        f"global, not a member; drop the 'self.'"
+                    )
     return set(DECL.findall(raw)), problems
 
 
