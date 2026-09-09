@@ -274,9 +274,11 @@ struct ArtistsBrowserView: View {
     }
 
     private var shown: [ArtistSummary] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return artists }
-        return artists.filter { $0.name.lowercased().contains(q) }
+        // Arabic-aware, same as the library search: عبدالحليم and عبد الحليم
+        // are the same artist, and nobody types the hamzas consistently.
+        return artists.filter { ArabicFold.contains($0.name, q) }
     }
 
     @Environment(\.presentationMode) private var presentationMode

@@ -1959,19 +1959,25 @@ class MusicManager: NSObject, ObservableObject {
     }
 
     /// Fuzzy name match for voice: exact → contains → shared-word score.
+    /// Finds a playlist from spoken or typed text.
+    ///
+    /// Folded through ArabicFold rather than plain `lowercased()`: dictation
+    /// returns أنت with a hamza where the saved name has none (and vice
+    /// versa), so an exact comparison almost never fires on Arabic names.
     func playlist(matching text: String) -> Playlist? {
-        let want = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let want = ArabicFold.key(raw)
         guard !want.isEmpty else { return nil }
-        if let exact = playlists.first(where: { $0.name.lowercased() == want }) { return exact }
+        if let exact = playlists.first(where: { ArabicFold.key($0.name) == want }) { return exact }
         if let has = playlists.first(where: {
-            !$0.name.lowercased().isEmpty
-                && ($0.name.lowercased().contains(want) || want.contains($0.name.lowercased()))
+            let n = ArabicFold.key($0.name)
+            return !n.isEmpty && (n.contains(want) || want.contains(n))
         }) { return has }
         let words = want.split(separator: " ").filter { $0.count > 2 }.map(String.init)
         guard !words.isEmpty else { return nil }
         var best: (pl: Playlist, score: Int)? = nil
         for p in playlists {
-            let hay = p.name.lowercased()
+            let hay = ArabicFold.key(p.name)
             let score = words.reduce(0) { hay.contains($1) ? $0 + 1 : $0 }
             if score > (best?.score ?? 0) { best = (p, score) }
         }

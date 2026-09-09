@@ -115,6 +115,19 @@ if command -v python3 >/dev/null 2>&1 && [ -f scripts/check_localization.py ]; t
     python3 scripts/check_localization.py 2>&1 | sed 's/^/      /' || true
 fi
 
+# Arabic-aware search folding. Pure logic, and the failure mode is silent:
+# search simply stops finding things a user knows are there.
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/test_search_logic.py ]; then
+    echo "    search logic check:"
+    if python3 scripts/test_search_logic.py > /tmp/search_check.log 2>&1; then
+        tail -1 /tmp/search_check.log | sed 's/^/      /'
+    else
+        sed 's/^/      /' /tmp/search_check.log
+        fail "The search folding is wrong — see the failures above."
+        exit 2
+    fi
+fi
+
 # Widget bridge consistency (App Group id, URL scheme, target isolation, the
 # generated spec). These are cross-target mistakes the compiler cannot catch:
 # a mismatched App Group id compiles perfectly and produces a dead widget.

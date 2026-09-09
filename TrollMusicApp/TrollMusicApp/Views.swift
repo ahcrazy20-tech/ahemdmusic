@@ -1096,30 +1096,21 @@ struct LibraryView: View {
     /// Searches title AND artist AND genre, ranked by where the match is —
     /// a title hit beats an artist hit beats a genre hit. The lens (All / New /
     /// Unplayed / …) is applied first, so search works inside it.
-    var filteredSongs: [Song] {
+    var filteredSongs: [Song] { searchHits.map { $0.song } }
+
+    /// Ranked matches, keeping the reason so a lyric hit can say so.
+    ///
+    /// The old scorer was `title.lowercased().contains(query)`, which misses
+    /// most real Arabic searches: أنت vs انت, مصطفى vs مصطفي, يا حبيبي vs
+    /// ياحبيبي all fail. LibrarySearch folds those variants together and can
+    /// also search the lyrics already cached on disk.
+    var searchHits: [LibrarySearch.Hit] {
         let base = applyLibraryFilter(currentFilter, to: musicManager.songs)
-        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return sorted(base) }
-        func score(_ s: Song) -> Int {
-            let t = s.title.lowercased()
-            let a = s.artist.lowercased()
-            let g = (s.genre ?? "").lowercased()
-            if t.hasPrefix(q) { return 4 }
-            if t.contains(q) { return 3 }
-            if a.contains(q) { return 2 }
-            if g.contains(q) { return 1 }
-            return 0
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else {
+            return sorted(base).map { LibrarySearch.Hit(song: $0, rank: 0, reason: .title) }
         }
-        return base
-            .compactMap { s -> (song: Song, rank: Int)? in
-                let r = score(s)
-                return r > 0 ? (s, r) : nil
-            }
-            .sorted { l, r in
-                if l.rank != r.rank { return l.rank > r.rank }
-                return l.song.title.localizedCaseInsensitiveCompare(r.song.title) == .orderedAscending
-            }
-            .map { $0.song }
+        return LibrarySearch.run(q, in: base)
     }
 
     private var emptyReason: String {
@@ -1310,8 +1301,25 @@ struct LibraryView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 24)
                     }
-                    ForEach(filteredSongs) { song in
-                        songRow(song, isQueued: false)
+                    ForEach(searchHits) { hit in
+                        let song = hit.song
+                        VStack(alignment: .leading, spacing: 2) {
+                            songRow(song, isQueued: false)
+                            // A song matched on its LYRICS looks like a random
+                            // result unless we say why, so show the line.
+                            if hit.reason == .lyrics,
+                               let line = LyricsIndex.shared.snippet(
+                                   songID: song.id,
+                                   query: searchText.trimmingCharacters(in: .whitespaces)) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "quote.opening").font(.system(size: 9))
+                                    Text(line).lineLimit(1)
+                                }
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 62)
+                            }
+                        }
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) { musicManager.deleteSong(song) } label: {
                                     Label("Delete", systemImage: "trash")
