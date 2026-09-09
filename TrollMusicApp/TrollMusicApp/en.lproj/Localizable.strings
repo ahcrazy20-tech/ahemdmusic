@@ -311,19 +311,15 @@
 "App version" = "App version";
 "Share / Export" = "Share / Export";
 
-// MARK: - Widget
-"Now Playing" = "Now Playing";
-"What's playing, with controls." = "What's playing, with controls.";
-"Moments" = "Moments";
-"One tap to start a smart mix." = "One tap to start a smart mix.";
-"Start a mix" = "Start a mix";
-"Nothing playing" = "Nothing playing";
-"Open AS Music" = "Open AS Music";
-"Tap to open your library" = "Tap to open your library";
-"The widget can't reach the app's data yet" = "The widget can't reach the app's data yet";
-"Gym" = "Gym";
-"Focus" = "Focus";
-"Chill" = "Chill";
-"Party" = "Party";
-"Arabic" = "Arabic";
-"Drive" = "Drive";
+
+// MARK: - Long explanatory footers
+"Adds clean gain (0 = no boost, +3 to +6 dB for quieter Arabic masters, -dB for noisy sources)." = "Adds clean gain (0 = no boost, +3 to +6 dB for quieter Arabic masters, -dB for noisy sources).";
+"Built from the songs already in your Library — offline if you have no AI key set." = "Built from the songs already in your Library — offline if you have no AI key set.";
+"Dead or retired model → next model → other provider → on-device. One silent retry, no dead ends." = "Dead or retired model → next model → other provider → on-device. One silent retry, no dead ends.";
+"Dictation needs the mic + speech permission entries in Info.plist — re-sync CI once (scripts/install_ci_fix.sh)." = "Dictation needs the mic + speech permission entries in Info.plist — re-sync CI once (scripts/install_ci_fix.sh).";
+"Different file names, identical sound (same length, tempo, loudness and tone) — this is the same recording saved twice." = "Different file names, identical sound (same length, tempo, loudness and tone) — this is the same recording saved twice.";
+"Files under 32 KB can't hold a song — they're what's left when a download is cut off." = "Files under 32 KB can't hold a song — they're what's left when a download is cut off.";
+"Only the file names change. The songs stay where they are, in the same playlists." = "Only the file names change. The songs stay where they are, in the same playlists.";
+"Piped / Invidious / Cobalt / your own server, mirror lists and health — the engines that race to fetch your songs." = "Piped / Invidious / Cobalt / your own server, mirror lists and health — the engines that race to fetch your songs.";
+"Same screen as from the player: EQ preset, loudness boost, spatial sound, resume." = "Same screen as from the player: EQ preset, loudness boost, spatial sound, resume.";
+"Spatial adds a subtle hall reverb that widens the stereo image on headphones and car speakers." = "Spatial adds a subtle hall reverb that widens the stereo image on headphones and car speakers.";

@@ -143,12 +143,17 @@ struct EmptyStateView: View {
             Image(systemName: groupAvailable ? "music.note" : "exclamationmark.triangle")
                 .font(.title2)
                 .foregroundColor(brand)
-            Text(groupAvailable ? "Nothing playing" : "Open AS Music")
+            // Explicit LocalizedStringKey: with a ternary of two literals the
+            // Text(LocalizedStringKey) vs Text(String) overload choice is not
+            // obvious, and picking the String one would silently opt out of
+            // localization. Same fix as TransitionMode in the app.
+            Text(groupAvailable ? LocalizedStringKey("Nothing playing")
+                                : LocalizedStringKey("Open AS Music"))
                 .font(.caption).fontWeight(.semibold)
                 .foregroundColor(.primary)
             Text(groupAvailable
-                 ? "Tap to open your library"
-                 : "The widget can't reach the app's data yet")
+                 ? LocalizedStringKey("Tap to open your library")
+                 : LocalizedStringKey("The widget can't reach the app's data yet"))
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -286,7 +291,10 @@ struct MomentsWidgetView: View {
                             Image(systemName: moment.symbol)
                                 .font(.system(size: 15, weight: .semibold))
                                 .foregroundColor(brand)
-                            Text(moment.label)
+                            // LocalizedStringKey, not the String: Text(someString)
+                            // is the NON-localizing overload and would keep
+                            // these labels English on an Arabic device.
+                            Text(LocalizedStringKey(moment.label))
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundColor(.primary)
                                 .lineLimit(1)

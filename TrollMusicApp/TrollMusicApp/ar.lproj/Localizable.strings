@@ -321,19 +321,15 @@
 "App version" = "إصدار التطبيق";
 "Share / Export" = "مشاركة / تصدير";
 
-// MARK: - Widget
-"Now Playing" = "قيد التشغيل";
-"What's playing, with controls." = "ما يُشغَّل الآن، مع أدوات التحكم.";
-"Moments" = "لحظات";
-"One tap to start a smart mix." = "نقرة واحدة لبدء مزيج ذكي.";
-"Start a mix" = "ابدأ مزيجًا";
-"Nothing playing" = "لا شيء قيد التشغيل";
-"Open AS Music" = "افتح AS Music";
-"Tap to open your library" = "اضغط لفتح مكتبتك";
-"The widget can't reach the app's data yet" = "لا تستطيع الأداة الوصول إلى بيانات التطبيق بعد";
-"Gym" = "الرياضة";
-"Focus" = "التركيز";
-"Chill" = "الاسترخاء";
-"Party" = "الحفلة";
-"Arabic" = "عربي";
-"Drive" = "القيادة";
+
+// MARK: - Long explanatory footers
+"Adds clean gain (0 = no boost, +3 to +6 dB for quieter Arabic masters, -dB for noisy sources)." = "يضيف تضخيمًا نظيفًا (٠ = بلا تعزيز، ‏+٣ إلى +٦ ديسيبل للتسجيلات العربية الأهدأ، وقيم سالبة للمصادر المشوّشة).";
+"Built from the songs already in your Library — offline if you have no AI key set." = "مبنية من الأغاني الموجودة في مكتبتك — تعمل دون اتصال إذا لم تضبط مفتاح ذكاء اصطناعي.";
+"Dead or retired model → next model → other provider → on-device. One silent retry, no dead ends." = "نموذج متوقف أو مُستبعد ← النموذج التالي ← مزوّد آخر ← على الجهاز. محاولة صامتة واحدة، دون طرق مسدودة.";
+"Dictation needs the mic + speech permission entries in Info.plist — re-sync CI once (scripts/install_ci_fix.sh)." = "يحتاج الإملاء إلى أذونات الميكروفون والنطق في Info.plist — أعد مزامنة CI مرة واحدة (scripts/install_ci_fix.sh).";
+"Different file names, identical sound (same length, tempo, loudness and tone) — this is the same recording saved twice." = "أسماء ملفات مختلفة وصوت متطابق (المدة والإيقاع والجهارة والنبرة نفسها) — هذا التسجيل نفسه محفوظ مرتين.";
+"Files under 32 KB can't hold a song — they're what's left when a download is cut off." = "الملفات الأصغر من ٣٢ كيلوبايت لا يمكن أن تحتوي أغنية — إنها ما يتبقّى عند انقطاع التنزيل.";
+"Only the file names change. The songs stay where they are, in the same playlists." = "تتغيّر أسماء الملفات فقط. تبقى الأغاني في مكانها وفي قوائم التشغيل نفسها.";
+"Piped / Invidious / Cobalt / your own server, mirror lists and health — the engines that race to fetch your songs." = "‏Piped / Invidious / Cobalt / خادمك الخاص، وقوائم المرايا وحالتها — المحركات التي تتسابق لجلب أغانيك.";
+"Same screen as from the player: EQ preset, loudness boost, spatial sound, resume." = "الشاشة نفسها التي تظهر من المشغّل: نمط المعادل، وتعزيز الجهارة، والصوت المجسّم، والاستئناف.";
+"Spatial adds a subtle hall reverb that widens the stereo image on headphones and car speakers." = "يضيف الصوت المجسّم صدى قاعة خفيفًا يوسّع الصورة الاستريو في السماعات ومكبرات السيارة.";

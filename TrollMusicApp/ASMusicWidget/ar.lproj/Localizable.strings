@@ -1,0 +1,27 @@
+/*
+   Localizable.strings (العربية) — widget extension
+
+   A widget is its own bundle and resolves its strings against these files,
+   not the app's.
+*/
+
+// Widget gallery
+"Now Playing" = "قيد التشغيل";
+"What's playing, with controls." = "ما يُشغَّل الآن، مع أدوات التحكم.";
+"Moments" = "لحظات";
+"One tap to start a smart mix." = "نقرة واحدة لبدء مزيج ذكي.";
+
+// Widget content
+"Start a mix" = "ابدأ مزيجًا";
+"Nothing playing" = "لا شيء قيد التشغيل";
+"Open AS Music" = "افتح AS Music";
+"Tap to open your library" = "اضغط لفتح مكتبتك";
+"The widget can't reach the app's data yet" = "لا تستطيع الأداة الوصول إلى بيانات التطبيق بعد";
+
+// Moment buttons
+"Gym" = "الرياضة";
+"Focus" = "التركيز";
+"Chill" = "الاسترخاء";
+"Party" = "الحفلة";
+"Arabic" = "عربي";
+"Drive" = "القيادة";

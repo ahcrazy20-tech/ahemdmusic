@@ -34,8 +34,12 @@ LINE_RE = re.compile(r'^\s*"(?:[^"\\]|\\.)*"\s*=\s*"(?:[^"\\]|\\.)*"\s*;\s*$')
 
 # The SwiftUI constructors whose first string argument is a LocalizedStringKey.
 UI_RE = re.compile(
-    r'(?:Text|Label|Button|navigationTitle|Section\(header:\s*Text|Toggle|Picker)'
-    r'\(\s*"([^"\\]{2,80})"'
+    r'(?:Text|Label|Button|navigationTitle|Section\(header:\s*Text|Toggle|Picker'
+    # WidgetKit's gallery strings. `.description(` is deliberately NOT matched
+    # generically -- it collides with DispatchQueue labels and AI model
+    # descriptors, neither of which should ever be translated.
+    r'|configurationDisplayName)'
+    r'\(\s*"([^"\\]{2,120})"'
 )
 
 # Explicitly localized strings. Needed wherever the value flows through a
@@ -44,6 +48,17 @@ UI_RE = re.compile(
 EXPLICIT_RE = re.compile(
     r'(?:NSLocalizedString|LocalizedStringKey)\(\s*"([^"\\]{2,200})"'
 )
+
+# Labels declared as plain data and rendered through LocalizedStringKey later
+# (WidgetMoment). The literal lives in the shared file, the Text() is in the
+# widget, so neither regex above would pair them up.
+# Scoped to WidgetMoment specifically: a bare `label:` also matches
+# DispatchQueue(label:) and the AI model table, which must stay untranslated.
+DATA_LABEL_RE = re.compile(r'WidgetMoment\([^)]*?\blabel:\s*"([^"\\]{2,80})"')
+
+# The widget gallery's subtitle. Scoped to a line that chains off
+# .configurationDisplayName(...) so it can't catch DispatchQueue labels.
+WIDGET_DESC_RE = re.compile(r'^\s*\.description\(\s*"([^"\\]{2,160})"', re.M)
 
 # Literals that are deliberately not translated.
 SKIP_PREFIXES = ("http", "asmusic_", "com.")
@@ -75,13 +90,24 @@ def load_strings(path):
     return mapping, problems
 
 
-def ui_strings():
+def ui_strings(directory):
     found = {}
-    sources = sorted(glob.glob(os.path.join(APP, "*.swift")))
-    sources += sorted(glob.glob(os.path.join(WIDGET, "*.swift")))
+    sources = sorted(glob.glob(os.path.join(directory, "*.swift")))
+    shared = os.path.join(APP, "SharedNowPlaying.swift")
+    if os.path.basename(directory) == "ASMusicWidget":
+        # WidgetMoment's labels live in the shared file but are only ever
+        # rendered by the widget, so they belong to the widget's surface...
+        sources.append(shared)
+    else:
+        # ...and for the same reason they are NOT part of the app's.
+        sources = [f for f in sources if os.path.abspath(f) != os.path.abspath(shared)]
     for f in sources:
         text = open(f, encoding="utf-8").read()
-        for rx in (UI_RE, EXPLICIT_RE):
+        rules = [UI_RE, EXPLICIT_RE, DATA_LABEL_RE]
+        # Only widget sources declare WidgetKit gallery metadata.
+        if os.path.basename(os.path.dirname(f)) == "ASMusicWidget":
+            rules.append(WIDGET_DESC_RE)
+        for rx in rules:
             for m in rx.finditer(text):
                 s = m.group(1)
                 if not s.strip() or s.startswith(SKIP_PREFIXES):
@@ -93,67 +119,76 @@ def ui_strings():
 def main():
     strict = "--strict" in sys.argv
     tables = {}
-    problems = []
+    overall = 0
 
-    for lproj in sorted(glob.glob(os.path.join(APP, "*.lproj"))):
-        lang = os.path.basename(lproj).replace(".lproj", "")
-        path = os.path.join(lproj, "Localizable.strings")
-        if not os.path.exists(path):
-            problems.append(f"{lang}: no Localizable.strings")
+    # The app and the widget are SEPARATE BUNDLES. A widget's Text("…")
+    # resolves against the extension's own .strings, so each bundle is checked
+    # against its own sources; a string translated in one does not help the
+    # other.
+    bundles = [("app", APP)]
+    if os.path.isdir(WIDGET):
+        bundles.append(("widget", WIDGET))
+
+    for bundle_name, directory in bundles:
+        print(f"\n=== {bundle_name} bundle ===")
+        tables = {}
+        problems = []
+
+        for lproj in sorted(glob.glob(os.path.join(directory, "*.lproj"))):
+            lang = os.path.basename(lproj).replace(".lproj", "")
+            path = os.path.join(lproj, "Localizable.strings")
+            if not os.path.exists(path):
+                problems.append(f"{lang}: no Localizable.strings")
+                continue
+            table, probs = load_strings(path)
+            tables[lang] = table
+            problems.extend(probs)
+            print(f"{lang}: {len(table)} entries")
+
+        if problems:
+            print("\nBROKEN:")
+            for p in problems:
+                print("  " + p)
+            return 1
+
+        used = ui_strings(directory)
+        print(f"user-visible literals in Swift: {len(used)}")
+
+        if not tables:
+            if used:
+                print(f"  no .lproj bundles, but {len(used)} literal(s) are shown to users")
+                overall = 2
             continue
-        table, probs = load_strings(path)
-        tables[lang] = table
-        problems.extend(probs)
-        print(f"{lang}: {len(table)} entries")
 
-    if problems:
-        print("\nBROKEN:")
-        for p in problems:
-            print("  " + p)
-        return 1
-
-    if not tables:
-        print("no .lproj bundles found")
-        return 1
-
-    used = ui_strings()
-    print(f"\nuser-visible literals in Swift: {len(used)}")
-
-    base = tables.get("en", {})
-    exit_code = 0
-    for lang, table in sorted(tables.items()):
-        if lang == "en":
-            # The base file should describe every literal, so translators see
-            # the full surface.
+        for lang, table in sorted(tables.items()):
             missing = sorted(k for k in used if k not in table)
-        else:
-            missing = sorted(k for k in used if k not in table)
-        covered = len(used) - len(missing)
-        pct = (100 * covered // len(used)) if used else 100
-        print(f"{lang}: {covered}/{len(used)} translated ({pct}%)")
-        if missing:
-            print(f"  MISSING in {lang}:")
-            for k in missing:
-                print(f"    {k!r}   ({used[k]})")
-            exit_code = 2
+            covered = len(used) - len(missing)
+            pct = (100 * covered // len(used)) if used else 100
+            print(f"{lang}: {covered}/{len(used)} translated ({pct}%)")
+            if missing:
+                print(f"  MISSING in {lang}:")
+                for k in missing:
+                    print(f"    {k!r}   ({used[k]})")
+                overall = 2
 
-    # Keys that exist in a translation but no longer in the app: harmless at
-    # runtime, but they rot, so surface them.
-    for lang, table in sorted(tables.items()):
-        stale = sorted(k for k in table if k not in used)
-        if stale:
-            print(f"\n{lang}: {len(stale)} key(s) no longer used in the UI")
-            for k in stale[:10]:
-                print(f"    {k!r}")
-            if len(stale) > 10:
-                print(f"    … and {len(stale) - 10} more")
+        # Keys that exist in a translation but no longer in the sources:
+        # harmless at runtime, but they rot, so surface them.
+        for lang, table in sorted(tables.items()):
+            stale = sorted(k for k in table if k not in used)
+            if stale:
+                print(f"{lang}: {len(stale)} key(s) no longer used")
+                for k in stale[:10]:
+                    print(f"    {k!r}")
+                if len(stale) > 10:
+                    print(f"    … and {len(stale) - 10} more")
 
-    if exit_code and not strict:
-        print("\n(warning only — pass --strict to fail the build on this)")
+    print()
+    if overall and not strict:
+        print("(warning only — pass --strict to fail the build on this)")
         return 0
-    if exit_code == 0:
-        print("\nLOCALIZATION OK")
-    return exit_code
+    if overall == 0:
+        print("LOCALIZATION OK")
+    return overall
 
 
 if __name__ == "__main__":

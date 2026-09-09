@@ -251,11 +251,11 @@ targets:
       # (MusicManager, AVFoundation, the views) must stay out of the widget.
       - path: TrollMusicApp/TrollMusicApp/SharedNowPlaying.swift
       # A widget is its OWN bundle: Text("Now Playing") inside the extension
-      # looks up the extension's resources, not the app's. Without these the
-      # widget would stay English on an Arabic device even though the app
-      # itself translates correctly.
-      - path: TrollMusicApp/TrollMusicApp/en.lproj
-      - path: TrollMusicApp/TrollMusicApp/ar.lproj
+      # resolves against the extension's resources, not the app's. Its
+      # en.lproj/ar.lproj live in TrollMusicApp/ASMusicWidget and are picked up
+      # by the directory glob above -- pointing at the APP's .lproj paths here
+      # does not work, XcodeGen only builds variant groups from a scanned
+      # directory, and the build warned that the widget bundle had neither.
     info:
       path: TrollMusicApp/ASMusicWidget/Info.plist
       properties:
