@@ -29,6 +29,8 @@ struct BackendRegistry: Codable {
     var updated: String? = nil
     var preferredGeminiModel: String? = nil
     var geminiFallbacks: [String]? = nil
+    var preferredApinexModel: String? = nil
+    var apinexFallbacks: [String]? = nil
     var pipedMirrors: [String]? = nil
     var invidiousInstances: [String]? = nil
     var cobaltInstances: [String]? = nil
@@ -46,10 +48,18 @@ final class RegistryStore {
     /// while offline. Mirrors the v1 registry file shipped with the app.
     static let bundled = BackendRegistry(
         version: 1,
-        updated: "2026-09-07",
+        updated: "2026-09-09",
         preferredGeminiModel: "gemini-3.5-flash",
         geminiFallbacks: ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash",
                           "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash"],
+        // APInex (apinex.bond) — one key, many models. Free tiers first so
+        // auto-failover rotates through FREE models before paid ones.
+        preferredApinexModel: "free/glm-5.3-flash",
+        apinexFallbacks: [
+            "free/glm-5.3-flash", "free/gpt-5.6-luna", "free/gemini-3.8-flash",
+            "free/muse-spark-1.3", "free/qwen-3.8-max", "free/deepseek-v4-flash-0731",
+            "gemini/3.8-flash", "deepseek/v4-flash", "glm/5.3-flash", "gpt/5.6-luna"
+        ],
         pipedMirrors: [
             "https://pipedapi.kavin.rocks",
             "https://pipedapi-libre.kavin.rocks",
@@ -101,6 +111,8 @@ final class RegistryStore {
         if let r = c {
             if let v = r.preferredGeminiModel, !v.isEmpty { e.preferredGeminiModel = v }
             if let v = r.geminiFallbacks, !v.isEmpty { e.geminiFallbacks = v }
+            if let v = r.preferredApinexModel, !v.isEmpty { e.preferredApinexModel = v }
+            if let v = r.apinexFallbacks, !v.isEmpty { e.apinexFallbacks = v }
             if let v = r.pipedMirrors, !v.isEmpty { e.pipedMirrors = v }
             if let v = r.invidiousInstances, !v.isEmpty { e.invidiousInstances = v }
             if let v = r.cobaltInstances { e.cobaltInstances = v }
