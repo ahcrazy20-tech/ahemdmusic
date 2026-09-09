@@ -268,7 +268,7 @@ enum AITransport {
             } else {
                 // 200 but empty/unusable — treat like a model problem so the
                 // engine rotates instead of showing the user a dead end.
-                completion(.failure(status: s, error: "The model returned an empty answer."))
+                completion(.failure(status: status, error: "The model returned an empty answer."))
             }
         }.resume()
     }
