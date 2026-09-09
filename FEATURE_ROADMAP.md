@@ -161,11 +161,22 @@ Once 1.1 exists: keep per-recipe weights and nudge them from behaviour — if so
 
 **Cost:** M · **Runs:** 📱
 
-### 2.6 Lyrics-aware search & mood
+### 2.6 Lyrics-aware search & mood ✅ (search half shipped)
 You already cache LRC/plain lyrics. Index them (title + artist + **lyrics**) so
 "the song that goes ya habibi" actually finds it — the #1 way people search for Arabic music.
 Second use: a crude valence signal from lyric sentiment for the `night`/`calm` recipes (AI
 when a key exists, keyword lexicon offline).
+
+**Shipped:** `SearchKit.swift` — `LyricsIndex` reads the existing `.lyrics` cache and
+`LibrarySearch` ranks title-prefix 5 / title 4 / artist-prefix 3 / artist 2 / genre 1 /
+lyrics 0, so a lyric hit never buries a real title match; a lyric result shows the matching
+line. Shipped alongside it: **`ArabicFold`**, because the search was
+`title.lowercased().contains(query)` and 6 of 7 realistic Arabic searches missed
+(أنت/انت, مصطفى/مصطفي, يا حبيبي/ياحبيبي, harakat, Farsi yeh/kaf, Arabic-Indic digits).
+Also applied to the artist browser and `playlist(matching:)` behind Siri.
+Guarded by `scripts/test_search_logic.py` (40 checks).
+
+**Still open:** the lyric *sentiment* → valence signal for the `night`/`calm` recipes.
 
 **Cost:** S–M · **Runs:** 📱 / 🔑
 
@@ -176,11 +187,25 @@ Nobody else in this category has it, and it is genuinely good for the user.
 
 **Cost:** M · **Runs:** 📱
 
-### 2.8 Write the intelligence back into the files
+### 2.8 Write the intelligence back into the files ✅
 BPM, key, ReplayGain and a mood comment into `TXXX`/`TBPM`/`TKEY` frames
 (`ID3TagWriter` already writes valid ID3v2.4; `album` is currently always `""` —
 `MusicManager.swift:826,1101`). Your numbers then survive a restore and benefit every other
 player.
+
+**Shipped:** `TBPM`, `TKEY` (Camelot), `TXXX:INITIALKEY`, `TXXX:KEY` and
+`TXXX:REPLAYGAIN_TRACK_GAIN`, written when `AudioLab` finishes analysing a track. Opt-in
+("Save BPM & key to files" in Audio Settings) because it rewrites the user's file, and it
+never claims a value it didn't measure.
+
+**Found while building it:** `ID3TagWriter` was writing text frames *without* the mandatory
+ID3v2.4 encoding byte, so readers consumed the BOM's `0xFF` as the encoding and parsed every
+title one byte out of alignment — corrupt in other players, invisible from inside the app,
+and worst for Arabic. Fixed, with `scripts/test_id3_logic.py` (33 checks) round-tripping a
+real tag through an independent parser.
+
+**Note:** the roadmap's "mood comment" is deliberately not written — a `COMM` frame full of
+our own vocabulary is noise in someone else's library.
 
 **Cost:** S · **Runs:** 📱
 
