@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import Accelerate
 
 // ===========================================================================
 // MARK: - AudioAnalysis  (on-device listening lab)
@@ -25,7 +26,10 @@ import AVFoundation
 /// What we learn about one track. Plain values with defaults: if the cache
 /// ever fails to decode (schema change) we just re-analyze.
 struct TrackFeatures: Codable, Equatable {
-    var version: Int = 1
+    /// v2 (Pack 6) added the chroma vector + detected musical key. Bumping the
+    /// number makes AudioLab drop v1 entries and re-measure — which is exactly
+    /// what we want, because the key is what the harmonic mixing runs on.
+    var version: Int = 2
 
     var duration: Double = 0          // seconds
     var loudness: Double = -70        // gated window RMS, dBFS (≈ LUFS − 2)
@@ -46,6 +50,31 @@ struct TrackFeatures: Codable, Equatable {
     var tailSilence: Double = 0       // seconds of dead air at the end
     var analyzedAt: Date = Date()
 
+    // MARK: Harmonic content (v2)
+
+    /// 12-bin pitch-class profile (C, C#, D … B), normalized so the strongest
+    /// bin is 1.0. Empty when the track was too short/quiet to analyze.
+    var chroma: [Double] = []
+    /// 0…11 tonic pitch class, or -1 when unknown.
+    var keyTonic: Int = -1
+    /// true = major, false = minor. Only meaningful when keyTonic >= 0.
+    var keyIsMajor: Bool = true
+    /// 0…1 how strongly the chroma matched the winning key profile. Below
+    /// ~0.18 the estimate is a coin-flip and the UI hides it.
+    var keyConfidence: Double = 0
+
+    /// "F# minor" / "C major", or "" when we could not tell.
+    var keyName: String {
+        guard keyTonic >= 0, keyTonic < 12, keyConfidence >= 0.18 else { return "" }
+        return "\(MusicKey.noteNames[keyTonic]) \(keyIsMajor ? "major" : "minor")"
+    }
+
+    /// Camelot wheel code ("8A", "11B") used by DJs for harmonic mixing.
+    var camelot: String {
+        guard keyTonic >= 0, keyTonic < 12, keyConfidence >= 0.18 else { return "" }
+        return MusicKey.camelotCode(tonic: keyTonic, isMajor: keyIsMajor)
+    }
+
     // MARK: Derived hints used by the playlist / EQ engines
 
     /// Instrumental-ish: little centered content in the vocal band.
@@ -64,6 +93,111 @@ struct TrackFeatures: Codable, Equatable {
     var hype: Double {
         let tempoN = FeatureMath.norm(tempo, 60, 160)
         return min(1, 0.5 * energy + 0.3 * tempoN + 0.2 * beatStrength)
+    }
+}
+
+// MARK: - Musical key (Krumhansl–Schmuckler over a chroma vector)
+
+/// Turns a 12-bin pitch-class profile into a key estimate, and maps that key
+/// onto the Camelot wheel so the playlist engine can mix harmonically.
+///
+/// The maths is the standard K-S correlation: rotate each of the two profiles
+/// (major / minor) through all 12 tonics and keep the best correlation. It is
+/// cheap (24 dot products over 12 numbers) and needs no model.
+enum MusicKey {
+
+    static let noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+    /// Krumhansl–Kessler key profiles (perceived stability of each degree).
+    static let majorProfile: [Double] = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+    static let minorProfile: [Double] = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+
+    /// Camelot: 1A…12A are minor keys, 1B…12B major. 8B = C major, 8A = A minor.
+    /// Neighbours on the wheel (±1, or the A/B pair) mix cleanly.
+    static func camelotCode(tonic: Int, isMajor: Bool) -> String {
+        // Circle of fifths position for each pitch class.
+        let majorNumbers = [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1]
+        let minorNumbers = [5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10]
+        let n = isMajor ? majorNumbers[tonic % 12] : minorNumbers[tonic % 12]
+        return "\(n)\(isMajor ? "B" : "A")"
+    }
+
+    /// Parses "11A" back into (number, isMajor). nil for an empty/garbled code.
+    static func parseCamelot(_ code: String) -> (number: Int, isMajor: Bool)? {
+        guard code.count >= 2, let last = code.last else { return nil }
+        let isMajor: Bool
+        switch last {
+        case "B", "b": isMajor = true
+        case "A", "a": isMajor = false
+        default: return nil
+        }
+        guard let n = Int(code.dropLast()), (1...12).contains(n) else { return nil }
+        return (n, isMajor)
+    }
+
+    /// 0 = same key, 1 = a perfect neighbour (±1 on the wheel or the relative
+    /// major/minor), rising to 1.0 for a clash. Used as a transition cost.
+    ///
+    /// Returns nil when either track has no usable key, so callers can fall
+    /// back to their tempo/energy-only ordering instead of guessing.
+    static func harmonicDistance(_ a: String, _ b: String) -> Double? {
+        guard let x = parseCamelot(a), let y = parseCamelot(b) else { return nil }
+        if x.number == y.number && x.isMajor == y.isMajor { return 0 }
+        // Relative major/minor: same number, different letter.
+        if x.number == y.number { return 0.15 }
+        // Distance around the 12-hour wheel.
+        let raw = abs(x.number - y.number)
+        let steps = min(raw, 12 - raw)
+        if steps == 1 && x.isMajor == y.isMajor { return 0.2 }
+        // Everything else scales with how far apart they sit.
+        return min(1.0, 0.3 + Double(steps) / 12.0)
+    }
+
+    /// Best (tonic, isMajor, confidence) for a chroma vector.
+    static func estimate(chroma: [Double]) -> (tonic: Int, isMajor: Bool, confidence: Double) {
+        guard chroma.count == 12 else { return (-1, true, 0) }
+        let total = chroma.reduce(0, +)
+        guard total > 1e-9 else { return (-1, true, 0) }
+
+        var best = (tonic: -1, isMajor: true, score: -Double.greatestFiniteMagnitude)
+        var second = -Double.greatestFiniteMagnitude
+
+        for tonic in 0..<12 {
+            for isMajor in [true, false] {
+                let profile = isMajor ? majorProfile : minorProfile
+                // Correlate the chroma against the profile rotated to `tonic`.
+                var rotated = [Double](repeating: 0, count: 12)
+                for i in 0..<12 { rotated[i] = profile[(i - tonic + 12) % 12] }
+                let score = correlation(chroma, rotated)
+                if score > best.score {
+                    second = best.score
+                    best = (tonic, isMajor, score)
+                } else if score > second {
+                    second = score
+                }
+            }
+        }
+        guard best.tonic >= 0 else { return (-1, true, 0) }
+        // Confidence = how far the winner sits above the runner-up. A tonal
+        // track separates clearly; noise/percussion produces a flat field.
+        let margin = second > -1e30 ? max(0, best.score - second) : 0
+        let confidence = FeatureMath.clamp01(margin * 2.2)
+        return (best.tonic, best.isMajor, confidence)
+    }
+
+    private static func correlation(_ a: [Double], _ b: [Double]) -> Double {
+        let n = Double(a.count)
+        let ma = a.reduce(0, +) / n
+        let mb = b.reduce(0, +) / n
+        var num = 0.0, da = 0.0, db = 0.0
+        for i in 0..<a.count {
+            let x = a[i] - ma, y = b[i] - mb
+            num += x * y
+            da += x * x
+            db += y * y
+        }
+        let den = sqrt(da * db)
+        return den > 1e-12 ? num / den : 0
     }
 }
 
@@ -280,6 +414,10 @@ final class AudioLab: ObservableObject {
                         self.doneCount += 1
                     }
                     self.scheduleSave()
+                    // Write what we just measured back into the file, so the
+                    // BPM and key survive a reinstall and show up in every
+                    // other player. Off by default: this rewrites the file.
+                    self.writeBackIfEnabled(job.url, f)
                 } else {
                     DispatchQueue.main.async {
                         self.lastError = "Could not read “\(job.title)”"
@@ -289,6 +427,37 @@ final class AudioLab: ObservableObject {
                 Thread.sleep(forTimeInterval: 0.12)
             }
         }
+    }
+
+    /// User setting: mirror the measured BPM/key/gain into the MP3's tag.
+    /// Default off, because it rewrites the user's file. The tag writer
+    /// itself refuses to touch anything that already carries an ID3 header.
+    static let writeBackKey = "asmusic.analysis.writeTags"
+
+    /// Copies the analysis into the file's ID3 tag when the user asked for it.
+    /// Silent no-op for non-MP3s and for already-tagged files.
+    private func writeBackIfEnabled(_ url: URL, _ f: TrackFeatures) {
+        guard UserDefaults.standard.bool(forKey: Self.writeBackKey) else { return }
+        guard url.pathExtension.lowercased() == "mp3" else { return }
+
+        var analysis = ID3TagWriter.Analysis()
+        // Only claim a tempo we actually believe in.
+        if f.tempo >= 40, f.tempo <= 220, f.beatStrength > 0.12 {
+            analysis.bpm = Int(f.tempo.rounded())
+        }
+        analysis.key = f.keyName       // "" unless keyConfidence cleared the gate
+        analysis.camelot = f.camelot
+        // ReplayGain: how far this track sits from the -14 dBFS reference we
+        // normalize to elsewhere in the app. Skip nonsense from silent files.
+        if f.loudness > -60 {
+            analysis.replayGainDB = ((-14.0 - f.loudness) * 100).rounded() / 100
+        }
+        guard !analysis.isEmpty else { return }
+
+        let title = url.deletingPathExtension().lastPathComponent
+        _ = ID3TagWriter.tagIfNeeded(at: url, title: title, artist: "",
+                                     album: "", artworkJPEG: nil,
+                                     analysis: analysis)
     }
 
     /// Debounced so a 60-song sweep writes the cache once, not 60 times.
@@ -349,6 +518,10 @@ final class AudioLab: ObservableObject {
         guard sr > 1000, file.length > 0 else { return nil }
         let ch = max(1, Int(fmt.channelCount))
         guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 4096) else { return nil }
+
+        // Chroma accumulator (v2): a 4096-point FFT every ~0.37 s of audio,
+        // folded into 12 pitch classes. Allocated once, reused per frame.
+        let chromaFFT = ChromaExtractor(sampleRate: sr)
 
         let winSamples = 1024
         let winDur = Double(winSamples) / sr          // seconds per window
@@ -418,6 +591,10 @@ final class AudioLab: ObservableObject {
                     winSq = 0
                     inWin = 0
                 }
+
+                // Feed the mono sum to the chroma extractor; it buffers
+                // internally and only runs an FFT once it has a full frame.
+                chromaFFT.push(Float(m))
             }
         }
 
@@ -511,7 +688,137 @@ final class AudioLab: ObservableObject {
             f.tailSilence = Double(env.count - 1 - lastLoud) * winDur
         }
         if f.duration < 3 { f.tempo = 0 }      // meaningless for jingles/fragments
+
+        // Musical key from the accumulated chroma (v2). Short fragments and
+        // pure percussion legitimately produce no key — keyName/camelot then
+        // return "" and every caller falls back to tempo/energy ordering.
+        if f.duration >= 8, let chroma = chromaFFT.normalized() {
+            f.chroma = chroma
+            let est = MusicKey.estimate(chroma: chroma)
+            f.keyTonic = est.tonic
+            f.keyIsMajor = est.isMajor
+            f.keyConfidence = est.confidence
+        }
+
         f.analyzedAt = Date()
         return f
+    }
+}
+
+// MARK: - Chroma extraction (12 pitch classes from the audio)
+
+/// Accumulates a pitch-class profile over a whole track.
+///
+/// Samples are pushed one at a time (the analysis loop is already walking the
+/// PCM, so this costs nothing extra); every `frameSize` samples we window,
+/// FFT, and add each bin's magnitude into the pitch class its frequency maps
+/// to. Only 55 Hz…2 kHz is used: below that the fundamental is muddy, above it
+/// harmonics dominate and blur the estimate.
+///
+/// One allocation set, reused for the whole file — deliberately matching the
+/// no-allocations-in-the-loop discipline the rest of this file follows.
+final class ChromaExtractor {
+    private static let frameSize = 4096
+    private static let log2n = vDSP_Length(12)          // 2^12 = 4096
+
+    private let sampleRate: Double
+    private var setup: FFTSetup?
+
+    private var window: [Float]
+    private var frame: [Float]
+    private var windowed: [Float]
+    private var realp: [Float]
+    private var imagp: [Float]
+    private var magnitudes: [Float]
+
+    /// Pitch class (0…11) for every usable FFT bin, -1 for bins we ignore.
+    private var binToPitchClass: [Int]
+
+    private var fill = 0
+    private var bins = [Double](repeating: 0, count: 12)
+    private var frames = 0
+
+    init(sampleRate: Double) {
+        self.sampleRate = sampleRate
+        let n = Self.frameSize
+        window = [Float](repeating: 0, count: n)
+        frame = [Float](repeating: 0, count: n)
+        windowed = [Float](repeating: 0, count: n)
+        realp = [Float](repeating: 0, count: n / 2)
+        imagp = [Float](repeating: 0, count: n / 2)
+        magnitudes = [Float](repeating: 0, count: n / 2)
+        binToPitchClass = [Int](repeating: -1, count: n / 2)
+
+        vDSP_hann_window(&window, vDSP_Length(n), Int32(vDSP_HANN_NORM))
+        setup = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2))
+
+        // Precompute which pitch class each bin belongs to.
+        //   MIDI = 69 + 12 * log2(f / 440);  pitch class = MIDI % 12
+        // Bin 0 is DC, so start at 1.
+        let lowHz = 55.0      // A1
+        let highHz = 2000.0
+        for k in 1..<(n / 2) {
+            let hz = Double(k) * sampleRate / Double(n)
+            guard hz >= lowHz, hz <= highHz else { continue }
+            let midi = 69.0 + 12.0 * log2(hz / 440.0)
+            let pc = Int(midi.rounded()) % 12
+            binToPitchClass[k] = (pc + 12) % 12
+        }
+    }
+
+    deinit {
+        if let s = setup { vDSP_destroy_fftsetup(s) }
+    }
+
+    /// Add one mono sample. Runs an FFT every `frameSize` samples.
+    func push(_ sample: Float) {
+        frame[fill] = sample
+        fill += 1
+        if fill == Self.frameSize {
+            process()
+            fill = 0
+        }
+    }
+
+    private func process() {
+        guard let setup = setup else { return }
+        let n = Self.frameSize
+        let half = n / 2
+
+        vDSP_vmul(frame, 1, window, 1, &windowed, 1, vDSP_Length(n))
+
+        windowed.withUnsafeBufferPointer { wptr in
+            wptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: half) { cptr in
+                realp.withUnsafeMutableBufferPointer { rp in
+                    imagp.withUnsafeMutableBufferPointer { ip in
+                        var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                        vDSP_ctoz(cptr, 2, &split, 1, vDSP_Length(half))
+                        vDSP_fft_zrip(setup, &split, 1, Self.log2n, FFTDirection(FFT_FORWARD))
+                        vDSP_zvmags(&split, 1, &magnitudes, 1, vDSP_Length(half))
+                    }
+                }
+            }
+        }
+
+        // Fold bin power into pitch classes.
+        var any = false
+        for k in 1..<half {
+            let pc = binToPitchClass[k]
+            if pc < 0 { continue }
+            let mag = Double(magnitudes[k])
+            if mag > 0 {
+                bins[pc] += sqrt(mag)   // amplitude, not power — less peaky
+                any = true
+            }
+        }
+        if any { frames += 1 }
+    }
+
+    /// The pitch-class profile scaled so its strongest bin is 1.0, or nil when
+    /// the track produced too little tonal content to judge.
+    func normalized() -> [Double]? {
+        guard frames >= 8 else { return nil }
+        guard let peak = bins.max(), peak > 1e-9 else { return nil }
+        return bins.map { $0 / peak }
     }
 }

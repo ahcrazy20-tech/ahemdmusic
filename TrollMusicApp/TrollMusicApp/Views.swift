@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import AVKit
 import MediaPlayer
+import UniformTypeIdentifiers
 
 func hideKeyboard() {
     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -270,6 +271,14 @@ struct MainTabView: View {
         .tint(AppTheme.accent)
         .sheet(isPresented: $showFullPlayer) { FullPlayerView() }
         .sheet(isPresented: $showDownloads) { DownloadsQueueView() }
+        .onReceive(NotificationCenter.default.publisher(for: .widgetDidRequestNowPlaying)) { _ in
+            // Tapping the widget's artwork or a Moment button should land on
+            // the player, not wherever the app happened to be last.
+            // A moment mix needs a beat to build before there's a song to show.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                if musicManager.currentSong != nil { showFullPlayer = true }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .openAISettings)) { _ in
             // Anywhere in the app can send the user straight to the AI
             // settings ("tap to add a free key" hints, EQ screen, Discover).
@@ -916,6 +925,37 @@ struct EQView: View {
                     .tint(AppTheme.accent)
                 }
             }
+            Section(header: Text("Between songs"),
+                    footer: Text(mm.transitionMode.subtitle)) {
+                Picker("Transition", selection: Binding(
+                    get: { mm.transitionMode },
+                    set: { mm.transitionMode = $0 }
+                )) {
+                    ForEach(TransitionMode.allCases) { m in
+                        Label(m.title, systemImage: m.icon).tag(m)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                if mm.transitionMode.blends {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(mm.transitionMode == .autoDJ
+                                 ? LocalizedStringKey("Maximum blend")
+                                 : LocalizedStringKey("Blend length"))
+                                .foregroundColor(.primary)
+                            Spacer()
+                            Text(String(format: "%.1f s", mm.crossfadeSeconds))
+                                .foregroundColor(.secondary).font(.subheadline.monospacedDigit())
+                        }
+                        Slider(value: Binding(
+                            get: { mm.crossfadeSeconds },
+                            set: { mm.crossfadeSeconds = $0 }
+                        ), in: 1.5...12, step: 0.5)
+                        .tint(AppTheme.accent)
+                    }
+                }
+            }
             Section(header: Text("Audio Enhancements"),
                     footer: Text("Spatial adds a subtle hall reverb that widens the stereo image on headphones and car speakers.")) {
                 Toggle(isOn: Binding(
@@ -926,6 +966,15 @@ struct EQView: View {
                 }
                 Toggle(isOn: $autoResume) {
                     Label("Resume last song on launch", systemImage: "arrow.counterclockwise")
+                }
+            }
+            Section(header: Text("Song File Tags"),
+                    footer: Text("After a song is analysed, write its BPM, musical key and volume level into the MP3 file itself. Other players and DJ apps can then read them, and the values survive a reinstall. Files that already have tags are never touched.")) {
+                Toggle(isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: AudioLab.writeBackKey) },
+                    set: { UserDefaults.standard.set($0, forKey: AudioLab.writeBackKey) }
+                )) {
+                    Label("Save BPM & key to files", systemImage: "tag")
                 }
             }
             Section(header: Text("AI Music Assistant (optional)"),
@@ -1012,6 +1061,7 @@ enum LibrarySort: String, CaseIterable, Identifiable {
 
 struct LibraryView: View {
     @EnvironmentObject var musicManager: MusicManager
+    @Environment(\.layoutDirection) private var layoutDirection
     @ObservedObject private var doctor = LibraryDoctor.shared
     @ObservedObject private var trash = LibraryTrash.shared
     @State private var showingOptionsFor: Song?
@@ -1025,6 +1075,9 @@ struct LibraryView: View {
     @State private var showArtists = false
     @State private var showNameTidy = false
     @State private var songToEdit: Song? = nil
+    @State private var showImporter = false
+    @State private var showIdentify = false
+    @State private var importNote: String? = nil
     @AppStorage("asmusic_lib_sort") private var sortRaw: String = LibrarySort.title.rawValue
     @AppStorage("asmusic_lib_filter") private var filterRaw: String = LibraryFilter.all.rawValue
 
@@ -1043,33 +1096,30 @@ struct LibraryView: View {
         return out
     }
 
+    /// Songs with a messy name, no artist or no genre — the ones the
+    /// identifier can actually improve.
+    private var unknownCount: Int {
+        SongIdentifier.candidates(from: musicManager.songs).count
+    }
+
     /// Searches title AND artist AND genre, ranked by where the match is —
     /// a title hit beats an artist hit beats a genre hit. The lens (All / New /
     /// Unplayed / …) is applied first, so search works inside it.
-    var filteredSongs: [Song] {
+    var filteredSongs: [Song] { searchHits.map { $0.song } }
+
+    /// Ranked matches, keeping the reason so a lyric hit can say so.
+    ///
+    /// The old scorer was `title.lowercased().contains(query)`, which misses
+    /// most real Arabic searches: أنت vs انت, مصطفى vs مصطفي, يا حبيبي vs
+    /// ياحبيبي all fail. LibrarySearch folds those variants together and can
+    /// also search the lyrics already cached on disk.
+    var searchHits: [LibrarySearch.Hit] {
         let base = applyLibraryFilter(currentFilter, to: musicManager.songs)
-        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return sorted(base) }
-        func score(_ s: Song) -> Int {
-            let t = s.title.lowercased()
-            let a = s.artist.lowercased()
-            let g = (s.genre ?? "").lowercased()
-            if t.hasPrefix(q) { return 4 }
-            if t.contains(q) { return 3 }
-            if a.contains(q) { return 2 }
-            if g.contains(q) { return 1 }
-            return 0
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else {
+            return sorted(base).map { LibrarySearch.Hit(song: $0, rank: 0, reason: .title) }
         }
-        return base
-            .compactMap { s -> (song: Song, rank: Int)? in
-                let r = score(s)
-                return r > 0 ? (s, r) : nil
-            }
-            .sorted { l, r in
-                if l.rank != r.rank { return l.rank > r.rank }
-                return l.song.title.localizedCaseInsensitiveCompare(r.song.title) == .orderedAscending
-            }
-            .map { $0.song }
+        return LibrarySearch.run(q, in: base)
     }
 
     private var emptyReason: String {
@@ -1189,7 +1239,9 @@ struct LibraryView: View {
                                 if doctor.isScanning {
                                     ProgressView().scaleEffect(0.7)
                                 } else {
-                                    Image(systemName: "chevron.right")
+                                    // .forward instead of .right so it points
+                                    // the correct way in Arabic (RTL).
+                                    Image(systemName: "chevron.forward")
                                         .font(.caption).foregroundColor(.secondary)
                                 }
                             }
@@ -1258,8 +1310,25 @@ struct LibraryView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 24)
                     }
-                    ForEach(filteredSongs) { song in
-                        songRow(song, isQueued: false)
+                    ForEach(searchHits) { hit in
+                        let song = hit.song
+                        VStack(alignment: .leading, spacing: 2) {
+                            songRow(song, isQueued: false)
+                            // A song matched on its LYRICS looks like a random
+                            // result unless we say why, so show the line.
+                            if hit.reason == .lyrics,
+                               let line = LyricsIndex.shared.snippet(
+                                   songID: song.id,
+                                   query: searchText.trimmingCharacters(in: .whitespaces)) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "quote.opening").font(.system(size: 9))
+                                    Text(line).lineLimit(1)
+                                }
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 62)
+                            }
+                        }
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) { musicManager.deleteSong(song) } label: {
                                     Label("Delete", systemImage: "trash")
@@ -1337,8 +1406,38 @@ struct LibraryView: View {
             .sheet(isPresented: $showNameTidy) {
                 NameTidyView().environmentObject(musicManager)
             }
+            .sheet(isPresented: $showIdentify) {
+                IdentifySongsView().environmentObject(musicManager)
+            }
             .sheet(item: $songToEdit) { song in
                 SongInfoEditorView(song: song).environmentObject(musicManager)
+            }
+            // Bring your own music in: multi-select from the Files app.
+            .fileImporter(isPresented: $showImporter,
+                          allowedContentTypes: [.audio, .mp3, .mpeg4Audio, .wav, .aiff],
+                          allowsMultipleSelection: true) { result in
+                switch result {
+                case .success(let urls):
+                    let r = musicManager.importAudioFiles(from: urls)
+                    if r.imported > 0 {
+                        importNote = "Imported \(r.imported) song\(r.imported == 1 ? "" : "s")"
+                            + (r.skipped > 0 ? " · \(r.skipped) skipped (already here or unsupported)" : "")
+                    } else if r.skipped > 0 {
+                        importNote = "Nothing imported — \(r.skipped) file\(r.skipped == 1 ? " was" : "s were") already in your Library or not audio."
+                    }
+                case .failure(let err):
+                    importNote = "Import failed: \(err.localizedDescription)"
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .libraryDidImport)) { note in
+                let n = (note.userInfo?["count"] as? Int) ?? 0
+                if n > 0 { importNote = "Imported \(n) song\(n == 1 ? "" : "s") from another app" }
+            }
+            .alert("Import", isPresented: Binding(get: { importNote != nil },
+                                                  set: { if !$0 { importNote = nil } })) {
+                Button("OK", role: .cancel) { importNote = nil }
+            } message: {
+                Text(importNote ?? "")
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -1352,7 +1451,10 @@ struct LibraryView: View {
                                         .padding(3)
                                         .background(Color.red)
                                         .clipShape(Circle())
-                                        .offset(x: 9, y: -9)
+                                        // Nudge the badge outward on whichever
+                                        // side "trailing" is — +x would push it
+                                        // back over the icon in Arabic (RTL).
+                                        .offset(x: layoutDirection == .rightToLeft ? -9 : 9, y: -9)
                                 }
                             }
                     }
@@ -1387,6 +1489,16 @@ struct LibraryView: View {
                                     Label(mode.rawValue, systemImage: mode.icon)
                                 }
                             }
+                        }
+                        Divider()
+                        Button { showImporter = true } label: {
+                            Label("Import from Files", systemImage: "square.and.arrow.down")
+                        }
+                        Button { showIdentify = true } label: {
+                            Label(unknownCount > 0
+                                  ? "Identify songs (\(unknownCount))"
+                                  : "Identify songs",
+                                  systemImage: "waveform.badge.magnifyingglass")
                         }
                         Divider()
                         Button { showDuplicateDoctor = true } label: {
@@ -2609,7 +2721,7 @@ struct SettingsTabView: View {
             HStack {
                 Label(title, systemImage: icon).foregroundColor(.primary)
                 Spacer()
-                Image(systemName: "chevron.right")
+                Image(systemName: "chevron.forward")
                     .font(.caption).foregroundColor(Color(UIColor.tertiaryLabel))
             }
         }

@@ -1,0 +1,363 @@
+/*
+   Localizable.strings (العربية)
+   AS Music
+
+   SwiftUI's Text("…") takes a LocalizedStringKey, so the English string in the
+   source doubles as the lookup key and no code had to change to add this file.
+
+   Translation notes:
+   * Modern Standard Arabic, and deliberately not word-for-word. Interface
+     Arabic should read like an app, not like a translated manual: "تشغيل"
+     (play) rather than a literal rendering, "المكتبة" for Library, and so on.
+   * Verbs are imperatives for buttons ("احفظ", "احذف"), verbal nouns for
+     titles and section headers ("الإعدادات", "التنزيلات").
+   * Technical terms that Arabic speakers actually use in Latin script are kept
+     that way (Wi-Fi, EQ, AI, MP3) — transliterating them reads as noise.
+   * The app's own coined names (Magic DL, Smart Radio) are translated where a
+     natural Arabic equivalent exists and left alone where it does not.
+*/
+
+// MARK: - General
+"Done" = "تم";
+"Cancel" = "إلغاء";
+"Save" = "احفظ";
+"Delete" = "احذف";
+"Erase" = "امسح";
+"Restore" = "استعِد";
+"Rename" = "أعد التسمية";
+"Retry" = "أعد المحاولة";
+"Try Again" = "حاول مجددًا";
+"Close" = "إغلاق";
+"Stop" = "إيقاف";
+"OK" = "حسنًا";
+"Undo" = "تراجع";
+"Apply" = "تطبيق";
+"Create" = "أنشئ";
+"Go" = "انطلق";
+"Paste" = "لصق";
+"Refresh" = "تحديث";
+"Rescan" = "أعد الفحص";
+"Recheck" = "أعد الفحص";
+"Scan again" = "افحص مجددًا";
+"Search again" = "ابحث مجددًا";
+"Clear" = "مسح";
+"Share" = "مشاركة";
+"Discard" = "تجاهل";
+"Select…" = "اختر…";
+"Thinking…" = "جارٍ التفكير…";
+"Checking…" = "جارٍ الفحص…";
+"auto" = "تلقائي";
+"AI" = "الذكاء الاصطناعي";
+"— OR —" = "— أو —";
+
+// MARK: - Library
+"Your Library" = "مكتبتك";
+"Your Library is Empty" = "مكتبتك فارغة";
+"Use Magic DL or Web Hub to download songs" = "استخدم Magic DL أو متصفح الويب لتنزيل الأغاني";
+"Songs" = "الأغاني";
+"Artists" = "الفنانون";
+"No artists yet" = "لا يوجد فنانون بعد";
+"Songs get an artist from their file name or from the free iTunes lookup." = "يُستخرج اسم الفنان من اسم الملف أو من بحث iTunes المجاني.";
+"Recently Played" = "شُغّلت مؤخرًا";
+"Shuffle all" = "تشغيل الكل عشوائيًا";
+"Library tools" = "أدوات المكتبة";
+"Sort by" = "ترتيب حسب";
+"Import from Files" = "استيراد من الملفات";
+"Song info" = "معلومات الأغنية";
+"Song info…" = "معلومات الأغنية…";
+"Song Info…" = "معلومات الأغنية…";
+"Rename Song" = "أعد تسمية الأغنية";
+"More like this" = "المزيد مثل هذه";
+"More Like This" = "المزيد مثل هذه";
+"Shown everywhere" = "يظهر في كل مكان";
+"Current file" = "الملف الحالي";
+"Re-read the name from the file" = "أعد قراءة الاسم من الملف";
+"Songs in library" = "الأغاني في المكتبة";
+"It's in Recently Deleted — nothing is gone yet." = "إنها في «المحذوفة مؤخرًا» — لم يُفقد شيء بعد.";
+
+// MARK: - Playback
+"Play" = "تشغيل";
+"Play now" = "شغّل الآن";
+"Play Now" = "شغّل الآن";
+"Play Next" = "شغّل التالي";
+"Play Later" = "شغّل لاحقًا";
+"Shuffle" = "عشوائي";
+"Shuffle Play" = "تشغيل عشوائي";
+"Up Next" = "التالي";
+"NOW PLAYING" = "يُشغَّل الآن";
+"SMART RADIO" = "الراديو الذكي";
+"FROM LIKED SONGS" = "من الأغاني المفضّلة";
+"Smart Radio" = "الراديو الذكي";
+"About the artist" = "عن الفنان";
+"Resume last song on launch" = "استئناف آخر أغنية عند الفتح";
+
+// MARK: - Sleep timer
+"15 min sleep" = "إيقاف بعد ١٥ دقيقة";
+"30 min sleep" = "إيقاف بعد ٣٠ دقيقة";
+"60 min sleep" = "إيقاف بعد ٦٠ دقيقة";
+"Stop at song end" = "التوقف عند نهاية الأغنية";
+"Cancel sleep" = "إلغاء مؤقّت النوم";
+
+// MARK: - Transitions (Pack 6)
+"Between songs" = "بين الأغاني";
+"Transition" = "الانتقال";
+"Off (hard cut)" = "إيقاف (قطع مباشر)";
+"Gapless" = "بلا فواصل";
+"Crossfade" = "تلاشٍ متقاطع";
+"Auto-DJ" = "منسّق تلقائي";
+"Blend length" = "مدة المزج";
+"Maximum blend" = "أقصى مدة مزج";
+"Each song stops, the next begins. The classic behaviour." = "تتوقف كل أغنية ثم تبدأ التالية. السلوك التقليدي.";
+"Removes the silence between tracks without blending them. Best for albums, live sets and long recitations." = "يزيل الصمت بين المقاطع دون مزجها. الأنسب للألبومات والحفلات والتلاوات الطويلة.";
+"The next song fades in while this one fades out, over a length you choose." = "تظهر الأغنية التالية تدريجيًا بينما تخفت الحالية، خلال مدة تختارها.";
+"Like crossfade, but the length adapts to what the two songs actually sound like — long blends between steady beats, short ones into quiet or spoken tracks." = "مثل التلاشي المتقاطع، لكن المدة تتكيّف مع طبيعة الأغنيتين — مزج طويل بين الإيقاعات المتقاربة، وقصير عند الانتقال إلى مقطع هادئ أو منطوق.";
+
+// MARK: - Audio settings
+"Audio Settings" = "إعدادات الصوت";
+"Audio & Playback" = "الصوت والتشغيل";
+"Equalizer, loudness & playback" = "المعادل والجهارة والتشغيل";
+"Equalizer" = "المعادل";
+"Equalizer Preset" = "نمط المعادل";
+"Loudness Boost" = "تعزيز الجهارة";
+"Preamp" = "التضخيم المسبق";
+"Audio Enhancements" = "تحسينات الصوت";
+"Spatial / 3D sound" = "صوت مجسّم / ثلاثي الأبعاد";
+"Automatic mastering" = "المعالجة التلقائية";
+"Smart Master (per-song EQ)" = "المعالجة الذكية (معادل لكل أغنية)";
+"Match loudness across songs" = "توحيد الجهارة بين الأغاني";
+"Skip dead air at the start" = "تخطّي الصمت في البداية";
+"Correction strength" = "قوة التصحيح";
+"Loudness target" = "مستوى الجهارة المستهدف";
+"Streaming services use about −14. Lower numbers are quieter but keep more punch." = "تستخدم خدمات البث نحو −١٤. القيم الأقل أهدأ لكنها تحافظ على قوة الصوت.";
+"Voices" = "الأصوات";
+"Vocal Focus" = "إبراز الغناء";
+"Night / low-volume mode" = "وضع الليل / الصوت المنخفض";
+"Rip repair (de-hiss, tame sibilance)" = "إصلاح النسخ (إزالة الهسهسة وتخفيف الصفير)";
+"What the app hears right now" = "ما يسمعه التطبيق الآن";
+"Re-analyze the whole library" = "أعد تحليل المكتبة كاملة";
+"This file looks like a rough rip — Rip Repair helps here." = "يبدو هذا الملف نسخة رديئة — «إصلاح النسخ» مفيد هنا.";
+"Measuring this track…" = "جارٍ قياس هذا المقطع…";
+"Play a song to see its measured numbers." = "شغّل أغنية لعرض قياساتها.";
+"Library analyzed" = "تم تحليل المكتبة";
+"Vocal & Sound Studio" = "استوديو الصوت والغناء";
+
+// MARK: - Karaoke
+"Karaoke / acapella export" = "تصدير كاريوكي / أكابيلا";
+"Mode" = "الوضع";
+"Play the song you want to export first." = "شغّل الأغنية التي تريد تصديرها أولًا.";
+"Record over the song" = "سجّل فوق الأغنية";
+"System voice processing (echo cancel + AGC)" = "معالجة الصوت من النظام (إلغاء الصدى + التحكم التلقائي)";
+"Noise gate between lines" = "بوابة ضوضاء بين الجمل";
+"Stop & save" = "أوقف واحفظ";
+"Start take" = "ابدأ التسجيل";
+"Microphone not available in this build" = "الميكروفون غير متاح في هذه النسخة";
+
+// MARK: - Voice control
+"Voice control" = "التحكم الصوتي";
+"Speech rate" = "سرعة النطق";
+"Let the app talk back" = "دع التطبيق يردّ صوتيًا";
+"Announce the song that starts" = "الإعلان عن الأغنية عند بدئها";
+
+// MARK: - Downloads
+"Downloads" = "التنزيلات";
+"Download" = "تنزيل";
+"Download All" = "نزّل الكل";
+"No downloads" = "لا توجد تنزيلات";
+"Cancel download" = "إلغاء التنزيل";
+"Clear Finished" = "مسح المكتملة";
+"Queued" = "في الانتظار";
+"Cancelled" = "أُلغيت";
+"Saved" = "حُفظت";
+"Saved to Library" = "حُفظت في المكتبة";
+"Connecting…" = "جارٍ الاتصال…";
+"Connecting to server…" = "جارٍ الاتصال بالخادم…";
+"Finding fastest server…" = "جارٍ إيجاد أسرع خادم…";
+"Racing servers for fastest link…" = "جارٍ اختبار الخوادم لإيجاد أسرع رابط…";
+"Searching multiple sources…" = "جارٍ البحث في عدة مصادر…";
+"Failed downloads" = "تنزيلات فاشلة";
+"Transfers" = "عمليات النقل";
+"Downloads at once" = "التنزيلات المتزامنة";
+"Wi-Fi only" = "عبر Wi-Fi فقط";
+
+// MARK: - Download engines
+"Download engines" = "محركات التنزيل";
+"Download Engines" = "محركات التنزيل";
+"Classic engines" = "المحركات التقليدية";
+"Classic engines always on" = "المحركات التقليدية تعمل دائمًا";
+"y2jar • Mp3Juice • cnvmp3 • Theta — always on, never modified." = "‏y2jar • Mp3Juice • cnvmp3 • Theta — تعمل دائمًا ولا تُعدَّل.";
+"Alternative engines" = "محركات بديلة";
+"Your own extractor (optional)" = "مستخرِجك الخاص (اختياري)";
+"Backend list" = "قائمة الخوادم";
+"Mirror lists refresh automatically once a day." = "تُحدَّث قوائم المرايا تلقائيًا مرة يوميًا.";
+"Refresh now" = "حدّث الآن";
+
+// MARK: - Magic DL / search
+"Magic DL" = "‏Magic DL";
+"Smart Magic DL" = "‏Magic DL الذكي";
+"Search YouTube & SoundCloud • Paste any link" = "ابحث في YouTube و SoundCloud • الصق أي رابط";
+"Magic Search" = "البحث الذكي";
+"Quick Picks" = "اختيارات سريعة";
+"Load Trending" = "تحميل الرائج";
+"Extract MP3" = "استخراج MP3";
+"Edit the name before saving to your Library." = "عدّل الاسم قبل الحفظ في مكتبتك.";
+
+// MARK: - Web hub
+"Tabs" = "التبويبات";
+"New Tab" = "تبويب جديد";
+"Google" = "‏Google";
+"YouTube" = "‏YouTube";
+"SoundCloud" = "‏SoundCloud";
+"Audiomack" = "‏Audiomack";
+"SpotifyDown" = "‏SpotifyDown";
+"Anghami" = "أنغامي";
+"YTMP3" = "‏YTMP3";
+"CNVMP3" = "‏CNVMP3";
+
+// MARK: - Playlists
+"Playlists" = "قوائم التشغيل";
+"Smart Playlists" = "قوائم التشغيل الذكية";
+"Liked Songs" = "الأغاني المفضّلة";
+"No playlists yet — let the AI build one above, or tap +." = "لا توجد قوائم بعد — دع الذكاء الاصطناعي ينشئ واحدة، أو اضغط +.";
+"No songs yet. Add from Library." = "لا توجد أغانٍ بعد. أضِف من المكتبة.";
+"Play playlist in order" = "تشغيل القائمة بالترتيب";
+"Shuffle playlist" = "تشغيل القائمة عشوائيًا";
+"Rename Playlist" = "أعد تسمية القائمة";
+"Delete Playlist" = "احذف القائمة";
+"Sort playlists" = "ترتيب القوائم";
+"smart order" = "ترتيب ذكي";
+"Rebuild smart playlists now" = "أعد بناء القوائم الذكية الآن";
+"Describe a playlist…" = "صف قائمة التشغيل…";
+"AI Playlist Generator" = "مولّد قوائم التشغيل بالذكاء الاصطناعي";
+"Generate AI playlist" = "أنشئ قائمة بالذكاء الاصطناعي";
+"Regenerate with AI" = "أعد الإنشاء بالذكاء الاصطناعي";
+"Build it" = "أنشئها";
+"Auto-create ✨ playlists" = "إنشاء قوائم ✨ تلقائيًا";
+"Order tracks like a DJ set" = "رتّب المقاطع كجلسة DJ";
+"Rebuild ✨ playlists" = "أعد بناء قوائم ✨";
+"Delete all ✨ playlists" = "احذف كل قوائم ✨";
+"Smart playlist — refreshed automatically" = "قائمة ذكية — تُحدَّث تلقائيًا";
+"Analyze library and suggest playlists" = "حلّل المكتبة واقترح قوائم";
+"AI curation on" = "التنسيق بالذكاء الاصطناعي مفعّل";
+"Offline mode — works with no key" = "وضع دون اتصال — يعمل بلا مفتاح";
+
+// MARK: - For You / discover
+"For You" = "لأجلك";
+"Made for You" = "صُنعت لك";
+"Recommendations based on the music you love" = "توصيات مبنية على الموسيقى التي تحبها";
+"Analyzing your taste…" = "جارٍ تحليل ذوقك…";
+"We grouped your Library by artist — tap to create." = "جمّعنا مكتبتك حسب الفنان — اضغط للإنشاء.";
+"Open full article" = "افتح المقال كاملًا";
+
+// MARK: - Library health & maintenance
+"Library Health" = "صحة المكتبة";
+"AI · on-device" = "ذكاء اصطناعي · على الجهاز";
+"Fetch missing artists & covers" = "جلب الفنانين والأغلفة الناقصة";
+"Rough sounding rips" = "نسخ رديئة الصوت";
+"Duplicate Finder" = "كاشف التكرارات";
+"Comparing your songs…" = "جارٍ مقارنة أغانيك…";
+"Delete extra copies" = "احذف النسخ الزائدة";
+"No duplicates found" = "لا توجد تكرارات";
+"SAME AUDIO" = "الصوت نفسه";
+"DIFFERENT VERSIONS" = "نسخ مختلفة";
+"Lengths differ — could be a live/remix version. Double-check before deleting." = "المدد مختلفة — قد تكون نسخة حية أو ريمكس. تحقّق قبل الحذف.";
+"Tidy up names" = "رتّب الأسماء";
+"Every file name looks clean" = "كل أسماء الملفات تبدو سليمة";
+"Ask AI" = "اسأل الذكاء الاصطناعي";
+
+// MARK: - Identify (Pack 6)
+"Identify songs" = "تعرّف على الأغاني";
+"Songs that need it" = "الأغاني التي تحتاج ذلك";
+"Matching engine" = "محرك المطابقة";
+"Matches" = "المطابقات";
+
+// MARK: - Trash
+"Recently Deleted" = "المحذوفة مؤخرًا";
+"Safety net" = "شبكة أمان";
+"Deleted songs wait here instead of vanishing." = "تنتظر الأغاني المحذوفة هنا بدل أن تختفي.";
+"Keep for" = "الاحتفاظ لمدة";
+"Nothing deleted recently" = "لا شيء محذوف مؤخرًا";
+"When you delete a song — or clean duplicates — it lands here first." = "عند حذف أغنية — أو تنظيف التكرارات — تصل إلى هنا أولًا.";
+"Restore everything" = "استعِد كل شيء";
+
+// MARK: - Lyrics
+"Looking for the words…" = "جارٍ البحث عن الكلمات…";
+"Re-download lyrics" = "أعد تنزيل الكلمات";
+"Reset timing" = "إعادة ضبط التوقيت";
+"Play a song to see its lyrics." = "شغّل أغنية لعرض كلماتها.";
+
+// MARK: - Backup
+"Backup & Restore" = "النسخ الاحتياطي والاستعادة";
+"Export backup & share…" = "تصدير نسخة احتياطية ومشاركتها…";
+"Save a copy in the app's Documents" = "احفظ نسخة في مستندات التطبيق";
+"Choose a backup file…" = "اختر ملف نسخة احتياطية…";
+"on this device" = "على هذا الجهاز";
+"Replace my playlists instead of merging" = "استبدل قوائمي بدلًا من الدمج";
+
+// MARK: - AI
+"AI Assistant" = "المساعد الذكي";
+"AI Music Assistant (optional)" = "مساعد الموسيقى الذكي (اختياري)";
+"AI Intelligence" = "الذكاء الاصطناعي";
+"Open AI Intelligence settings" = "افتح إعدادات الذكاء الاصطناعي";
+"Open full AI settings (models & failover)" = "افتح إعدادات الذكاء الكاملة (النماذج والتبديل التلقائي)";
+"Pick your AI" = "اختر الذكاء الاصطناعي";
+"Provider" = "المزوّد";
+"AI provider" = "مزوّد الذكاء الاصطناعي";
+"Model" = "النموذج";
+"Auto model (self-healing)" = "نموذج تلقائي (ذاتي الإصلاح)";
+"Switches to a verified newer Gemini when Google retires one." = "ينتقل إلى إصدار Gemini أحدث ومُتحقَّق منه عند إيقاف Google للسابق.";
+"Auto-failover — never stop" = "تبديل تلقائي عند الفشل — بلا توقف";
+"On-device only — nothing is sent anywhere." = "على الجهاز فقط — لا يُرسل شيء إلى أي مكان.";
+"Set up (free key)" = "الإعداد (مفتاح مجاني)";
+"Get 15" = "احصل على ١٥";
+
+// MARK: - Settings / about
+"Settings" = "الإعدادات";
+"Appearance" = "المظهر";
+"Accent color & theme" = "لون التمييز والسمة";
+"App Accent Color" = "لون تمييز التطبيق";
+"Theme" = "السمة";
+"Theme color" = "لون السمة";
+"About" = "حول";
+"App version" = "إصدار التطبيق";
+"Share / Export" = "مشاركة / تصدير";
+
+
+// MARK: - Long explanatory footers
+"Adds clean gain (0 = no boost, +3 to +6 dB for quieter Arabic masters, -dB for noisy sources)." = "يضيف تضخيمًا نظيفًا (٠ = بلا تعزيز، ‏+٣ إلى +٦ ديسيبل للتسجيلات العربية الأهدأ، وقيم سالبة للمصادر المشوّشة).";
+"Built from the songs already in your Library — offline if you have no AI key set." = "مبنية من الأغاني الموجودة في مكتبتك — تعمل دون اتصال إذا لم تضبط مفتاح ذكاء اصطناعي.";
+"Dead or retired model → next model → other provider → on-device. One silent retry, no dead ends." = "نموذج متوقف أو مُستبعد ← النموذج التالي ← مزوّد آخر ← على الجهاز. محاولة صامتة واحدة، دون طرق مسدودة.";
+"Dictation needs the mic + speech permission entries in Info.plist — re-sync CI once (scripts/install_ci_fix.sh)." = "يحتاج الإملاء إلى أذونات الميكروفون والنطق في Info.plist — أعد مزامنة CI مرة واحدة (scripts/install_ci_fix.sh).";
+"Different file names, identical sound (same length, tempo, loudness and tone) — this is the same recording saved twice." = "أسماء ملفات مختلفة وصوت متطابق (المدة والإيقاع والجهارة والنبرة نفسها) — هذا التسجيل نفسه محفوظ مرتين.";
+"Files under 32 KB can't hold a song — they're what's left when a download is cut off." = "الملفات الأصغر من ٣٢ كيلوبايت لا يمكن أن تحتوي أغنية — إنها ما يتبقّى عند انقطاع التنزيل.";
+"Only the file names change. The songs stay where they are, in the same playlists." = "تتغيّر أسماء الملفات فقط. تبقى الأغاني في مكانها وفي قوائم التشغيل نفسها.";
+"Piped / Invidious / Cobalt / your own server, mirror lists and health — the engines that race to fetch your songs." = "‏Piped / Invidious / Cobalt / خادمك الخاص، وقوائم المرايا وحالتها — المحركات التي تتسابق لجلب أغانيك.";
+"Same screen as from the player: EQ preset, loudness boost, spatial sound, resume." = "الشاشة نفسها التي تظهر من المشغّل: نمط المعادل، وتعزيز الجهارة، والصوت المجسّم، والاستئناف.";
+"Spatial adds a subtle hall reverb that widens the stereo image on headphones and car speakers." = "يضيف الصوت المجسّم صدى قاعة خفيفًا يوسّع الصورة الاستريو في السماعات ومكبرات السيارة.";
+"Song File Tags" = "وسوم ملفات الأغاني";
+"Save BPM & key to files" = "حفظ الإيقاع والمقام في الملفات";
+"After a song is analysed, write its BPM, musical key and volume level into the MP3 file itself. Other players and DJ apps can then read them, and the values survive a reinstall. Files that already have tags are never touched." = "بعد تحليل الأغنية، تُكتب سرعة الإيقاع والمقام الموسيقي ومستوى الصوت داخل ملف MP3 نفسه، فتقرأها المشغّلات وتطبيقات الدي جي الأخرى، وتبقى محفوظة بعد إعادة التثبيت. لا تُمَس الملفات التي تحمل وسومًا بالفعل.";
+
+"Ask for songs in plain language — for example “5 new Egyptian pop songs about summer” — and download the results in one tap. Free: one APInex key unlocks 20+ models (GPT, Gemini, DeepSeek, GLM…), or use your own Google Gemini key." = "اطلب الأغاني بلغتك العادية — مثلاً «٥ أغاني بوب مصرية جديدة عن الصيف» — ونزّل النتائج بضغطة واحدة. مجانًا: مفتاح APInex واحد يفتح أكثر من ٢٠ نموذجًا (GPT وGemini وDeepSeek وGLM…)، أو استخدم مفتاح Google Gemini الخاص بك.";
+"Center-channel separation, done on your phone. It writes a NEW file into your Library — the original is never touched. Works best on properly mixed stereo tracks." = "فصل القناة الوسطى، يتم على هاتفك. يُنشئ ملفًا جديدًا في مكتبتك — لا يُمَس الملف الأصلي أبدًا. يعطي أفضل نتيجة مع التسجيلات الاستريو المُعدّة جيدًا.";
+"Clipped, very quiet, or starting with dead air. Re-download these from Magic DL for a cleaner copy — the duplicate finder will then keep the better one automatically." = "مقصوصة أو منخفضة الصوت جدًا أو تبدأ بصمت ميّت. أعد تنزيلها من Magic DL للحصول على نسخة أنقى — عندها يحتفظ كاشف التكرار بالأفضل تلقائيًا.";
+"Deploy the free extractor server (see extractor-server/README.md in the repo), paste its address here, and it joins every race. Example: https://my-extractor.onrender.com" = "شغّل خادم الاستخراج المجاني (راجع extractor-server/README.md في المستودع)، والصق عنوانه هنا لينضم إلى كل سباق. مثال: https://my-extractor.onrender.com";
+"Downloads now continue while the app is in the background or your phone is locked. More at once is faster on a good connection; drop to 1 on a weak one." = "تستمر التنزيلات الآن والتطبيق في الخلفية أو الهاتف مقفل. العدد الأكبر في وقت واحد أسرع مع اتصال جيد؛ اخفضه إلى ١ مع اتصال ضعيف.";
+"Each joins the download race. Only links proven to serve real audio can win, so a dead engine just loses quietly and the classic engines carry on." = "كل واحد منها ينضم إلى سباق التنزيل. لا يفوز إلا رابط ثبت أنه يقدّم صوتًا حقيقيًا، لذا يخسر المحرك المعطّل بهدوء وتواصل المحركات الكلاسيكية عملها.";
+"Everything smart still works — playlists, duplicate checks, mood picks — computed fully on this phone. Add a key below whenever you want cloud models." = "كل الميزات الذكية تعمل — قوائم التشغيل وفحص التكرار واختيارات المزاج — وتُحسب بالكامل على هذا الهاتف. أضف مفتاحًا بالأسفل متى أردت نماذج السحابة.";
+"Microphone features are hidden because this build has no NSMicrophoneUsageDescription. Run `bash scripts/install_ci_fix.sh && git push` once to sync the workflow with the repo, and they appear." = "ميزات الميكروفون مخفية لأن هذه النسخة لا تحتوي على NSMicrophoneUsageDescription. شغّل `bash scripts/install_ci_fix.sh && git push` مرة واحدة لمزامنة سير العمل مع المستودع، فتظهر.";
+"Names like “Amr Diab - Tamally Maak (Official Video)” are what the duplicate finder and the AI playlists read. Nothing to tidy right now." = "أسماء مثل «Amr Diab - Tamally Maak (Official Video)» هي ما يقرأه كاشف التكرار وقوائم التشغيل الذكية. لا شيء يحتاج ترتيبًا الآن.";
+"Nothing is deleted automatically — you pick the copy to keep (the app pre-selects the best one) and press Delete yourself. Deleted files wait in Recently Deleted until you empty it." = "لا يُحذف شيء تلقائيًا — أنت تختار النسخة التي تبقى (يرشّح التطبيق الأفضل مسبقًا) وتضغط حذف بنفسك. تنتظر الملفات المحذوفة في «المحذوفة حديثًا» حتى تفرغها.";
+"Records your mic while the track keeps playing and saves the take into your Library. “System voice processing” adds echo cancellation, auto gain and noise reduction for free." = "يسجّل الميكروفون بينما تستمر الأغنية، ويحفظ التسجيل في مكتبتك. تضيف «معالجة الصوت من النظام» إلغاء الصدى وضبط الكسب تلقائيًا وخفض الضوضاء مجانًا.";
+"Say to Siri: “Play a mix in AS Music”, “Build me a playlist for a rainy drive”, “Like this song”, “Sleep in 30 minutes”. Add your own in the Shortcuts app." = "قل لسيري: «شغّل مزيجًا في AS Music»، «اعمل لي قائمة لقيادة ممطرة»، «أعجبتني هذه الأغنية»، «نم بعد ٣٠ دقيقة». وأضف عباراتك الخاصة من تطبيق الاختصارات.";
+"Smart Master reads the file itself — muddiness, harshness, thin lows, hiss — and corrects it per song, on top of your EQ preset. Loudness Match levels every track to the same target so nothing jumps." = "يقرأ «الماستر الذكي» الملف نفسه — التعكّر والحدّة وضعف القاع والهسيس — ويصحّحه لكل أغنية فوق نمط المعادل لديك. وتوحّد «مطابقة الجهارة» مستوى كل المقاطع على هدف واحد فلا يقفز شيء.";
+"Songs in here don't show in your Library and don't play — they only take up storage. Restoring puts a song back with its likes and playlists intact." = "الأغاني هنا لا تظهر في مكتبتك ولا تُشغَّل — إنها تشغل مساحة فقط. الاستعادة تعيد الأغنية بإعجاباتها وقوائمها كما كانت.";
+"Songs that aren't on this device stay reserved: download them again and they drop back into the same playlists automatically." = "تبقى الأغاني غير الموجودة على هذا الجهاز محجوزة: نزّلها مرة أخرى فتعود إلى القوائم نفسها تلقائيًا.";
+"Tempo, loudness, tone and vocal balance are measured on the device itself — that's what the auto-playlists, the duplicate 'same audio' check and the smart EQ all read." = "تُقاس السرعة والجهارة والنبرة وتوازن الغناء على الجهاز نفسه — وهذا ما تقرأه قوائم التشغيل التلقائية وفحص «الصوت نفسه» للتكرار والمعادل الذكي.";
+"The backup holds your playlists, likes, play counts, song titles/artists and app settings — not the audio files, so it stays tiny." = "تحفظ النسخة الاحتياطية قوائم التشغيل والإعجابات وعدد مرات التشغيل وأسماء الأغاني والفنانين وإعدادات التطبيق — دون ملفات الصوت، لذا تبقى صغيرة جدًا.";
+"The file is renamed to match, so the new name sticks after a restart. Playlists, likes and play counts stay with the song." = "تتم إعادة تسمية الملف ليطابقه، فيبقى الاسم الجديد بعد إعادة التشغيل. وتبقى قوائم التشغيل والإعجابات وعدد مرات التشغيل مع الأغنية.";
+"These file names still look like downloads. Pick the ones to rename — the file is renamed, never the audio, and the song keeps its playlists, likes and play counts." = "ما زالت أسماء هذه الملفات تبدو كتنزيلات. اختر ما تريد إعادة تسميته — يُعاد تسمية الملف لا الصوت، وتحتفظ الأغنية بقوائمها وإعجاباتها وعدد مرات تشغيلها.";
+"These files are too small to contain audio — a download that failed halfway. They go to Recently Deleted, so you can still get them back." = "هذه الملفات أصغر من أن تحتوي على صوت — تنزيل توقف في منتصفه. تذهب إلى «المحذوفة حديثًا»، فيمكنك استرجاعها.";
+"Tip: the Vocal & Sound Studio sheet adds per-song corrections on top of these presets. Arabic/Maqaam boosts oud/qanun highs while keeping warm lows — great for Amr Diab, Sherine, Nancy Ajram." = "نصيحة: تضيف صفحة «استوديو الصوت والغناء» تصحيحات لكل أغنية فوق هذه الأنماط. ويرفع نمط «عربي/مقام» حدّة العود والقانون مع الحفاظ على دفء القاع — ممتاز لعمرو دياب وشيرين ونانسي عجرم.";
+"Vocal Focus lifts 1–4 kHz and pulls the box out from under the voice — good for lyrics in a noisy room or in the car. Night Mode does the opposite of what a normal EQ can: it adds back the bass and air your ears lose at low volume." = "يرفع «تركيز الغناء» نطاق ١–٤ كيلوهرتز ويزيل الطنين من تحت الصوت — مفيد لمتابعة الكلمات في مكان صاخب أو في السيارة. ويفعل «الوضع الليلي» ما لا يقدر عليه معادل عادي: يعيد القاع والهواء اللذين تفقدهما أذنك عند الصوت المنخفض.";
+"Your library looks clean. Songs are matched by name and artist, by how long they play, and finally by how they actually sound — so even a re-download saved under a different name gets caught." = "تبدو مكتبتك نظيفة. تُطابَق الأغاني بالاسم والفنان، ثم بمدة التشغيل، وأخيرًا بطريقة صوتها الفعلية — حتى النسخة المعاد تنزيلها باسم مختلف تُكتشف.";
+"✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off. Swipe any playlist to delete it, or use Select to remove several at once — deleted smart playlists stay deleted." = "✨ يبني التطبيق قوائم «اللمعة» من طريقة صوت أغانيك فعلًا (الطاقة والسرعة والسطوع وتركيز الغناء). بدّل اللمعة في الشريط أعلاه لتشغيل الإنشاء التلقائي أو إيقافه. اسحب أي قائمة لحذفها، أو استخدم «تحديد» لإزالة عدة قوائم دفعة واحدة — وتبقى القوائم الذكية المحذوفة محذوفة.";

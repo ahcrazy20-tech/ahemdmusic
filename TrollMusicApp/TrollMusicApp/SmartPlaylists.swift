@@ -310,14 +310,16 @@ final class SmartPlaylistEngine: ObservableObject {
         AudioLab.shared.prime(mm.songs)
         coverage = AudioLab.shared.coverage(of: mm.songs)
 
-        let vs = vectors()
+        // Disliked songs never enter an auto-playlist.
+        let vs = vectors().filter { !ListenHistory.shared.isDisliked($0.song) }
         var out: [SmartPlaylistSuggestion] = []
 
         for recipe in PlaylistRecipe.all {
             let matched = vs.filter { recipe.gate($0) }
             guard matched.count >= recipe.minSongs else { continue }
             let ranked = matched
-                .map { (v: $0, s: recipe.score($0) + 0.3 * $0.hourFit) }
+                .map { (v: $0, s: recipe.score($0) + 0.3 * $0.hourFit
+                                   + 0.4 * ListenHistory.shared.affinity(for: $0.song)) }
                 .sorted { $0.s > $1.s }
                 .prefix(recipe.maxSongs)
                 .map { $0.v }
@@ -539,11 +541,18 @@ final class SmartPlaylistEngine: ObservableObject {
                 return FeatureMath.clamp01(0.75 + bonus - clipPenalty - tooQuiet - crushed)
             }()
 
+            // Familiarity now counts *finished* listens, not bare starts, and
+            // is pulled down for tracks this user keeps skipping. A song you
+            // always skip can no longer look "familiar" to the engine.
+            let affinity = history.affinity(for: s)
+            let rawFamiliarity = min(1.0, Double(plays) / 12)
+            let familiarity = FeatureMath.clamp01(rawFamiliarity * (0.7 + 0.3 * (affinity + 1)))
+
             out.append(SongVector(song: s, features: f,
                                   energy: energy, brightness: bright, warmth: warm,
                                   vocal: vocal, tempoN: tempoN, beat: beat, hype: hype,
                                   valence: valence,
-                                  familiarity: min(1, Double(plays) / 12),
+                                  familiarity: familiarity,
                                   liked: liked.contains(s.id) ? 1 : 0,
                                   recency: recency, arabic: arabicFlag, quality: quality,
                                   hourFit: hourFit,
@@ -692,6 +701,14 @@ enum PlaylistFlow {
         cost += abs(a.energy - b.energy) * 0.8
         if !a.artistKey.isEmpty, a.artistKey == b.artistKey { cost += 0.55 }
         if a.genre == b.genre, !a.genre.isEmpty { cost -= 0.06 }
+        // Harmonic mixing (Pack 6): when both tracks have a confident key,
+        // prefer neighbours on the Camelot wheel. Tracks without a key are
+        // unaffected, so this can only ever improve the ordering.
+        if let ka = a.features?.camelot, let kb = b.features?.camelot,
+           !ka.isEmpty, !kb.isEmpty,
+           let hd = MusicKey.harmonicDistance(ka, kb) {
+            cost += hd * 0.7
+        }
         return max(0.01, cost)
     }
 
@@ -1008,7 +1025,11 @@ extension SmartPlaylistEngine {
     /// Scores every song against a brief and keeps the best.
     private func pick(with b: PlaylistBrief, from vs: [SongVector]) -> [SongVector] {
         var scored: [(v: SongVector, s: Double)] = []
+        let history = ListenHistory.shared
         for v in vs {
+            // A thumbs-down keeps a song out of every generated playlist until
+            // the user clears it.
+            if history.isDisliked(v.song) { continue }
             if !b.banned.isEmpty {
                 let hay = "\(v.song.title) \(v.song.artist) \(v.genre)".lowercased()
                 if b.banned.contains(where: { hay.contains($0) }) { continue }
@@ -1027,6 +1048,8 @@ extension SmartPlaylistEngine {
             if !b.artistWords.isEmpty, b.artistWords.contains(v.artistKey) { s += 1.4 }
             if v.liked > 0 { s += 0.35 }
             s += 0.3 * v.hourFit
+            // Behavioural nudge: songs you finish rise, songs you bail on sink.
+            s += 0.45 * history.affinity(for: v.song)
             if b.wantVocal, v.vocal > 0.6 { s += 0.5 }
             scored.append((v, s))
         }

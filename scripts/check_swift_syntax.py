@@ -32,6 +32,16 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 APP = ROOT / "TrollMusicApp" / "TrollMusicApp"
+# The widget extension is a second compiled target, so its sources need the
+# same gate — a brace error there fails the build exactly as loudly.
+WIDGET = ROOT / "TrollMusicApp" / "ASMusicWidget"
+
+
+def source_files():
+    files = sorted(APP.glob("*.swift"))
+    if WIDGET.is_dir():
+        files += sorted(WIDGET.glob("*.swift"))
+    return files
 
 # The only sequences a Swift *escaped* string literal may contain after a
 # backslash. Raw strings and regex literals are exempt.
@@ -44,6 +54,12 @@ DECL = re.compile(r"^\s*(?:@\w+\s+)*(?:public |internal |private |fileprivate )?
                   r"(?:class|struct|enum|protocol|actor|extension|typealias)\s+([A-Z]\w*)",
                   re.M)
 USES = re.compile(r"\b([A-Z][A-Za-z0-9_]{2,})\b")
+
+# Top-level `let`/`var` at column 0 — file-scope globals, which are NOT members
+# and so must never be written as `self.name`.
+FILE_GLOBAL = re.compile(
+    r"^(?:private |fileprivate |internal |public )?(?:let|var)\s+([a-z_]\w*)",
+    re.M)
 
 BS = chr(92)          # backslash
 DQ = chr(34)          # one double quote
@@ -481,11 +497,39 @@ def check_file(path: pathlib.Path):
         s = ln.strip()
         if not s or s.startswith("//"):
             continue
+        # Conditional-compilation directives are not "code": a header block of
+        #     #if canImport(ShazamKit)
+        #     import ShazamKit
+        #     #endif
+        # is the correct way to import a framework that may be unavailable, and
+        # it must not be reported as "import after code". Anything that is real
+        # code still flips the flag, so a genuine late import is still caught.
+        if s.startswith(("#if", "#else", "#elseif", "#endif")):
+            continue
         if s.startswith("import "):
             if seen_code:
                 problems.append("import after code — move it to the top of the file")
         else:
             seen_code = True
+
+    # `self.foo` where foo is a file-level global, not a member.
+    #
+    # This compiles in your head and fails in Xcode with "value of type 'X' has
+    # no member 'foo'". It is easy to write when moving code into a closure
+    # that already qualifies everything else with self, which is exactly how it
+    # reached CI once. Costs nothing to catch here instead of eight minutes in.
+    globals_here = set(FILE_GLOBAL.findall(raw))
+    if globals_here:
+        for i, ln in enumerate(raw.split(NL), 1):
+            st = ln.strip()
+            if st.startswith("//"):
+                continue
+            for m in re.finditer(r"\bself\.([A-Za-z_][A-Za-z0-9_]*)", ln):
+                if m.group(1) in globals_here:
+                    problems.append(
+                        f"line {i}: 'self.{m.group(1)}' — {m.group(1)} is a file-level "
+                        f"global, not a member; drop the 'self.'"
+                    )
     return set(DECL.findall(raw)), problems
 
 
@@ -529,7 +573,7 @@ def main() -> int:
     ap.add_argument("paths", nargs="*")
     args = ap.parse_args()
 
-    files = [pathlib.Path(p) for p in args.paths] if args.paths else sorted(APP.glob("*.swift"))
+    files = [pathlib.Path(p) for p in args.paths] if args.paths else source_files()
     problems_total = 0
     declared = {}
     scrubbed_all = {}

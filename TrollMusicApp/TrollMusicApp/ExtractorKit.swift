@@ -710,11 +710,26 @@ func customRace(task: DownloadTask,
 
 struct EngineSettingsView: View {
     @AppStorage("asmusic_customx") private var customX: String = ""
+    @ObservedObject private var dc = DownloadCenter.shared
     @State private var testing = false
     @State private var testResult: String? = nil
 
     var body: some View {
         List {
+            Section(header: Text("Transfers"),
+                    footer: Text("Downloads now continue while the app is in the background or your phone is locked. More at once is faster on a good connection; drop to 1 on a weak one.")) {
+                Stepper(value: Binding(get: { dc.maxConcurrent },
+                                       set: { dc.maxConcurrent = $0 }), in: 1...5) {
+                    HStack {
+                        Label("Downloads at once", systemImage: "arrow.down.circle")
+                        Spacer()
+                        Text("\(dc.maxConcurrent)").foregroundColor(.secondary)
+                    }
+                }
+                Toggle(isOn: Binding(get: { dc.wifiOnly }, set: { dc.wifiOnly = $0 })) {
+                    Label("Wi-Fi only", systemImage: "wifi")
+                }
+            }
             Section(header: Text("Classic engines"),
                     footer: Text("y2jar • Mp3Juice • cnvmp3 • Theta — always on, never modified.")) {
                 Label("Classic engines always on", systemImage: "checkmark.circle.fill")

@@ -1,0 +1,353 @@
+/*
+   Localizable.strings (English — base)
+
+   The development language. SwiftUI resolves Text("Play") against this file,
+   so the keys and values are identical here by design; the file exists so the
+   set of localizable strings is explicit and reviewable, and so a missing
+   Arabic entry falls back to real English rather than a raw key.
+*/
+
+// MARK: - General
+"Done" = "Done";
+"Cancel" = "Cancel";
+"Save" = "Save";
+"Delete" = "Delete";
+"Erase" = "Erase";
+"Restore" = "Restore";
+"Rename" = "Rename";
+"Retry" = "Retry";
+"Try Again" = "Try Again";
+"Close" = "Close";
+"Stop" = "Stop";
+"OK" = "OK";
+"Undo" = "Undo";
+"Apply" = "Apply";
+"Create" = "Create";
+"Go" = "Go";
+"Paste" = "Paste";
+"Refresh" = "Refresh";
+"Rescan" = "Rescan";
+"Recheck" = "Recheck";
+"Scan again" = "Scan again";
+"Search again" = "Search again";
+"Clear" = "Clear";
+"Share" = "Share";
+"Discard" = "Discard";
+"Select…" = "Select…";
+"Thinking…" = "Thinking…";
+"Checking…" = "Checking…";
+"auto" = "auto";
+"AI" = "AI";
+"— OR —" = "— OR —";
+
+// MARK: - Library
+"Your Library" = "Your Library";
+"Your Library is Empty" = "Your Library is Empty";
+"Use Magic DL or Web Hub to download songs" = "Use Magic DL or Web Hub to download songs";
+"Songs" = "Songs";
+"Artists" = "Artists";
+"No artists yet" = "No artists yet";
+"Songs get an artist from their file name or from the free iTunes lookup." = "Songs get an artist from their file name or from the free iTunes lookup.";
+"Recently Played" = "Recently Played";
+"Shuffle all" = "Shuffle all";
+"Library tools" = "Library tools";
+"Sort by" = "Sort by";
+"Import from Files" = "Import from Files";
+"Song info" = "Song info";
+"Song info…" = "Song info…";
+"Song Info…" = "Song Info…";
+"Rename Song" = "Rename Song";
+"More like this" = "More like this";
+"More Like This" = "More Like This";
+"Shown everywhere" = "Shown everywhere";
+"Current file" = "Current file";
+"Re-read the name from the file" = "Re-read the name from the file";
+"Songs in library" = "Songs in library";
+"It's in Recently Deleted — nothing is gone yet." = "It's in Recently Deleted — nothing is gone yet.";
+
+// MARK: - Playback
+"Play" = "Play";
+"Play now" = "Play now";
+"Play Now" = "Play Now";
+"Play Next" = "Play Next";
+"Play Later" = "Play Later";
+"Shuffle" = "Shuffle";
+"Shuffle Play" = "Shuffle Play";
+"Up Next" = "Up Next";
+"NOW PLAYING" = "NOW PLAYING";
+"SMART RADIO" = "SMART RADIO";
+"FROM LIKED SONGS" = "FROM LIKED SONGS";
+"Smart Radio" = "Smart Radio";
+"About the artist" = "About the artist";
+"Resume last song on launch" = "Resume last song on launch";
+
+// MARK: - Sleep timer
+"15 min sleep" = "15 min sleep";
+"30 min sleep" = "30 min sleep";
+"60 min sleep" = "60 min sleep";
+"Stop at song end" = "Stop at song end";
+"Cancel sleep" = "Cancel sleep";
+
+// MARK: - Transitions (Pack 6)
+"Between songs" = "Between songs";
+"Transition" = "Transition";
+"Off (hard cut)" = "Off (hard cut)";
+"Gapless" = "Gapless";
+"Crossfade" = "Crossfade";
+"Auto-DJ" = "Auto-DJ";
+"Blend length" = "Blend length";
+"Maximum blend" = "Maximum blend";
+"Each song stops, the next begins. The classic behaviour." = "Each song stops, the next begins. The classic behaviour.";
+"Removes the silence between tracks without blending them. Best for albums, live sets and long recitations." = "Removes the silence between tracks without blending them. Best for albums, live sets and long recitations.";
+"The next song fades in while this one fades out, over a length you choose." = "The next song fades in while this one fades out, over a length you choose.";
+"Like crossfade, but the length adapts to what the two songs actually sound like — long blends between steady beats, short ones into quiet or spoken tracks." = "Like crossfade, but the length adapts to what the two songs actually sound like — long blends between steady beats, short ones into quiet or spoken tracks.";
+
+// MARK: - Audio settings
+"Audio Settings" = "Audio Settings";
+"Audio & Playback" = "Audio & Playback";
+"Equalizer, loudness & playback" = "Equalizer, loudness & playback";
+"Equalizer" = "Equalizer";
+"Equalizer Preset" = "Equalizer Preset";
+"Loudness Boost" = "Loudness Boost";
+"Preamp" = "Preamp";
+"Audio Enhancements" = "Audio Enhancements";
+"Spatial / 3D sound" = "Spatial / 3D sound";
+"Automatic mastering" = "Automatic mastering";
+"Smart Master (per-song EQ)" = "Smart Master (per-song EQ)";
+"Match loudness across songs" = "Match loudness across songs";
+"Skip dead air at the start" = "Skip dead air at the start";
+"Correction strength" = "Correction strength";
+"Loudness target" = "Loudness target";
+"Streaming services use about −14. Lower numbers are quieter but keep more punch." = "Streaming services use about −14. Lower numbers are quieter but keep more punch.";
+"Voices" = "Voices";
+"Vocal Focus" = "Vocal Focus";
+"Night / low-volume mode" = "Night / low-volume mode";
+"Rip repair (de-hiss, tame sibilance)" = "Rip repair (de-hiss, tame sibilance)";
+"What the app hears right now" = "What the app hears right now";
+"Re-analyze the whole library" = "Re-analyze the whole library";
+"This file looks like a rough rip — Rip Repair helps here." = "This file looks like a rough rip — Rip Repair helps here.";
+"Measuring this track…" = "Measuring this track…";
+"Play a song to see its measured numbers." = "Play a song to see its measured numbers.";
+"Library analyzed" = "Library analyzed";
+"Vocal & Sound Studio" = "Vocal & Sound Studio";
+
+// MARK: - Karaoke
+"Karaoke / acapella export" = "Karaoke / acapella export";
+"Mode" = "Mode";
+"Play the song you want to export first." = "Play the song you want to export first.";
+"Record over the song" = "Record over the song";
+"System voice processing (echo cancel + AGC)" = "System voice processing (echo cancel + AGC)";
+"Noise gate between lines" = "Noise gate between lines";
+"Stop & save" = "Stop & save";
+"Start take" = "Start take";
+"Microphone not available in this build" = "Microphone not available in this build";
+
+// MARK: - Voice control
+"Voice control" = "Voice control";
+"Speech rate" = "Speech rate";
+"Let the app talk back" = "Let the app talk back";
+"Announce the song that starts" = "Announce the song that starts";
+
+// MARK: - Downloads
+"Downloads" = "Downloads";
+"Download" = "Download";
+"Download All" = "Download All";
+"No downloads" = "No downloads";
+"Cancel download" = "Cancel download";
+"Clear Finished" = "Clear Finished";
+"Queued" = "Queued";
+"Cancelled" = "Cancelled";
+"Saved" = "Saved";
+"Saved to Library" = "Saved to Library";
+"Connecting…" = "Connecting…";
+"Connecting to server…" = "Connecting to server…";
+"Finding fastest server…" = "Finding fastest server…";
+"Racing servers for fastest link…" = "Racing servers for fastest link…";
+"Searching multiple sources…" = "Searching multiple sources…";
+"Failed downloads" = "Failed downloads";
+"Transfers" = "Transfers";
+"Downloads at once" = "Downloads at once";
+"Wi-Fi only" = "Wi-Fi only";
+
+// MARK: - Download engines
+"Download engines" = "Download engines";
+"Download Engines" = "Download Engines";
+"Classic engines" = "Classic engines";
+"Classic engines always on" = "Classic engines always on";
+"y2jar • Mp3Juice • cnvmp3 • Theta — always on, never modified." = "y2jar • Mp3Juice • cnvmp3 • Theta — always on, never modified.";
+"Alternative engines" = "Alternative engines";
+"Your own extractor (optional)" = "Your own extractor (optional)";
+"Backend list" = "Backend list";
+"Mirror lists refresh automatically once a day." = "Mirror lists refresh automatically once a day.";
+"Refresh now" = "Refresh now";
+
+// MARK: - Magic DL / search
+"Magic DL" = "Magic DL";
+"Smart Magic DL" = "Smart Magic DL";
+"Search YouTube & SoundCloud • Paste any link" = "Search YouTube & SoundCloud • Paste any link";
+"Magic Search" = "Magic Search";
+"Quick Picks" = "Quick Picks";
+"Load Trending" = "Load Trending";
+"Extract MP3" = "Extract MP3";
+"Edit the name before saving to your Library." = "Edit the name before saving to your Library.";
+
+// MARK: - Web hub
+"Tabs" = "Tabs";
+"New Tab" = "New Tab";
+"Google" = "Google";
+"YouTube" = "YouTube";
+"SoundCloud" = "SoundCloud";
+"Audiomack" = "Audiomack";
+"SpotifyDown" = "SpotifyDown";
+"Anghami" = "Anghami";
+"YTMP3" = "YTMP3";
+"CNVMP3" = "CNVMP3";
+
+// MARK: - Playlists
+"Playlists" = "Playlists";
+"Smart Playlists" = "Smart Playlists";
+"Liked Songs" = "Liked Songs";
+"No playlists yet — let the AI build one above, or tap +." = "No playlists yet — let the AI build one above, or tap +.";
+"No songs yet. Add from Library." = "No songs yet. Add from Library.";
+"Play playlist in order" = "Play playlist in order";
+"Shuffle playlist" = "Shuffle playlist";
+"Rename Playlist" = "Rename Playlist";
+"Delete Playlist" = "Delete Playlist";
+"Sort playlists" = "Sort playlists";
+"smart order" = "smart order";
+"Rebuild smart playlists now" = "Rebuild smart playlists now";
+"Describe a playlist…" = "Describe a playlist…";
+"AI Playlist Generator" = "AI Playlist Generator";
+"Generate AI playlist" = "Generate AI playlist";
+"Regenerate with AI" = "Regenerate with AI";
+"Build it" = "Build it";
+"Auto-create ✨ playlists" = "Auto-create ✨ playlists";
+"Order tracks like a DJ set" = "Order tracks like a DJ set";
+"Rebuild ✨ playlists" = "Rebuild ✨ playlists";
+"Delete all ✨ playlists" = "Delete all ✨ playlists";
+"Smart playlist — refreshed automatically" = "Smart playlist — refreshed automatically";
+"Analyze library and suggest playlists" = "Analyze library and suggest playlists";
+"AI curation on" = "AI curation on";
+"Offline mode — works with no key" = "Offline mode — works with no key";
+
+// MARK: - For You / discover
+"For You" = "For You";
+"Made for You" = "Made for You";
+"Recommendations based on the music you love" = "Recommendations based on the music you love";
+"Analyzing your taste…" = "Analyzing your taste…";
+"We grouped your Library by artist — tap to create." = "We grouped your Library by artist — tap to create.";
+"Open full article" = "Open full article";
+
+// MARK: - Library health & maintenance
+"Library Health" = "Library Health";
+"AI · on-device" = "AI · on-device";
+"Fetch missing artists & covers" = "Fetch missing artists & covers";
+"Rough sounding rips" = "Rough sounding rips";
+"Duplicate Finder" = "Duplicate Finder";
+"Comparing your songs…" = "Comparing your songs…";
+"Delete extra copies" = "Delete extra copies";
+"No duplicates found" = "No duplicates found";
+"SAME AUDIO" = "SAME AUDIO";
+"DIFFERENT VERSIONS" = "DIFFERENT VERSIONS";
+"Lengths differ — could be a live/remix version. Double-check before deleting." = "Lengths differ — could be a live/remix version. Double-check before deleting.";
+"Tidy up names" = "Tidy up names";
+"Every file name looks clean" = "Every file name looks clean";
+"Ask AI" = "Ask AI";
+
+// MARK: - Identify (Pack 6)
+"Identify songs" = "Identify songs";
+"Songs that need it" = "Songs that need it";
+"Matching engine" = "Matching engine";
+"Matches" = "Matches";
+
+// MARK: - Trash
+"Recently Deleted" = "Recently Deleted";
+"Safety net" = "Safety net";
+"Deleted songs wait here instead of vanishing." = "Deleted songs wait here instead of vanishing.";
+"Keep for" = "Keep for";
+"Nothing deleted recently" = "Nothing deleted recently";
+"When you delete a song — or clean duplicates — it lands here first." = "When you delete a song — or clean duplicates — it lands here first.";
+"Restore everything" = "Restore everything";
+
+// MARK: - Lyrics
+"Looking for the words…" = "Looking for the words…";
+"Re-download lyrics" = "Re-download lyrics";
+"Reset timing" = "Reset timing";
+"Play a song to see its lyrics." = "Play a song to see its lyrics.";
+
+// MARK: - Backup
+"Backup & Restore" = "Backup & Restore";
+"Export backup & share…" = "Export backup & share…";
+"Save a copy in the app's Documents" = "Save a copy in the app's Documents";
+"Choose a backup file…" = "Choose a backup file…";
+"on this device" = "on this device";
+"Replace my playlists instead of merging" = "Replace my playlists instead of merging";
+
+// MARK: - AI
+"AI Assistant" = "AI Assistant";
+"AI Music Assistant (optional)" = "AI Music Assistant (optional)";
+"AI Intelligence" = "AI Intelligence";
+"Open AI Intelligence settings" = "Open AI Intelligence settings";
+"Open full AI settings (models & failover)" = "Open full AI settings (models & failover)";
+"Pick your AI" = "Pick your AI";
+"Provider" = "Provider";
+"AI provider" = "AI provider";
+"Model" = "Model";
+"Auto model (self-healing)" = "Auto model (self-healing)";
+"Switches to a verified newer Gemini when Google retires one." = "Switches to a verified newer Gemini when Google retires one.";
+"Auto-failover — never stop" = "Auto-failover — never stop";
+"On-device only — nothing is sent anywhere." = "On-device only — nothing is sent anywhere.";
+"Set up (free key)" = "Set up (free key)";
+"Get 15" = "Get 15";
+
+// MARK: - Settings / about
+"Settings" = "Settings";
+"Appearance" = "Appearance";
+"Accent color & theme" = "Accent color & theme";
+"App Accent Color" = "App Accent Color";
+"Theme" = "Theme";
+"Theme color" = "Theme color";
+"About" = "About";
+"App version" = "App version";
+"Share / Export" = "Share / Export";
+
+
+// MARK: - Long explanatory footers
+"Adds clean gain (0 = no boost, +3 to +6 dB for quieter Arabic masters, -dB for noisy sources)." = "Adds clean gain (0 = no boost, +3 to +6 dB for quieter Arabic masters, -dB for noisy sources).";
+"Built from the songs already in your Library — offline if you have no AI key set." = "Built from the songs already in your Library — offline if you have no AI key set.";
+"Dead or retired model → next model → other provider → on-device. One silent retry, no dead ends." = "Dead or retired model → next model → other provider → on-device. One silent retry, no dead ends.";
+"Dictation needs the mic + speech permission entries in Info.plist — re-sync CI once (scripts/install_ci_fix.sh)." = "Dictation needs the mic + speech permission entries in Info.plist — re-sync CI once (scripts/install_ci_fix.sh).";
+"Different file names, identical sound (same length, tempo, loudness and tone) — this is the same recording saved twice." = "Different file names, identical sound (same length, tempo, loudness and tone) — this is the same recording saved twice.";
+"Files under 32 KB can't hold a song — they're what's left when a download is cut off." = "Files under 32 KB can't hold a song — they're what's left when a download is cut off.";
+"Only the file names change. The songs stay where they are, in the same playlists." = "Only the file names change. The songs stay where they are, in the same playlists.";
+"Piped / Invidious / Cobalt / your own server, mirror lists and health — the engines that race to fetch your songs." = "Piped / Invidious / Cobalt / your own server, mirror lists and health — the engines that race to fetch your songs.";
+"Same screen as from the player: EQ preset, loudness boost, spatial sound, resume." = "Same screen as from the player: EQ preset, loudness boost, spatial sound, resume.";
+"Spatial adds a subtle hall reverb that widens the stereo image on headphones and car speakers." = "Spatial adds a subtle hall reverb that widens the stereo image on headphones and car speakers.";
+"Song File Tags" = "Song File Tags";
+"Save BPM & key to files" = "Save BPM & key to files";
+"After a song is analysed, write its BPM, musical key and volume level into the MP3 file itself. Other players and DJ apps can then read them, and the values survive a reinstall. Files that already have tags are never touched." = "After a song is analysed, write its BPM, musical key and volume level into the MP3 file itself. Other players and DJ apps can then read them, and the values survive a reinstall. Files that already have tags are never touched.";
+
+"Ask for songs in plain language — for example “5 new Egyptian pop songs about summer” — and download the results in one tap. Free: one APInex key unlocks 20+ models (GPT, Gemini, DeepSeek, GLM…), or use your own Google Gemini key." = "Ask for songs in plain language — for example “5 new Egyptian pop songs about summer” — and download the results in one tap. Free: one APInex key unlocks 20+ models (GPT, Gemini, DeepSeek, GLM…), or use your own Google Gemini key.";
+"Center-channel separation, done on your phone. It writes a NEW file into your Library — the original is never touched. Works best on properly mixed stereo tracks." = "Center-channel separation, done on your phone. It writes a NEW file into your Library — the original is never touched. Works best on properly mixed stereo tracks.";
+"Clipped, very quiet, or starting with dead air. Re-download these from Magic DL for a cleaner copy — the duplicate finder will then keep the better one automatically." = "Clipped, very quiet, or starting with dead air. Re-download these from Magic DL for a cleaner copy — the duplicate finder will then keep the better one automatically.";
+"Deploy the free extractor server (see extractor-server/README.md in the repo), paste its address here, and it joins every race. Example: https://my-extractor.onrender.com" = "Deploy the free extractor server (see extractor-server/README.md in the repo), paste its address here, and it joins every race. Example: https://my-extractor.onrender.com";
+"Downloads now continue while the app is in the background or your phone is locked. More at once is faster on a good connection; drop to 1 on a weak one." = "Downloads now continue while the app is in the background or your phone is locked. More at once is faster on a good connection; drop to 1 on a weak one.";
+"Each joins the download race. Only links proven to serve real audio can win, so a dead engine just loses quietly and the classic engines carry on." = "Each joins the download race. Only links proven to serve real audio can win, so a dead engine just loses quietly and the classic engines carry on.";
+"Everything smart still works — playlists, duplicate checks, mood picks — computed fully on this phone. Add a key below whenever you want cloud models." = "Everything smart still works — playlists, duplicate checks, mood picks — computed fully on this phone. Add a key below whenever you want cloud models.";
+"Microphone features are hidden because this build has no NSMicrophoneUsageDescription. Run `bash scripts/install_ci_fix.sh && git push` once to sync the workflow with the repo, and they appear." = "Microphone features are hidden because this build has no NSMicrophoneUsageDescription. Run `bash scripts/install_ci_fix.sh && git push` once to sync the workflow with the repo, and they appear.";
+"Names like “Amr Diab - Tamally Maak (Official Video)” are what the duplicate finder and the AI playlists read. Nothing to tidy right now." = "Names like “Amr Diab - Tamally Maak (Official Video)” are what the duplicate finder and the AI playlists read. Nothing to tidy right now.";
+"Nothing is deleted automatically — you pick the copy to keep (the app pre-selects the best one) and press Delete yourself. Deleted files wait in Recently Deleted until you empty it." = "Nothing is deleted automatically — you pick the copy to keep (the app pre-selects the best one) and press Delete yourself. Deleted files wait in Recently Deleted until you empty it.";
+"Records your mic while the track keeps playing and saves the take into your Library. “System voice processing” adds echo cancellation, auto gain and noise reduction for free." = "Records your mic while the track keeps playing and saves the take into your Library. “System voice processing” adds echo cancellation, auto gain and noise reduction for free.";
+"Say to Siri: “Play a mix in AS Music”, “Build me a playlist for a rainy drive”, “Like this song”, “Sleep in 30 minutes”. Add your own in the Shortcuts app." = "Say to Siri: “Play a mix in AS Music”, “Build me a playlist for a rainy drive”, “Like this song”, “Sleep in 30 minutes”. Add your own in the Shortcuts app.";
+"Smart Master reads the file itself — muddiness, harshness, thin lows, hiss — and corrects it per song, on top of your EQ preset. Loudness Match levels every track to the same target so nothing jumps." = "Smart Master reads the file itself — muddiness, harshness, thin lows, hiss — and corrects it per song, on top of your EQ preset. Loudness Match levels every track to the same target so nothing jumps.";
+"Songs in here don't show in your Library and don't play — they only take up storage. Restoring puts a song back with its likes and playlists intact." = "Songs in here don't show in your Library and don't play — they only take up storage. Restoring puts a song back with its likes and playlists intact.";
+"Songs that aren't on this device stay reserved: download them again and they drop back into the same playlists automatically." = "Songs that aren't on this device stay reserved: download them again and they drop back into the same playlists automatically.";
+"Tempo, loudness, tone and vocal balance are measured on the device itself — that's what the auto-playlists, the duplicate 'same audio' check and the smart EQ all read." = "Tempo, loudness, tone and vocal balance are measured on the device itself — that's what the auto-playlists, the duplicate 'same audio' check and the smart EQ all read.";
+"The backup holds your playlists, likes, play counts, song titles/artists and app settings — not the audio files, so it stays tiny." = "The backup holds your playlists, likes, play counts, song titles/artists and app settings — not the audio files, so it stays tiny.";
+"The file is renamed to match, so the new name sticks after a restart. Playlists, likes and play counts stay with the song." = "The file is renamed to match, so the new name sticks after a restart. Playlists, likes and play counts stay with the song.";
+"These file names still look like downloads. Pick the ones to rename — the file is renamed, never the audio, and the song keeps its playlists, likes and play counts." = "These file names still look like downloads. Pick the ones to rename — the file is renamed, never the audio, and the song keeps its playlists, likes and play counts.";
+"These files are too small to contain audio — a download that failed halfway. They go to Recently Deleted, so you can still get them back." = "These files are too small to contain audio — a download that failed halfway. They go to Recently Deleted, so you can still get them back.";
+"Tip: the Vocal & Sound Studio sheet adds per-song corrections on top of these presets. Arabic/Maqaam boosts oud/qanun highs while keeping warm lows — great for Amr Diab, Sherine, Nancy Ajram." = "Tip: the Vocal & Sound Studio sheet adds per-song corrections on top of these presets. Arabic/Maqaam boosts oud/qanun highs while keeping warm lows — great for Amr Diab, Sherine, Nancy Ajram.";
+"Vocal Focus lifts 1–4 kHz and pulls the box out from under the voice — good for lyrics in a noisy room or in the car. Night Mode does the opposite of what a normal EQ can: it adds back the bass and air your ears lose at low volume." = "Vocal Focus lifts 1–4 kHz and pulls the box out from under the voice — good for lyrics in a noisy room or in the car. Night Mode does the opposite of what a normal EQ can: it adds back the bass and air your ears lose at low volume.";
+"Your library looks clean. Songs are matched by name and artist, by how long they play, and finally by how they actually sound — so even a re-download saved under a different name gets caught." = "Your library looks clean. Songs are matched by name and artist, by how long they play, and finally by how they actually sound — so even a re-download saved under a different name gets caught.";
+"✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off. Swipe any playlist to delete it, or use Select to remove several at once — deleted smart playlists stay deleted." = "✨ Sparkled playlists are built by the app from how your songs actually sound (energy, tempo, brightness, vocal focus). Toggle the sparkle in the bar above to turn auto-creation on or off. Swipe any playlist to delete it, or use Select to remove several at once — deleted smart playlists stay deleted.";

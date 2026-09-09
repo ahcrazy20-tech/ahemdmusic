@@ -47,6 +47,17 @@ FILE_COUNT=$(ls -1 "$APP_DIR"/*.swift 2>/dev/null | wc -l | tr -d ' ')
 ls -1 "$APP_DIR"/*.swift 2>/dev/null | sed 's|.*/||' | sed 's/^/    /'
 echo "    count: $FILE_COUNT"
 
+# The widget extension is a second target with its own sources.
+WIDGET_DIR="TrollMusicApp/ASMusicWidget"
+if [ -d "$WIDGET_DIR" ]; then
+    WIDGET_COUNT=$(ls -1 "$WIDGET_DIR"/*.swift 2>/dev/null | wc -l | tr -d ' ')
+    echo "    widget extension: $WIDGET_COUNT source(s)"
+    if [ "${WIDGET_COUNT:-0}" -lt 1 ]; then
+        fail "$WIDGET_DIR exists but has no Swift sources — the widget target would fail to link."
+        exit 2
+    fi
+fi
+
 if [ "${FILE_COUNT:-0}" -lt 15 ]; then
     fail "Only $FILE_COUNT Swift files found in $APP_DIR (expected 20)."
     fail ""
@@ -97,6 +108,53 @@ if command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
+# Localization coverage. Advisory, not fatal: a new Text("…") that hasn't been
+# translated yet should be visible in the log, not a reason to block a build.
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/check_localization.py ]; then
+    echo "    localization check:"
+    python3 scripts/check_localization.py 2>&1 | sed 's/^/      /' || true
+fi
+
+# Arabic-aware search folding. Pure logic, and the failure mode is silent:
+# search simply stops finding things a user knows are there.
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/test_search_logic.py ]; then
+    echo "    search logic check:"
+    if python3 scripts/test_search_logic.py > /tmp/search_check.log 2>&1; then
+        tail -1 /tmp/search_check.log | sed 's/^/      /'
+    else
+        sed 's/^/      /' /tmp/search_check.log
+        fail "The search folding is wrong — see the failures above."
+        exit 2
+    fi
+fi
+
+# ID3 byte layout. A wrong byte here never crashes and never fails a build --
+# the file just reads back wrong in OTHER players, where we never look.
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/test_id3_logic.py ]; then
+    echo "    ID3 tag check:"
+    if python3 scripts/test_id3_logic.py > /tmp/id3_check.log 2>&1; then
+        tail -1 /tmp/id3_check.log | sed 's/^/      /'
+    else
+        sed 's/^/      /' /tmp/id3_check.log
+        fail "The ID3 tag writer is malformed — see the failures above."
+        exit 2
+    fi
+fi
+
+# Widget bridge consistency (App Group id, URL scheme, target isolation, the
+# generated spec). These are cross-target mistakes the compiler cannot catch:
+# a mismatched App Group id compiles perfectly and produces a dead widget.
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/test_widget_logic.py ]; then
+    echo "    widget bridge check:"
+    if python3 scripts/test_widget_logic.py > /tmp/widget_check.log 2>&1; then
+        tail -1 /tmp/widget_check.log | sed 's/^/      /'
+    else
+        sed 's/^/      /' /tmp/widget_check.log
+        fail "The widget bridge is inconsistent — see the failures above."
+        exit 2
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Clean leftovers — NEVER the sources
 # ---------------------------------------------------------------------------
@@ -136,20 +194,114 @@ targets:
       - path: TrollMusicApp/TrollMusicApp
         excludes:
           - "Preview Content"
+    entitlements:
+      path: TrollMusicApp/TrollMusicApp/TrollMusicApp.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.ahmedsoliman.trollmusicapp
     info:
       path: TrollMusicApp/TrollMusicApp/Info.plist
       properties:
         UILaunchScreen: {}
-        UIBackgroundModes: [audio]
+        # 'fetch'/'processing' let an in-flight download finish in the
+        # background; 'audio' is what keeps playback alive as before.
+        UIBackgroundModes: [audio, fetch, processing]
+        # Your own music, in and out: Documents visible in the Files app,
+        # "Open in AS Music" from Files/AirDrop, and the app claims audio types.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Audio file
+            LSHandlerRank: Alternate
+            CFBundleTypeRole: Viewer
+            LSItemContentTypes:
+              - public.audio
+              - public.mp3
+              - public.mpeg-4-audio
+              - com.apple.m4a-audio
+              - public.aifc-audio
+              - com.microsoft.waveform-audio
+              - org.xiph.flac
+        # Usage strings must be repeated here: XcodeGen writes this properties
+        # block over the file's own keys, and a missing mic/speech string makes
+        # the voice features crash the moment they are touched.
+        NSMicrophoneUsageDescription: "AS Music uses the microphone only for two things you start yourself: searching by voice, and recording a vocal take over a song in Vocal Studio. Audio never leaves your device."
+        NSSpeechRecognitionUsageDescription: "Voice search transcribes what you say so you can find songs without typing. On-device recognition is used when the language supports it."
         # ATS stays ON for our own API traffic (every backend we use is HTTPS).
         # Only the in-app WKWebView may load plain HTTP pages.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
           NSAllowsArbitraryLoadsInWebContent: true
+        # Arabic + English. Without CFBundleLocalizations iOS will not offer
+        # Arabic in Settings > AS Music > Language, and the whole ar.lproj
+        # bundle is ignored on an English device.
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations:
+          - en
+          - ar
+        # asmusic:// — how the widget (and Shortcuts) talk back to the app.
+        # Without this registered the widget's Links silently do nothing.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.ahmedsoliman.trollmusicapp
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - asmusic
     settings:
+      # Pin this explicitly. XcodeGen otherwise derives it from bundleIdPrefix
+      # + the TARGET NAME, giving com.ahmedsoliman.TrollMusicApp (capital T) --
+      # which disagrees with Info.plist, with the App Group id, and with the
+      # widget's prefix, and the embed step rejects the mismatch.
+      PRODUCT_BUNDLE_IDENTIFIER: com.ahmedsoliman.trollmusicapp
       GENERATE_INFOPLIST_FILE: NO
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       DEVELOPMENT_ASSET_PATHS: "DummyAssets"
+      CODE_SIGNING_ALLOWED: NO
+      CODE_SIGNING_REQUIRED: NO
+      CODE_SIGN_IDENTITY: ""
+      DEVELOPMENT_TEAM: ""
+      PROVISIONING_PROFILE: ""
+    dependencies:
+      - target: ASMusicWidgetExtension
+        embed: true
+
+  # Home-Screen widget. Its own process, its own sandbox — it reaches the app's
+  # state through the App Group container, which is why SharedNowPlaying.swift
+  # is compiled into BOTH targets rather than shared at runtime.
+  ASMusicWidgetExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: TrollMusicApp/ASMusicWidget
+      # The single file the two targets agree on. Everything else in the app
+      # (MusicManager, AVFoundation, the views) must stay out of the widget.
+      - path: TrollMusicApp/TrollMusicApp/SharedNowPlaying.swift
+      # A widget is its OWN bundle: Text("Now Playing") inside the extension
+      # resolves against the extension's resources, not the app's. Its
+      # en.lproj/ar.lproj live in TrollMusicApp/ASMusicWidget and are picked up
+      # by the directory glob above -- pointing at the APP's .lproj paths here
+      # does not work, XcodeGen only builds variant groups from a scanned
+      # directory, and the build warned that the widget bundle had neither.
+    info:
+      path: TrollMusicApp/ASMusicWidget/Info.plist
+      properties:
+        CFBundleDisplayName: AS Music
+        CFBundleName: ASMusicWidget
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations:
+          - en
+          - ar
+    entitlements:
+      path: TrollMusicApp/ASMusicWidget/ASMusicWidget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.ahmedsoliman.trollmusicapp
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.ahmedsoliman.trollmusicapp.widget
+      GENERATE_INFOPLIST_FILE: NO
+      SKIP_INSTALL: YES
       CODE_SIGNING_ALLOWED: NO
       CODE_SIGNING_REQUIRED: NO
       CODE_SIGN_IDENTITY: ""
@@ -271,7 +423,62 @@ fi
 # ---------------------------------------------------------------------------
 say "Packaging TrollMusicApp.ipa"
 mkdir -p Payload
-cp -R "build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app" Payload/
+APP_BUNDLE="build/TrollMusicApp.xcarchive/Products/Applications/TrollMusicApp.app"
+cp -R "$APP_BUNDLE" Payload/
+
+# Confirm the localizations actually made it INTO the bundle. XcodeGen has to
+# recognise the .lproj folders as variant groups for this to happen, and a
+# silent miss looks identical to a working build until you open the app and
+# find it stubbornly English.
+say "Verifying bundled localizations"
+LPROJ_FOUND=""
+LPROJ_MISSING=""
+for L in en ar; do
+    # Only check languages the repo actually ships, so adding/removing one
+    # doesn't require editing this list in two places.
+    test -f "$APP_DIR/$L.lproj/Localizable.strings" || continue
+    if [ -f "Payload/TrollMusicApp.app/$L.lproj/Localizable.strings" ]; then
+        N=$(plutil -convert json -o - "Payload/TrollMusicApp.app/$L.lproj/Localizable.strings" 2>/dev/null \
+            | tr ',' '\n' | grep -c ':' || echo "?")
+        echo "      $L.lproj  ($N strings)  in bundle"
+        LPROJ_FOUND="$LPROJ_FOUND $L"
+    else
+        LPROJ_MISSING="$LPROJ_MISSING $L"
+    fi
+done
+if [ -n "$LPROJ_MISSING" ]; then
+    # Not cosmetic: the app would install and run, silently English-only, and
+    # look exactly like a successful build. Fail loudly instead.
+    echo "::error::Localizations present in the repo but missing from the built app:$LPROJ_MISSING"
+    fail "These .lproj bundles did not make it into TrollMusicApp.app:$LPROJ_MISSING"
+    fail "XcodeGen did not treat them as variant groups — check the 'sources:' block."
+    exit 2
+fi
+
+# The widget is embedded inside the app bundle, not installed separately, so
+# "did it build?" and "did it get embedded?" are different questions. A missing
+# extension is invisible until the user goes looking for the widget.
+if [ -d "$WIDGET_DIR" ]; then
+    say "Verifying the embedded widget extension"
+    EXT="Payload/TrollMusicApp.app/PlugIns/ASMusicWidgetExtension.appex"
+    if [ -d "$EXT" ]; then
+        echo "      ASMusicWidgetExtension.appex embedded"
+        for L in en ar; do
+            test -f "$APP_DIR/$L.lproj/Localizable.strings" || continue
+            if [ -f "$EXT/$L.lproj/Localizable.strings" ]; then
+                echo "      widget $L.lproj in bundle"
+            else
+                echo "::warning::The widget extension has no $L.lproj — the widget will render in English even when the app is in $L"
+            fi
+        done
+    else
+        echo "::error::The widget extension was not embedded into the app bundle"
+        fail "Expected $EXT"
+        fail "The target built but was not embedded — check the app target's dependencies: block."
+        exit 2
+    fi
+fi
+
 /usr/bin/zip -q -r TrollMusicApp.ipa Payload
 test -f TrollMusicApp.ipa || { fail "IPA was not produced"; exit 1; }
 
@@ -279,6 +486,7 @@ test -f TrollMusicApp.ipa || { fail "IPA was not produced"; exit 1; }
     echo "### ✅ Build OK"
     echo
     echo "* Swift sources compiled: **$FILE_COUNT**"
+    echo "* Localizations in bundle:**${LPROJ_FOUND:- none}**"
     echo "* Artifact: **TrollMusicApp.ipa** ($(du -h TrollMusicApp.ipa | cut -f1))"
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 

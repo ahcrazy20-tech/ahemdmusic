@@ -190,6 +190,8 @@ final class LiveLyrics: ObservableObject {
         // Cache so the next play works with no network at all.
         try? text.write(to: cacheDir.appendingPathComponent(songID.uuidString + ".lrc"),
                         atomically: true, encoding: .utf8)
+        // New words on disk — let the library search pick them up.
+        LyricsIndex.shared.invalidate()
         apply(text, note: synced.isEmpty ? "\(note) · no timings for this one" : note, for: songID)
     }
 
