@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import AVKit
 import MediaPlayer
+import UniformTypeIdentifiers
 
 func hideKeyboard() {
     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -916,6 +917,35 @@ struct EQView: View {
                     .tint(AppTheme.accent)
                 }
             }
+            Section(header: Text("Between songs"),
+                    footer: Text(mm.transitionMode.subtitle)) {
+                Picker("Transition", selection: Binding(
+                    get: { mm.transitionMode },
+                    set: { mm.transitionMode = $0 }
+                )) {
+                    ForEach(TransitionMode.allCases) { m in
+                        Label(m.title, systemImage: m.icon).tag(m)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                if mm.transitionMode.blends {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(mm.transitionMode == .autoDJ ? "Maximum blend" : "Blend length")
+                                .foregroundColor(.primary)
+                            Spacer()
+                            Text(String(format: "%.1f s", mm.crossfadeSeconds))
+                                .foregroundColor(.secondary).font(.subheadline.monospacedDigit())
+                        }
+                        Slider(value: Binding(
+                            get: { mm.crossfadeSeconds },
+                            set: { mm.crossfadeSeconds = $0 }
+                        ), in: 1.5...12, step: 0.5)
+                        .tint(AppTheme.accent)
+                    }
+                }
+            }
             Section(header: Text("Audio Enhancements"),
                     footer: Text("Spatial adds a subtle hall reverb that widens the stereo image on headphones and car speakers.")) {
                 Toggle(isOn: Binding(
@@ -1025,6 +1055,9 @@ struct LibraryView: View {
     @State private var showArtists = false
     @State private var showNameTidy = false
     @State private var songToEdit: Song? = nil
+    @State private var showImporter = false
+    @State private var showIdentify = false
+    @State private var importNote: String? = nil
     @AppStorage("asmusic_lib_sort") private var sortRaw: String = LibrarySort.title.rawValue
     @AppStorage("asmusic_lib_filter") private var filterRaw: String = LibraryFilter.all.rawValue
 
@@ -1041,6 +1074,12 @@ struct LibraryView: View {
             out[f] = applyLibraryFilter(f, to: musicManager.songs).count
         }
         return out
+    }
+
+    /// Songs with a messy name, no artist or no genre — the ones the
+    /// identifier can actually improve.
+    private var unknownCount: Int {
+        SongIdentifier.candidates(from: musicManager.songs).count
     }
 
     /// Searches title AND artist AND genre, ranked by where the match is —
@@ -1337,8 +1376,38 @@ struct LibraryView: View {
             .sheet(isPresented: $showNameTidy) {
                 NameTidyView().environmentObject(musicManager)
             }
+            .sheet(isPresented: $showIdentify) {
+                IdentifySongsView().environmentObject(musicManager)
+            }
             .sheet(item: $songToEdit) { song in
                 SongInfoEditorView(song: song).environmentObject(musicManager)
+            }
+            // Bring your own music in: multi-select from the Files app.
+            .fileImporter(isPresented: $showImporter,
+                          allowedContentTypes: [.audio, .mp3, .mpeg4Audio, .wav, .aiff],
+                          allowsMultipleSelection: true) { result in
+                switch result {
+                case .success(let urls):
+                    let r = musicManager.importAudioFiles(from: urls)
+                    if r.imported > 0 {
+                        importNote = "Imported \(r.imported) song\(r.imported == 1 ? "" : "s")"
+                            + (r.skipped > 0 ? " · \(r.skipped) skipped (already here or unsupported)" : "")
+                    } else if r.skipped > 0 {
+                        importNote = "Nothing imported — \(r.skipped) file\(r.skipped == 1 ? " was" : "s were") already in your Library or not audio."
+                    }
+                case .failure(let err):
+                    importNote = "Import failed: \(err.localizedDescription)"
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .libraryDidImport)) { note in
+                let n = (note.userInfo?["count"] as? Int) ?? 0
+                if n > 0 { importNote = "Imported \(n) song\(n == 1 ? "" : "s") from another app" }
+            }
+            .alert("Import", isPresented: Binding(get: { importNote != nil },
+                                                  set: { if !$0 { importNote = nil } })) {
+                Button("OK", role: .cancel) { importNote = nil }
+            } message: {
+                Text(importNote ?? "")
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -1387,6 +1456,16 @@ struct LibraryView: View {
                                     Label(mode.rawValue, systemImage: mode.icon)
                                 }
                             }
+                        }
+                        Divider()
+                        Button { showImporter = true } label: {
+                            Label("Import from Files", systemImage: "square.and.arrow.down")
+                        }
+                        Button { showIdentify = true } label: {
+                            Label(unknownCount > 0
+                                  ? "Identify songs (\(unknownCount))"
+                                  : "Identify songs",
+                                  systemImage: "waveform.badge.magnifyingglass")
                         }
                         Divider()
                         Button { showDuplicateDoctor = true } label: {

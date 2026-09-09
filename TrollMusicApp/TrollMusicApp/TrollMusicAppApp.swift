@@ -13,6 +13,18 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     func applicationDidEnterBackground(_ application: UIApplication) {
         MusicManager.shared.appWillBackground()
     }
+
+    /// iOS relaunched us (or woke us) because background downloads finished.
+    /// Holding onto the handler until the session drains its events is what
+    /// makes a download that completed in the user's pocket land properly.
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == DownloadCenter.backgroundSessionID else {
+            completionHandler(); return
+        }
+        DownloadCenter.shared.backgroundCompletionHandler = completionHandler
+    }
     func applicationWillTerminate(_ application: UIApplication) {
         MusicManager.shared.appWillBackground()
     }
@@ -38,6 +50,14 @@ struct TrollMusicAppApp: App {
                     // swept up (and the folder never grows without bound).
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                         LibraryTrash.shared.purgeExpired()
+                    }
+                }
+                // "Open in AS Music" from Files, AirDrop or another app.
+                .onOpenURL { url in
+                    let result = MusicManager.shared.importAudioFiles(from: [url])
+                    if result.imported > 0 {
+                        NotificationCenter.default.post(name: .libraryDidImport, object: nil,
+                                                        userInfo: ["count": result.imported])
                     }
                 }
         }

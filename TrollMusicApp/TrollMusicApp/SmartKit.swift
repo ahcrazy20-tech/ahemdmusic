@@ -34,6 +34,45 @@ struct ListenRecord: Codable {
     /// this existed still decodes — the smart playlists use it to learn that a
     /// song is a "morning" or "after-midnight" track.
     var hourCounts: [Int: Int]? = nil
+
+    // MARK: Completion tracking (Pack 6)
+    //
+    // Before this, `playCount` was incremented the instant playback STARTED,
+    // so a song skipped after two seconds looked exactly like a song played to
+    // the last bar — and every taste signal in the app was trained on that.
+    // These fields are optional so history written by older builds still
+    // decodes cleanly (it simply has no skip data yet).
+
+    /// Times the track was played to (near) the end.
+    var finishes: Int? = nil
+    /// Times the user bailed out early.
+    var skips: Int? = nil
+    /// Total listening time in seconds, across all plays.
+    var totalSeconds: Double? = nil
+    /// Explicit thumbs-down. A disliked song is excluded from auto-playlists
+    /// and radio until the user clears it.
+    var disliked: Bool? = nil
+
+    var finishCount: Int { finishes ?? 0 }
+    var skipCount: Int { skips ?? 0 }
+    var isDisliked: Bool { disliked ?? false }
+
+    /// −1…+1 how much this user actually likes the track, from behaviour alone.
+    ///
+    /// A song finished 9 times out of 10 scores near +1; one skipped 9 times
+    /// out of 10 scores near −1. Songs with almost no data sit near 0 so they
+    /// are neither promoted nor buried — new music still gets a fair hearing.
+    var affinity: Double {
+        if isDisliked { return -1 }
+        let f = Double(finishCount)
+        let s = Double(skipCount)
+        let n = f + s
+        guard n >= 1 else { return 0 }
+        // Laplace-smoothed so 1 finish isn't as loud as 20.
+        let ratio = (f + 1.0) / (n + 2.0)          // 0…1
+        let confidence = min(1.0, n / 6.0)          // full weight after ~6 plays
+        return (ratio * 2 - 1) * confidence
+    }
 }
 
 struct ListeningStats: Equatable {
@@ -63,6 +102,12 @@ final class ListenHistory: ObservableObject {
     }
 
     /// Call from the main thread (playback code already is).
+    ///
+    /// NOTE: this marks that a track was *started*. Whether it counts as a
+    /// real play or a skip is decided later by `recordFinish(_:playedSeconds:
+    /// duration:)`, which the player calls when the track is left. Keeping the
+    /// start event is still useful: it drives "recently played" and the
+    /// hour-of-day model, which care about when you reached for a song.
     func recordPlay(_ song: Song) {
         var r = records[song.id]
         if r == nil { r = ListenRecord(playCount: 0, lastPlayed: Date()) }
@@ -74,6 +119,57 @@ final class ListenHistory: ObservableObject {
         r?.hourCounts = hc
         records[song.id] = r
         save()
+    }
+
+    /// Called when a track stops being the current song — because it ended,
+    /// or because the user skipped/replaced it.
+    ///
+    /// `playedSeconds` is how much was actually heard. A track counts as
+    /// FINISHED at ≥60% or ≥90 s (whichever comes first, so a 40-minute mix
+    /// doesn't need 24 minutes to count), and as a SKIP under 20%. The band in
+    /// between is deliberately neither: pausing halfway through is not a
+    /// judgement about the song.
+    func recordFinish(_ song: Song, playedSeconds: Double, duration: Double) {
+        guard playedSeconds > 0.5 else { return }   // accidental taps
+        guard var r = records[song.id] else { return }
+
+        r.totalSeconds = (r.totalSeconds ?? 0) + playedSeconds
+        if duration > 1 {
+            let fraction = playedSeconds / duration
+            if fraction >= 0.6 || playedSeconds >= 90 {
+                r.finishes = r.finishCount + 1
+            } else if fraction < 0.2 {
+                r.skips = r.skipCount + 1
+            }
+        }
+        records[song.id] = r
+        save()
+    }
+
+    /// Thumbs-down: keep it out of auto-playlists and radio until cleared.
+    func setDisliked(_ song: Song, _ value: Bool) {
+        var r = records[song.id] ?? ListenRecord(playCount: 0, lastPlayed: Date())
+        r.disliked = value ? true : nil
+        records[song.id] = r
+        save()
+    }
+
+    func isDisliked(_ song: Song) -> Bool { records[song.id]?.isDisliked ?? false }
+
+    /// −1…+1 behavioural affinity (see `ListenRecord.affinity`).
+    func affinity(for song: Song) -> Double { records[song.id]?.affinity ?? 0 }
+
+    /// Songs the user keeps skipping — surfaced in the stats screen so a
+    /// dislike is never a silent, unexplainable black box.
+    func mostSkipped(limit: Int) -> [(song: Song, skips: Int)] {
+        let songs = MusicManager.shared.songs
+        return records.compactMap { id, rec -> (song: Song, skips: Int)? in
+            guard rec.skipCount >= 2, let s = songs.first(where: { $0.id == id }) else { return nil }
+            return (s, rec.skipCount)
+        }
+        .sorted { $0.skips > $1.skips }
+        .prefix(limit)
+        .map { $0 }
     }
 
     /// Play counts by hour of day for one song (0…23).
@@ -129,6 +225,14 @@ final class ListenHistory: ObservableObject {
                 for (h, n) in hc { merged[h] = max(merged[h] ?? 0, n) }
                 if merged != cur.hourCounts { cur.hourCounts = merged; changed = true }
             }
+            // Completion data: the higher count wins, same as plays, so a
+            // restore can only ever make the taste model better informed.
+            if inc.finishCount > cur.finishCount { cur.finishes = inc.finishCount; changed = true }
+            if inc.skipCount > cur.skipCount { cur.skips = inc.skipCount; changed = true }
+            if let ts = inc.totalSeconds, ts > (cur.totalSeconds ?? 0) {
+                cur.totalSeconds = ts; changed = true
+            }
+            if inc.isDisliked, !cur.isDisliked { cur.disliked = true; changed = true }
             if changed { records[id] = cur; touched += 1 }
         }
         if touched > 0 { save() }
@@ -190,9 +294,15 @@ final class ListenHistory: ObservableObject {
     }
 
     /// Taste weight used by the recommendation engine:
-    /// liked songs are worth 3, plus up to 15 extra points for heavy plays.
+    /// liked songs are worth 3, plus up to 15 extra points for heavy plays —
+    /// now scaled by how often the track is actually *finished*, so an artist
+    /// you keep skipping stops dominating your recommendations.
     func tasteWeight(for song: Song, isLiked: Bool) -> Int {
-        (isLiked ? 3 : 1) + min(playCount(for: song), 15)
+        if isDisliked(song) { return 0 }
+        let base = (isLiked ? 3 : 1) + min(playCount(for: song), 15)
+        // affinity −1…+1 maps to a 0.25…1.5 multiplier.
+        let scale = 0.875 + affinity(for: song) * 0.625
+        return max(0, Int((Double(base) * scale).rounded()))
     }
 }
 

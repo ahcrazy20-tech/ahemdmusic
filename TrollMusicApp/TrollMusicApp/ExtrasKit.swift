@@ -78,6 +78,76 @@ enum AcousticRadio {
     }
 }
 
+extension Notification.Name {
+    /// Posted after songs are copied in from Files / AirDrop.
+    static let libraryDidImport = Notification.Name("asmusic_library_did_import")
+}
+
+// MARK: - Smart Radio (real nearest-neighbour, not randomElement)
+
+/// Picks the next track for Smart Radio by *sound*, using the same 0…1 feature
+/// space the auto-playlists use plus the v2 harmonic distance.
+///
+/// Before Pack 6 the mode called "Smart Radio" was literally
+/// `candidates.randomElement()` — while `AcousticRadio` right next door already
+/// did proper nearest-neighbour selection. This closes that gap.
+enum SmartRadio {
+
+    /// The best next song after `song`, or nil when there isn't enough library
+    /// (the caller then falls back to its old behaviour).
+    static func nextTrack(after song: Song, recent: Set<UUID> = []) -> Song? {
+        let engine = SmartPlaylistEngine.shared
+        let vs = engine.vectors()
+        guard let anchor = vs.first(where: { $0.song.id == song.id }) else { return nil }
+
+        let history = ListenHistory.shared
+        let anchorArtist = anchor.song.artist.trimmingCharacters(in: .whitespaces).lowercased()
+        let anchorKey = anchor.features?.camelot ?? ""
+
+        let candidates = vs.filter { v in
+            v.song.id != song.id
+                && !recent.contains(v.song.id)
+                && !history.isDisliked(v.song)
+        }
+        // Too small a pool after filtering? Relax the "recently played" rule
+        // before giving up — a 10-song library should still work.
+        let pool = candidates.count >= 3
+            ? candidates
+            : vs.filter { $0.song.id != song.id && !history.isDisliked($0.song) }
+        guard !pool.isEmpty else { return nil }
+
+        var scored: [(v: SongVector, cost: Double)] = pool.map { v in
+            // Lower is better.
+            var cost = FeatureMath.distance(anchor.dims, v.dims)
+            cost += abs(anchor.tempoN - v.tempoN) * 0.9
+            cost += abs(anchor.energy - v.energy) * 0.5
+
+            // Harmonic continuity when both tracks have a confident key.
+            if !anchorKey.isEmpty, let other = v.features?.camelot, !other.isEmpty,
+               let hd = MusicKey.harmonicDistance(anchorKey, other) {
+                cost += hd * 0.55
+            }
+            // Same genre is a mild plus, same artist back-to-back a mild minus.
+            if !anchor.genre.isEmpty, anchor.genre == v.genre { cost -= 0.08 }
+            if v.song.artist.trimmingCharacters(in: .whitespaces).lowercased() == anchorArtist {
+                cost += 0.45
+            }
+            // Keep an Arabic run Arabic and a Latin run Latin.
+            if abs(anchor.arabic - v.arabic) > 0.5 { cost += 0.35 }
+            // Behaviour: reward songs this user finishes, bury ones they skip.
+            cost -= history.affinity(for: v.song) * 0.30
+            if v.liked > 0 { cost -= 0.12 }
+            return (v, cost)
+        }
+
+        scored.sort { $0.cost < $1.cost }
+        // Pick randomly among the closest few so the radio doesn't play the
+        // identical sequence every time you start it from the same song.
+        let topN = min(4, scored.count)
+        return scored.prefix(topN).randomElement()?.v.song
+    }
+}
+
 // MARK: - 2. Artists
 
 struct ArtistSummary: Identifiable {

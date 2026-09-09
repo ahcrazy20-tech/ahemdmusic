@@ -140,7 +140,30 @@ targets:
       path: TrollMusicApp/TrollMusicApp/Info.plist
       properties:
         UILaunchScreen: {}
-        UIBackgroundModes: [audio]
+        # 'fetch'/'processing' let an in-flight download finish in the
+        # background; 'audio' is what keeps playback alive as before.
+        UIBackgroundModes: [audio, fetch, processing]
+        # Your own music, in and out: Documents visible in the Files app,
+        # "Open in AS Music" from Files/AirDrop, and the app claims audio types.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Audio file
+            LSHandlerRank: Alternate
+            CFBundleTypeRole: Viewer
+            LSItemContentTypes:
+              - public.audio
+              - public.mp3
+              - public.mpeg-4-audio
+              - com.apple.m4a-audio
+              - public.aifc-audio
+              - com.microsoft.waveform-audio
+              - org.xiph.flac
+        # Usage strings must be repeated here: XcodeGen writes this properties
+        # block over the file's own keys, and a missing mic/speech string makes
+        # the voice features crash the moment they are touched.
+        NSMicrophoneUsageDescription: "AS Music uses the microphone only for two things you start yourself: searching by voice, and recording a vocal take over a song in Vocal Studio. Audio never leaves your device."
+        NSSpeechRecognitionUsageDescription: "Voice search transcribes what you say so you can find songs without typing. On-device recognition is used when the language supports it."
         # ATS stays ON for our own API traffic (every backend we use is HTTPS).
         # Only the in-app WKWebView may load plain HTTP pages.
         NSAppTransportSecurity:

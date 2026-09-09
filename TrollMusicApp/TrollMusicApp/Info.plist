@@ -15,6 +15,41 @@
     <key>UIBackgroundModes</key>
     <array>
         <string>audio</string>
+        <!-- Lets a download that is already running finish while the app is
+             in the background (URLSession background configuration). -->
+        <string>fetch</string>
+        <string>processing</string>
+    </array>
+    <!-- Your own music, in and out.
+         UIFileSharingEnabled     = the app's Documents folder shows up in the
+                                    Files app and in Finder/iTunes file sharing
+         LSSupportsOpeningDocumentsInPlace = "Open in AS Music" from Files
+         CFBundleDocumentTypes    = the app claims audio files, so AirDrop and
+                                    the share sheet offer it as a destination -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Audio file</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.audio</string>
+                <string>public.mp3</string>
+                <string>public.mpeg-4-audio</string>
+                <string>com.apple.m4a-audio</string>
+                <string>public.aifc-audio</string>
+                <string>com.microsoft.waveform-audio</string>
+                <string>org.xiph.flac</string>
+            </array>
+        </dict>
     </array>
     <key>NSAppTransportSecurity</key>
     <dict>

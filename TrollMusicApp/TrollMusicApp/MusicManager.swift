@@ -41,6 +41,52 @@ struct Playlist: Identifiable, Codable {
 
 enum RepeatMode: Int { case off, all, one }
 
+/// How one track is joined to the next.
+enum TransitionMode: String, CaseIterable, Identifiable {
+    /// Hard cut — exactly how the app behaved before Pack 6.
+    case off
+    /// No silence between tracks: the next one starts the instant the audio of
+    /// the current one ends (measured tail silence is trimmed). Right for
+    /// albums, live sets and Quran recitation.
+    case gapless
+    /// A fixed overlap: the outgoing track fades down while the next fades up.
+    case crossfade
+    /// Crossfade whose length adapts to the two tracks — a long blend between
+    /// two steady beat-driven songs, a short one into a quiet or spoken track.
+    case autoDJ
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off:       return "Off (hard cut)"
+        case .gapless:   return "Gapless"
+        case .crossfade: return "Crossfade"
+        case .autoDJ:    return "Auto-DJ"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .off:       return "Each song stops, the next begins. The classic behaviour."
+        case .gapless:   return "Removes the silence between tracks without blending them. Best for albums, live sets and long recitations."
+        case .crossfade: return "The next song fades in while this one fades out, over a length you choose."
+        case .autoDJ:    return "Like crossfade, but the length adapts to what the two songs actually sound like — long blends between steady beats, short ones into quiet or spoken tracks."
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .off:       return "scissors"
+        case .gapless:   return "arrow.right.to.line"
+        case .crossfade: return "arrow.left.and.right.righttriangle.left.righttriangle.right"
+        case .autoDJ:    return "slider.horizontal.below.rectangle"
+        }
+    }
+
+    var blends: Bool { self == .crossfade || self == .autoDJ }
+}
+
 enum EQPreset: String, CaseIterable, Identifiable {
     case flat = "Flat"
     case bassBoost = "Bass Boost"
@@ -126,6 +172,34 @@ class MusicManager: NSObject, ObservableObject {
     /// Master output attenuation while the app is talking (SpokenFeedback).
     private var duckLevel: Float = 1.0
 
+    // MARK: - Crossfade / gapless (Pack 6)
+
+    /// How tracks are joined. `.off` reproduces the old hard cut exactly.
+    @Published var transitionMode: TransitionMode = .off {
+        didSet {
+            UserDefaults.standard.set(transitionMode.rawValue, forKey: "asmusic_transition")
+            if transitionMode == .off { cancelPendingTransition() }
+        }
+    }
+    /// Crossfade length in seconds (1.5…12). Ignored in .off and .gapless.
+    @Published var crossfadeSeconds: Double = 4 {
+        didSet {
+            let c = max(1.5, min(12, crossfadeSeconds))
+            if c != crossfadeSeconds { crossfadeSeconds = c; return }
+            UserDefaults.standard.set(c, forKey: "asmusic_xfade_secs")
+        }
+    }
+    /// True while a crossfade is actually in progress.
+    @Published private(set) var isCrossfading = false
+
+    private var fadeLink: CADisplayLink?
+    private var transitionArmed = false
+    private var pendingNextSong: Song?
+    /// The file opened on the incoming deck, promoted by `completeHandover`.
+    private var incomingFile: AVAudioFile?
+    private var incomingLead: TimeInterval = 0
+    private var pendingScheduledEnd: AVAudioFramePosition = 0
+
     /// Live FFT spectrum (24 log-spaced bands in dB), written by the audio
     /// render thread, read by the player UI.
     let spectrum = SpectrumMeter()
@@ -136,9 +210,24 @@ class MusicManager: NSObject, ObservableObject {
     private var preFadeDB: Float = 0
     private let sleepFadeSeconds: TimeInterval = 45
 
-    // Signal chain: playerNode -> eqNode -> preampMixer -> reverb -> timePitch -> mainMixerNode
+    // Signal chain (Pack 6 adds the two-deck front end for crossfading):
+    //   playerNodes[0] ─┐
+    //                   ├─> blendMixer -> eqNode -> preampMixer -> reverb -> timePitch -> mainMixerNode
+    //   playerNodes[1] ─┘
+    //
+    // Two decks are what make a crossfade possible at all: the outgoing track
+    // keeps rendering on one node while the incoming track starts on the
+    // other. With crossfade OFF only deck 0 is ever used and the graph behaves
+    // exactly as it did before.
     private var engine: AVAudioEngine!
-    private var playerNode: AVAudioPlayerNode!
+    private var playerNodes: [AVAudioPlayerNode] = []
+    private var blendMixer: AVAudioMixerNode!
+    /// Which deck is playing the *current* song.
+    private var activeDeck = 0
+    /// The deck the next track will start on.
+    private var idleDeck: Int { 1 - activeDeck }
+    /// Convenience for all the existing code: the deck in charge right now.
+    private var playerNode: AVAudioPlayerNode! { playerNodes.indices.contains(activeDeck) ? playerNodes[activeDeck] : nil }
     private var eqNode: AVAudioUnitEQ!
     private var preampMixer: AVAudioMixerNode!
     private var reverb: AVAudioUnitReverb!
@@ -169,6 +258,15 @@ class MusicManager: NSObject, ObservableObject {
     var progressTimer: Timer?
     var queueObserver: NSObjectProtocol?
     private var didAutoSearchForRadio = false
+
+    /// The track currently being listened to, and how much of it has been
+    /// heard. Used to tell a real play from a skip when it is replaced
+    /// (see `closeOutCurrentPlay`). Written on the main thread only.
+    private var playbackWatch: (song: Song, startedAt: Date, startOffset: TimeInterval)?
+    /// History of what was actually played, newest last — powers a Back button
+    /// that retraces your steps instead of walking the library array.
+    private var playHistory: [UUID] = []
+    private var suppressHistoryPush = false
 
     let fileManager = FileManager.default
     var documentsDirectory: URL {
@@ -246,7 +344,9 @@ class MusicManager: NSObject, ObservableObject {
             old.reset()
         }
         engine = AVAudioEngine()
-        playerNode = AVAudioPlayerNode()
+        playerNodes = [AVAudioPlayerNode(), AVAudioPlayerNode()]
+        activeDeck = 0
+        blendMixer = AVAudioMixerNode()
         eqNode = AVAudioUnitEQ(numberOfBands: 10)
         preampMixer = AVAudioMixerNode()
         preampMixer.outputVolume = 1.0
@@ -263,13 +363,18 @@ class MusicManager: NSObject, ObservableObject {
             b.gain = 0
             b.bypass = false
         }
-        engine.attach(playerNode)
+        for node in playerNodes { engine.attach(node) }
+        engine.attach(blendMixer)
         engine.attach(eqNode)
         engine.attach(preampMixer)
         engine.attach(reverb)
         engine.attach(timePitch)
         // Connect once with format:nil; engine auto-negotiates per-file format.
-        engine.connect(playerNode, to: eqNode, format: nil)
+        // Both decks sum into blendMixer; deck 1 starts silent.
+        for node in playerNodes { engine.connect(node, to: blendMixer, format: nil) }
+        playerNodes[0].volume = 1.0
+        playerNodes[1].volume = 0.0
+        engine.connect(blendMixer, to: eqNode, format: nil)
         engine.connect(eqNode, to: preampMixer, format: nil)
         engine.connect(preampMixer, to: reverb, format: nil)
         engine.connect(reverb, to: timePitch, format: nil)
@@ -461,6 +566,9 @@ class MusicManager: NSObject, ObservableObject {
         if abs(duration - d) > 0.001 { duration = d }
         if abs(currentTime - clamped) > 0.05 { currentTime = clamped }
 
+        // Start the next track early when crossfade/gapless is on.
+        maybeArmTransition()
+
         // Safety net for the rare case scheduleSegment's completion doesn't fire.
         checkEndOfTrack()
 
@@ -571,6 +679,9 @@ class MusicManager: NSObject, ObservableObject {
     /// requested time.
     func endSeek(to time: TimeInterval) {
         isSeeking = false
+        // Scrubbing away from the end cancels a transition that was arming;
+        // scrubbing back toward it will simply re-arm on the next tick.
+        cancelPendingTransition()
         let t = max(0, min(time, duration))
         seekPreviewTime = t
         // Snapshot main-thread state before hopping onto the player queue.
@@ -996,6 +1107,11 @@ class MusicManager: NSObject, ObservableObject {
         preampDB = UserDefaults.standard.object(forKey: "asmusic_preamp") as? Float ?? 0.0
         spatialEnhance = UserDefaults.standard.bool(forKey: "asmusic_spatial")
         stopAtSongEnd = UserDefaults.standard.bool(forKey: "asmusic_stopend")
+        if let t = UserDefaults.standard.string(forKey: "asmusic_transition"),
+           let m = TransitionMode(rawValue: t) { transitionMode = m }
+        if let s = UserDefaults.standard.object(forKey: "asmusic_xfade_secs") as? Double {
+            crossfadeSeconds = max(1.5, min(12, s))
+        }
         if let lastIdStr = UserDefaults.standard.string(forKey: "asmusic_last_song"),
            let lastId = UUID(uuidString: lastIdStr) {
             lastSongId = lastId
@@ -1104,6 +1220,108 @@ class MusicManager: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Importing your own files
+
+    /// Copies audio files chosen in the Files app (or opened from AirDrop /
+    /// another app) into the Library.
+    ///
+    /// Everything a downloaded song gets, an imported one gets too: a stable
+    /// id, metadata read from its own tags, artwork/genre enrichment, acoustic
+    /// analysis and a smart-playlist refresh. Returns (imported, skipped).
+    @discardableResult
+    func importAudioFiles(from urls: [URL]) -> (imported: Int, skipped: Int) {
+        var imported = 0
+        var skipped = 0
+        let exts = Set(["mp3","m4a","wav","webm","mp4","aac","ogg","opus","flac","aiff","aif","caf"])
+
+        for src in urls {
+            let ext = src.pathExtension.lowercased()
+            guard exts.contains(ext) else { skipped += 1; continue }
+
+            // Security-scoped access is required for files picked outside the
+            // sandbox; harmless (and false) for ones already inside it.
+            let scoped = src.startAccessingSecurityScopedResource()
+            defer { if scoped { src.stopAccessingSecurityScopedResource() } }
+
+            // Prefer the embedded tags over the file name for the final name.
+            let asset = AVURLAsset(url: src)
+            var tagTitle = ""
+            var tagArtist = ""
+            for meta in asset.commonMetadata {
+                guard let key = meta.commonKey?.rawValue, let value = meta.stringValue else { continue }
+                if key == "title", tagTitle.isEmpty { tagTitle = value }
+                if key == "artist", tagArtist.isEmpty { tagArtist = value }
+            }
+            let rawName = src.deletingPathExtension().lastPathComponent
+            let cleaned = TitleCleaner.clean(tagTitle.isEmpty ? rawName : tagTitle,
+                                             artistHint: tagArtist.isEmpty ? nil : tagArtist)
+            let title = cleaned.0
+            let artist = tagArtist.isEmpty ? cleaned.1 : tagArtist
+            let base = (artist.isEmpty || artist == "AS Music") ? title : "\(artist) - \(title)"
+            var fileName = Self.safeFileName(base)
+            if fileName.isEmpty { fileName = Self.safeFileName(rawName) }
+            if fileName.isEmpty { fileName = "Imported \(Int(Date().timeIntervalSince1970))" }
+
+            // Never clobber an existing file: add " 2", " 3", …
+            var dest = documentsDirectory.appendingPathComponent("\(fileName).\(ext)")
+            var n = 2
+            while fileManager.fileExists(atPath: dest.path) {
+                // Same name AND same size = the user already has this file.
+                let existing = (try? fileManager.attributesOfItem(atPath: dest.path)[.size] as? Int64) ?? 0
+                let incoming = (try? fileManager.attributesOfItem(atPath: src.path)[.size] as? Int64) ?? -1
+                if existing == incoming, incoming > 0 { break }
+                dest = documentsDirectory.appendingPathComponent("\(fileName) \(n).\(ext)")
+                n += 1
+                if n > 50 { break }
+            }
+            if fileManager.fileExists(atPath: dest.path) { skipped += 1; continue }
+
+            do {
+                try fileManager.copyItem(at: src, to: dest)
+            } catch {
+                skipped += 1
+                continue
+            }
+
+            registerDownloadedSong(title: title.isEmpty ? rawName : title,
+                                   artist: artist.isEmpty ? "AS Music" : artist,
+                                   url: dest,
+                                   sourceVid: nil,
+                                   artworkURL: nil)
+            imported += 1
+        }
+
+        if imported > 0 {
+            loadSongs()
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                AudioLab.shared.prime(self.songs)
+                ITunesEnricher.shared.enrichLibrary()
+            }
+        }
+        return (imported, skipped)
+    }
+
+    /// Sets a song's genre (used by the identifier and the enricher).
+    func setGenre(songID: UUID, genre: String) {
+        let clean = genre.trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty, let i = songs.firstIndex(where: { $0.id == songID }) else { return }
+        guard songs[i].genre != clean else { return }
+        songs[i].genre = clean
+        saveSongMeta()
+    }
+
+    /// Sets a song's artwork URL and drops the stale cached thumbnail so the
+    /// new cover is fetched on next display.
+    func setArtworkURL(songID: UUID, url: String) {
+        let clean = url.trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty, let i = songs.firstIndex(where: { $0.id == songID }) else { return }
+        guard songs[i].artworkURL != clean else { return }
+        songs[i].artworkURL = clean
+        try? fileManager.removeItem(at: artworkCacheDir.appendingPathComponent("\(songID.uuidString).jpg"))
+        saveSongMeta()
+    }
+
     // MARK: - Queue
 
     func playNext(_ song: Song) {
@@ -1190,7 +1408,296 @@ class MusicManager: NSObject, ObservableObject {
         pendingStopAtEnd = false
     }
 
+    // MARK: - Transitions (gapless / crossfade / auto-DJ)
+
+    /// The song that will play after the current one, without consuming the
+    /// queue — needed to pre-load the next deck before the current track ends.
+    private func peekNextSong() -> Song? {
+        if let first = upNextQueue.first { return first }
+        if repeatMode == .one { return nil }             // handled by re-scheduling
+        if smartRadioMode, let cur = currentSong {
+            return SmartRadio.nextTrack(after: cur, recent: recentlyPlayedIDs())
+        }
+        if isShuffle {
+            let recent = recentlyPlayedIDs()
+            let pool = songs.filter {
+                $0.id != currentSong?.id && !ListenHistory.shared.isDisliked($0) && !recent.contains($0.id)
+            }
+            return (pool.isEmpty ? songs.filter { $0.id != currentSong?.id } : pool).randomElement()
+        }
+        guard let c = currentSong, let i = songs.firstIndex(of: c) else { return songs.first }
+        if i + 1 < songs.count { return songs[i + 1] }
+        if repeatMode == .all { return songs.first }
+        return nil
+    }
+
+    /// How long the blend into `next` should last, in seconds.
+    ///
+    /// Auto-DJ reads the measured features of both tracks: two steady, similar
+    /// beat-driven songs can take a long overlap, while anything quiet, spoken
+    /// or very different gets a short one (a long blend into a recitation or a
+    /// ballad sounds like a mistake, not a mix).
+    private func transitionLength(from: Song?, to next: Song) -> Double {
+        let base = max(1.5, min(12, crossfadeSeconds))
+        guard transitionMode == .autoDJ else { return base }
+        guard let a = from.flatMap({ AudioLab.shared.features(for: $0) }),
+              let b = AudioLab.shared.features(for: next) else { return min(base, 3) }
+
+        // Both need a real, similar beat for a long blend to work.
+        let beatish = min(a.beatStrength, b.beatStrength)
+        let tempoGap = abs(a.tempo - b.tempo)
+        let energyGap = abs(a.energy - b.energy)
+
+        var secs = base
+        if beatish < 0.25 { secs = min(secs, 2.5) }        // rubato / spoken
+        if tempoGap > 24 { secs = min(secs, 3.0) }         // very different pace
+        if energyGap > 0.35 { secs = min(secs, 3.0) }      // loud -> quiet
+        if b.looksInstrumental && a.vocalForward { secs = min(secs, 3.5) }
+        if beatish > 0.45 && tempoGap < 8 && energyGap < 0.18 {
+            secs = min(12, max(secs, base * 1.5))          // a genuine DJ blend
+        }
+        return max(1.5, secs)
+    }
+
+    /// Called from the display tick: starts the next track early enough to
+    /// overlap, or exactly at the end for gapless.
+    private func maybeArmTransition() {
+        guard transitionMode != .off, !transitionArmed, isPlaying, !isSeeking else { return }
+        guard repeatMode != .one else { return }
+        guard duration > 3 else { return }
+
+        // Where the audio really ends (a rip often has dead air at the tail).
+        let tail = currentSong.flatMap { AudioLab.shared.features(for: $0)?.tailSilence } ?? 0
+        let audioEnd = max(1, duration - min(tail, max(0, duration - 2)))
+
+        guard let next = peekNextSong() else { return }
+        let blend = transitionMode.blends ? transitionLength(from: currentSong, to: next) : 0
+        // Gapless still needs a moment of lead time to open the file.
+        let lead = transitionMode.blends ? blend : 0.35
+        guard currentTime >= audioEnd - lead else { return }
+
+        transitionArmed = true
+        pendingNextSong = next
+        if transitionMode.blends {
+            startCrossfade(to: next, over: blend)
+        } else {
+            startGapless(to: next)
+        }
+    }
+
+    private func cancelPendingTransition() {
+        transitionArmed = false
+        pendingNextSong = nil
+        fadeLink?.invalidate()
+        fadeLink = nil
+        if isCrossfading { isCrossfading = false }
+        // Restore deck volumes so nothing is left half-faded.
+        playerNodes.indices.forEach { playerNodes[$0].volume = ($0 == activeDeck) ? 1.0 : 0.0 }
+    }
+
+    /// Gapless: hand over to the next track with no blend and no silence.
+    private func startGapless(to next: Song) {
+        beginTrack(next, onDeck: idleDeck, fadeIn: false) { [weak self] ok in
+            guard let self = self else { return }
+            guard ok else { self.transitionArmed = false; self.pendingNextSong = nil; return }
+            self.completeHandover(to: next)
+        }
+    }
+
+    /// Crossfade: bring the next track up on the idle deck while this one
+    /// fades down, then hand over.
+    private func startCrossfade(to next: Song, over seconds: Double) {
+        beginTrack(next, onDeck: idleDeck, fadeIn: true) { [weak self] ok in
+            guard let self = self else { return }
+            guard ok else { self.transitionArmed = false; self.pendingNextSong = nil; return }
+            self.runFade(seconds: seconds, next: next)
+        }
+    }
+
+    /// Ramps the two decks past each other with an equal-power curve, then
+    /// completes the handover.
+    private func runFade(seconds: Double, next: Song) {
+        let outgoing = activeDeck
+        let incoming = idleDeck
+        let start = CACurrentMediaTime()
+        let dur = max(0.4, seconds)
+
+        isCrossfading = true
+        fadeLink?.invalidate()
+        let link = CADisplayLink(target: DisplayLinkProxy { [weak self] in
+            guard let self = self else { return }
+            let t = min(1.0, (CACurrentMediaTime() - start) / dur)
+            // Equal-power (constant loudness) crossfade — a linear ramp dips
+            // audibly in the middle.
+            let outVol = Float(cos(t * Double.pi / 2))
+            let inVol = Float(sin(t * Double.pi / 2))
+            if self.playerNodes.indices.contains(outgoing) { self.playerNodes[outgoing].volume = outVol }
+            if self.playerNodes.indices.contains(incoming) { self.playerNodes[incoming].volume = inVol }
+            if t >= 1.0 {
+                self.fadeLink?.invalidate()
+                self.fadeLink = nil
+                self.isCrossfading = false
+                self.completeHandover(to: next)
+            }
+        }, selector: #selector(DisplayLinkProxy.tick))
+        link.preferredFramesPerSecond = 30
+        link.add(to: .main, forMode: .common)
+        fadeLink = link
+    }
+
+    /// Opens `song` on `deck` and starts it. `completion(false)` when the file
+    /// could not be read, so the caller can fall back to the normal path.
+    private func beginTrack(_ song: Song, onDeck deck: Int, fadeIn: Bool,
+                            completion: @escaping (Bool) -> Void) {
+        playerQueue.async { [weak self] in
+            guard let self = self, self.playerNodes.indices.contains(deck) else {
+                DispatchQueue.main.async { completion(false) }; return
+            }
+            do {
+                let file = try AVAudioFile(forReading: song.url)
+                let node = self.playerNodes[deck]
+                node.stop()
+                let lead = VocalStudio.shared.leadOffset(for: song)
+                let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : 44100
+                let startFrame = max(0, min(AVAudioFramePosition(lead * sr), max(0, file.length - 1)))
+                let frames = AVAudioFrameCount(max(0, file.length - startFrame))
+                guard frames > 0 else { DispatchQueue.main.async { completion(false) }; return }
+
+                // The incoming deck is silent until the fade moves it.
+                node.volume = fadeIn ? 0.0 : 1.0
+
+                // This deck is about to become the active one, so it needs the
+                // same end-of-track callback the normal path installs — without
+                // it the app would play this song and then simply stop.
+                // Bumping the generation also retires the OUTGOING deck's
+                // handler, which is what we want: the transition, not that
+                // handler, is what advances the queue now.
+                self.scheduleGeneration &+= 1
+                let gen = self.scheduleGeneration
+                let endFrame = startFrame + AVAudioFramePosition(frames)
+                node.scheduleSegment(file, startingFrame: startFrame, frameCount: frames, at: nil) { [weak self] in
+                    guard let self = self else { return }
+                    self.playerQueue.async {
+                        if self.scheduleGeneration != gen { return }
+                        self.isScheduled = false
+                        if self.isPlaying && endFrame >= file.length - 1 {
+                            DispatchQueue.main.async { self.songFinished() }
+                        }
+                    }
+                }
+                self.pendingScheduledEnd = endFrame
+                self.ensureEngineRunning()
+                node.rate = self.playbackRate
+                node.play()
+
+                // Stash what the new deck is playing; completeHandover promotes it.
+                self.incomingFile = file
+                self.incomingLead = lead
+                DispatchQueue.main.async { completion(true) }
+            } catch {
+                DispatchQueue.main.async { completion(false) }
+            }
+        }
+    }
+
+    /// Promotes the incoming deck to be the active one and updates all the
+    /// published state as if `playSong` had run.
+    private func completeHandover(to song: Song) {
+        let newDeck = idleDeck
+        // Stop the old deck and make the new one authoritative.
+        let oldDeck = activeDeck
+        playerQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.playerNodes.indices.contains(oldDeck) {
+                self.playerNodes[oldDeck].stop()
+                self.playerNodes[oldDeck].volume = 0.0
+            }
+            guard let file = self.incomingFile else { return }
+            // The incoming deck has already been audible for the length of the
+            // blend, so report where it really is rather than its start.
+            var elapsed = self.incomingLead
+            if self.playerNodes.indices.contains(newDeck) {
+                let n = self.playerNodes[newDeck]
+                if let lrt = n.lastRenderTime, let pt = n.playerTime(forNodeTime: lrt) {
+                    let sr = file.processingFormat.sampleRate > 0 ? file.processingFormat.sampleRate : 44100
+                    let rate = Double(self.playbackRate > 0 ? self.playbackRate : 1.0)
+                    elapsed += (Double(pt.sampleTime) / rate) / sr
+                }
+            }
+            self.audioFile = file
+            self.fileLength = file.length
+            self.fileSampleRate = file.processingFormat.sampleRate
+            self.seekFrame = AVAudioFramePosition(self.incomingLead * self.fileSampleRate)
+            self.scheduledSegmentEnd = self.pendingScheduledEnd
+            self.isScheduled = true
+            self.activeDeck = newDeck
+            if self.playerNodes.indices.contains(newDeck) { self.playerNodes[newDeck].volume = 1.0 }
+            self.incomingFile = nil
+
+            let startedAt = elapsed
+            DispatchQueue.main.async {
+                // Book the OUTGOING track first, while currentTime still refers
+                // to it — otherwise its listening time is credited from the new
+                // track's clock and every crossfade logs a bogus skip.
+                self.closeOutCurrentPlay()
+                self.pushHistory(song)
+                if let i = self.upNextQueue.firstIndex(where: { $0.id == song.id }) {
+                    self.upNextQueue.remove(at: i)
+                }
+                self.duration = Double(self.fileLength) / self.fileSampleRate
+                self.currentTime = startedAt
+                self.currentSong = song
+                self.isPlaying = true
+                self.lastSongId = song.id
+                self.lastSongTime = 0
+                ListenHistory.shared.recordPlay(song)
+                // The blend already counts as listening time for the new track.
+                self.playbackWatch = (song: song, startedAt: Date(), startOffset: self.incomingLead)
+                VocalStudio.shared.applyTuning(for: song)
+                self.applyEQ(); self.applyGain()
+                self.transitionArmed = false
+                self.pendingNextSong = nil
+                self.updateDisplayLinkState()
+                self.updateNowPlayingInfo()
+                SpokenFeedback.shared.announceNowPlaying(song)
+                self.didAutoSearchForRadio = false
+            }
+        }
+    }
+
+    /// Books the outgoing track's listening time before a new one starts.
+    ///
+    /// This is what turns "started playing" into an honest signal: the amount
+    /// actually heard decides whether the smart engines see a play or a skip.
+    /// Safe to call repeatedly — the watch is cleared once consumed.
+    private func closeOutCurrentPlay() {
+        guard let watch = playbackWatch else { return }
+        playbackWatch = nil
+        // Elapsed wall-clock is wrong when the user paused or scrubbed, so use
+        // the transport position we were already tracking, which follows both.
+        let heard = max(0, currentTime - watch.startOffset)
+        let dur = duration > 1 ? duration : watch.song.id == currentSong?.id ? duration : 0
+        ListenHistory.shared.recordFinish(watch.song, playedSeconds: heard, duration: dur)
+    }
+
+    /// Remembers where we've been so `playPrevious()` can retrace it.
+    private func pushHistory(_ song: Song) {
+        if suppressHistoryPush { suppressHistoryPush = false; return }
+        if playHistory.last == song.id { return }
+        playHistory.append(song.id)
+        if playHistory.count > 100 { playHistory.removeFirst(playHistory.count - 100) }
+    }
+
     func playSong(_ song: Song) {
+        // Book the outgoing track's listening time BEFORE anything changes,
+        // and abandon any transition that was mid-flight (the user just chose
+        // something else — a fade into the "next" track would be wrong now).
+        onMain { [weak self] in
+            guard let self = self else { return }
+            self.cancelPendingTransition()
+            self.closeOutCurrentPlay()
+            self.pushHistory(song)
+        }
         // Always run on playerQueue to serialize with seeks/rate changes.
         playerQueue.async { [weak self] in
             guard let self = self else { return }
@@ -1202,9 +1709,15 @@ class MusicManager: NSObject, ObservableObject {
                 try AVAudioSession.sharedInstance().setActive(true)
                 DispatchQueue.main.async { UIApplication.shared.beginReceivingRemoteControlEvents() }
 
-                self.playerNode.stop()
+                // Stop BOTH decks: a crossfade may have left the other one
+                // rendering, and leaving it running would play two songs.
+                for (i, node) in self.playerNodes.enumerated() {
+                    node.stop()
+                    node.volume = (i == self.activeDeck) ? 1.0 : 0.0
+                }
                 self.isScheduled = false
                 self.audioFile = nil
+                self.incomingFile = nil
                 self.seekFrame = 0
 
                 let file = try AVAudioFile(forReading: song.url)
@@ -1226,6 +1739,9 @@ class MusicManager: NSObject, ObservableObject {
                     self.lastSongId = song.id
                     self.lastSongTime = 0
                     ListenHistory.shared.recordPlay(song)
+                    // Start the completion watch for THIS track (lead is the
+                    // dead-air offset we skipped, so it isn't counted as heard).
+                    self.playbackWatch = (song: song, startedAt: Date(), startOffset: lead)
                     self.updateDisplayLinkState()
                     self.updateNowPlayingInfo()
                     SpokenFeedback.shared.announceNowPlaying(song)
@@ -1255,8 +1771,11 @@ class MusicManager: NSObject, ObservableObject {
     }
 
     func pausePlayback() {
+        // A fade in progress must not keep ramping a deck we just paused.
+        onMain { [weak self] in self?.cancelPendingTransition() }
         playerQueue.async { [weak self] in
             guard let self = self else { return }
+            for node in self.playerNodes where node !== self.playerNode { node.stop() }
             self.playerNode.pause()
             DispatchQueue.main.async {
                 self.isPlaying = false
@@ -1269,6 +1788,10 @@ class MusicManager: NSObject, ObservableObject {
 
     @objc func songFinished() {
         DispatchQueue.main.async {
+            // A crossfade/gapless handover already started the next track —
+            // the old track's completion must not ALSO advance the queue, or
+            // the app would skip a song on every transition.
+            if self.transitionArmed || self.isCrossfading { return }
             // Sleep timer with "stop at song end" — rest after this track.
             if self.pendingStopAtEnd {
                 self.pendingStopAtEnd = false
@@ -1353,18 +1876,25 @@ class MusicManager: NSObject, ObservableObject {
             let next = upNextQueue.removeFirst()
             playSong(next); return
         }
+        // Smart Radio: pick the song that genuinely sounds closest to what is
+        // playing (acoustic feature space + harmonic distance), not a random
+        // one. Shuffle stays random by design, but both now avoid songs you
+        // keep skipping and songs you just heard.
+        if smartRadioMode, let cur = currentSong,
+           let next = SmartRadio.nextTrack(after: cur, recent: recentlyPlayedIDs()) {
+            playSong(next); return
+        }
         if isShuffle || smartRadioMode {
-            let others = songs.filter { $0.id != currentSong?.id }
-            let candidates: [Song] = {
-                guard let cur = currentSong else { return others }
-                let words = cur.artist.split(separator: " ").filter { $0.count >= 3 }.map(String.init)
-                    + cur.title.split(separator: " ").filter { $0.count >= 3 }.map(String.init)
-                let different = others.filter { s in
-                    !words.contains(where: { s.title.localizedCaseInsensitiveContains($0) || s.artist.localizedCaseInsensitiveContains($0) })
-                }
-                return different.isEmpty ? others : different
-            }()
-            if let s = candidates.randomElement() ?? songs.randomElement() { playSong(s); return }
+            let recent = recentlyPlayedIDs()
+            let others = songs.filter {
+                $0.id != currentSong?.id
+                    && !ListenHistory.shared.isDisliked($0)
+                    && !recent.contains($0.id)
+            }
+            let pool = others.isEmpty
+                ? songs.filter { $0.id != currentSong?.id && !ListenHistory.shared.isDisliked($0) }
+                : others
+            if let s = pool.randomElement() ?? songs.randomElement() { playSong(s); return }
         }
         guard let c = currentSong, let i = songs.firstIndex(of: c) else {
             if let first = songs.first { playSong(first) }
@@ -1377,6 +1907,12 @@ class MusicManager: NSObject, ObservableObject {
             saveResumePosition()
             updateDisplayLinkState()
         }
+    }
+
+    /// The last handful of songs played, so radio and shuffle don't loop back
+    /// onto something you just heard.
+    func recentlyPlayedIDs(_ limit: Int = 12) -> Set<UUID> {
+        Set(playHistory.suffix(limit))
     }
 
     /// Fires the Smart Radio "find more like this" search exactly once per track.
@@ -1445,9 +1981,27 @@ class MusicManager: NSObject, ObservableObject {
         playSong(s)
     }
 
+    /// Back button. Restarts the track if you're more than 3 s in (the
+    /// universal convention), otherwise retraces the songs you actually
+    /// played — including through shuffle and Smart Radio, where walking the
+    /// library array used to send you somewhere you'd never been.
     func playPrevious() {
         if currentTime > 3 { seek(to: 0); return }
         guard !songs.isEmpty else { return }
+
+        // Drop the current track off the history, then take the one before it.
+        if playHistory.count >= 2 {
+            playHistory.removeLast()
+            let prevID = playHistory.removeLast()
+            if let s = songs.first(where: { $0.id == prevID }) {
+                suppressHistoryPush = true
+                playHistory.append(prevID)
+                playSong(s)
+                return
+            }
+        }
+
+        // Nothing in history (fresh launch): fall back to library order.
         if isShuffle { if let s = songs.randomElement() { playSong(s) }; return }
         if let c = currentSong, let i = songs.firstIndex(of: c), i > 0 { playSong(songs[i-1]) }
         else if repeatMode == .all, let last = songs.last { playSong(last) }

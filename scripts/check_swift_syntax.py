@@ -481,6 +481,15 @@ def check_file(path: pathlib.Path):
         s = ln.strip()
         if not s or s.startswith("//"):
             continue
+        # Conditional-compilation directives are not "code": a header block of
+        #     #if canImport(ShazamKit)
+        #     import ShazamKit
+        #     #endif
+        # is the correct way to import a framework that may be unavailable, and
+        # it must not be reported as "import after code". Anything that is real
+        # code still flips the flag, so a genuine late import is still caught.
+        if s.startswith(("#if", "#else", "#elseif", "#endif")):
+            continue
         if s.startswith("import "):
             if seen_code:
                 problems.append("import after code — move it to the top of the file")

@@ -6,6 +6,7 @@ import WebKit
 import os.log
 import Combine
 import CryptoKit
+import Network
 
 // ---------------------------------------------------------------------------
 // MARK: - Logging
@@ -176,10 +177,18 @@ class DownloadTask: ObservableObject, Identifiable {
         activeChunkedDownloader = nil
         for t in inFlightDataTasks.allObjects { t.cancel() }
         for t in inFlightDownloadTasks.allObjects { t.cancel() }
-        for t in pollTimers { t.invalidate() }
-        pollTimers.removeAll()
+        invalidatePollTimers()
         inFlightDataTasks.removeAllObjects()
         inFlightDownloadTasks.removeAllObjects()
+    }
+
+    /// Stops this task's own polling timers. Each task owns its timers now
+    /// (they used to share one property on DownloadCenter, which made running
+    /// two downloads at once impossible — the second would kill the first's
+    /// poll loop).
+    func invalidatePollTimers() {
+        for t in pollTimers { t.invalidate() }
+        pollTimers.removeAll()
     }
 }
 
@@ -398,6 +407,36 @@ class ChunkedDownloader: NSObject {
 // ---------------------------------------------------------------------------
 // MARK: - Shared Download Center
 // ---------------------------------------------------------------------------
+/// Minimal "are we on Wi-Fi?" check using NWPathMonitor, started once.
+/// Deliberately tiny: the app only needs it to honour the Wi-Fi-only toggle.
+enum NetworkReach {
+    private static let monitor: NWPathMonitor = {
+        let m = NWPathMonitor()
+        m.pathUpdateHandler = { path in
+            state.lock.lock()
+            state.onWiFi = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
+            state.expensive = path.isExpensive
+            state.lock.unlock()
+        }
+        m.start(queue: DispatchQueue(label: "asMusic.net"))
+        return m
+    }()
+
+    private final class State {
+        let lock = NSLock()
+        var onWiFi = true          // assume yes until the first update lands
+        var expensive = false
+    }
+    private static let state = State()
+
+    /// True on Wi-Fi/Ethernet, or when the path is not a metered connection.
+    static var isOnWiFi: Bool {
+        _ = monitor                 // ensure the monitor is running
+        state.lock.lock(); defer { state.lock.unlock() }
+        return state.onWiFi || !state.expensive
+    }
+}
+
 class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
     static let shared = DownloadCenter()
 
@@ -406,21 +445,74 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
     @Published var toastMessage: String? = nil
 
     private var session: URLSession!
-    private var activeTask: DownloadTask?
+    /// Tasks currently occupying a download slot (Pack 6: more than one).
+    private var activeTaskIDs = Set<UUID>()
     private var activeURLTask: URLSessionDownloadTask?
-    private var pollTimer: Timer?
+
+    /// How many downloads may run at once. One at a time used to mean ten
+    /// queued songs were ten serial waits; 2–3 saturates a phone connection
+    /// without starving the racing logic.
+    @Published var maxConcurrent: Int = {
+        let v = UserDefaults.standard.integer(forKey: "asmusic_dl_concurrency")
+        return v >= 1 && v <= 5 ? v : 2
+    }() {
+        didSet {
+            UserDefaults.standard.set(maxConcurrent, forKey: "asmusic_dl_concurrency")
+            DispatchQueue.main.async { self.startNext() }
+        }
+    }
+
+    /// Only download when on Wi-Fi (off by default — this app is often used on
+    /// mobile data deliberately).
+    @Published var wifiOnly: Bool = UserDefaults.standard.bool(forKey: "asmusic_dl_wifionly") {
+        didSet { UserDefaults.standard.set(wifiOnly, forKey: "asmusic_dl_wifionly") }
+    }
+
+    /// Set by the AppDelegate when iOS wakes the app to report that background
+    /// transfers finished; called once the session drains its events.
+    var backgroundCompletionHandler: (() -> Void)?
+
+    /// Identifier for the background session. Must be stable across launches
+    /// so iOS can reattach in-flight transfers after a relaunch.
+    static let backgroundSessionID = "com.ahmedsoliman.trollmusicapp.downloads"
 
     override private init() {
         super.init()
-        let config = URLSessionConfiguration.default
+        // A BACKGROUND configuration is what lets a download keep going once
+        // the user leaves the app (the old `.default` session was suspended,
+        // so a long mix simply stopped in your pocket). Only download tasks
+        // are allowed on it — which is exactly what this session is used for.
+        let config = URLSessionConfiguration.background(withIdentifier: Self.backgroundSessionID)
         config.timeoutIntervalForRequest = 300      // 5 minutes between bytes (for slow mobile)
         config.timeoutIntervalForResource = 7200    // 2 hours for long mixes
         config.httpMaximumConnectionsPerHost = 8
-        config.httpShouldUsePipelining = true
         config.shouldUseExtendedBackgroundIdleMode = true
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.urlCache = nil
+        config.sessionSendsLaunchEvents = true
+        config.isDiscretionary = false              // the user asked for this now
+        config.allowsCellularAccess = true          // gated by `wifiOnly` instead
         session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }
+
+    /// Keeps the app alive briefly while a resolve/convert phase finishes, so
+    /// handing off to the background session isn't cut short by suspension.
+    private var bgAssertion: UIBackgroundTaskIdentifier = .invalid
+    private let bgLock = NSLock()
+
+    func beginBackgroundAssertion() {
+        bgLock.lock(); defer { bgLock.unlock() }
+        guard bgAssertion == .invalid else { return }
+        bgAssertion = UIApplication.shared.beginBackgroundTask(withName: "asmusic.download") { [weak self] in
+            self?.endBackgroundAssertion()
+        }
+    }
+
+    func endBackgroundAssertion() {
+        bgLock.lock(); defer { bgLock.unlock() }
+        guard bgAssertion != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(bgAssertion)
+        bgAssertion = .invalid
     }
 
     static let mobileUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -479,24 +571,19 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
         if skipped > 0 {
             DispatchQueue.main.async { self.flashMessage("\(skipped) song(s) already in Library — skipped") }
         }
-        DispatchQueue.main.async { if self.activeTask == nil { self.startNext() } }
+        DispatchQueue.main.async { self.startNext() }
     }
 
     /// Cancel a download (whether queued, converting, or downloading).
     func cancel(_ task: DownloadTask) {
-        let wasActive = (activeTask?.id == task.id)
+        let wasActive = activeTaskIDs.contains(task.id)
         task.cancelAllRequests()
         DispatchQueue.main.async {
             self.objectWillChange.send()
             task.status = .cancelled
             task.backendLabel = ""
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
-            if wasActive {
-                self.activeTask = nil
-                self.activeURLTask = nil
-                self.pollTimer?.invalidate(); self.pollTimer = nil
-                self.startNext()
-            }
+            if wasActive { self.releaseSlot(task) }
         }
     }
 
@@ -515,7 +602,7 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
             self.objectWillChange.send()
             self.tasks.insert(task, at: 0)
             self.showBanner = true
-            if self.activeTask == nil { self.startNext() }
+            self.startNext()
         }
     }
 
@@ -528,16 +615,14 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
             task.isCancelled = false
             task.raceCancelled = false
             task.backendLabel = ""
-            if self.activeTask == nil { self.startNext() }
-            else if self.activeTask?.id == task.id {
-                self.activeTask = nil; self.pollTimer?.invalidate(); self.pollTimer = nil
-                self.startNext()
-            }
+            // Free the slot if this task was holding one, then refill.
+            if self.activeTaskIDs.contains(task.id) { self.releaseSlot(task) }
+            else { self.startNext() }
         }
     }
     func remove(_ task: DownloadTask) {
         // If active, cancel first
-        if activeTask?.id == task.id { cancel(task) }
+        if activeTaskIDs.contains(task.id) { cancel(task) }
         else { task.cancelAllRequests() }
         DispatchQueue.main.async {
             self.objectWillChange.send()
@@ -560,11 +645,38 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
     }
 
     // ---- Queue driver ----------------------------------------------------
+    /// Fills every free download slot. Called whenever a task is added,
+    /// finishes, fails or is cancelled — it is safe to call at any time and
+    /// simply returns when the slots are full.
     private func startNext() {
-        guard let next = tasks.first(where: {
-            if case .queued = $0.status { return true }; return false
-        }) else { activeTask = nil; pollTimer?.invalidate(); pollTimer = nil; return }
-        activeTask = next
+        // Wi-Fi-only: hold the queue rather than spending the user's data.
+        if wifiOnly, !NetworkReach.isOnWiFi {
+            let waiting = tasks.contains { if case .queued = $0.status { return true }; return false }
+            if waiting, activeTaskIDs.isEmpty {
+                flashMessage("Waiting for Wi-Fi — turn off “Wi-Fi only” in Download engines to use mobile data")
+            }
+            return
+        }
+        while activeTaskIDs.count < max(1, maxConcurrent) {
+            guard let next = tasks.first(where: {
+                if case .queued = $0.status, !activeTaskIDs.contains($0.id) { return true }
+                return false
+            }) else { break }
+            activeTaskIDs.insert(next.id)
+            launch(next)
+        }
+        if activeTaskIDs.isEmpty { endBackgroundAssertion() }
+    }
+
+    /// Releases a task's slot and pulls the next queued item in.
+    private func releaseSlot(_ task: DownloadTask) {
+        activeTaskIDs.remove(task.id)
+        task.invalidatePollTimers()
+        startNext()
+    }
+
+    private func launch(_ next: DownloadTask) {
+        beginBackgroundAssertion()
         next.isCancelled = false
         next.raceCancelled = false
         next.inFlightDataTasks.removeAllObjects()
@@ -993,9 +1105,7 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
             task.status = .done
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             MusicManager.shared.loadSongs()
-            self.activeTask = nil
-            self.pollTimer?.invalidate(); self.pollTimer = nil
-            self.startNext()
+            self.releaseSlot(task)
         }
     }
     /// Task ids that already consumed their one SoundCloud fallback attempt.
@@ -1051,8 +1161,8 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
                 task.fileName = ""
                 task.backendLabel = ""
                 task.raceCancelled = false
-                self.pollTimer?.invalidate(); self.pollTimer = nil
-                if self.activeTask?.id == task.id { self.activeTask = nil }
+                task.invalidatePollTimers()
+                self.activeTaskIDs.remove(task.id)
                 DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
                     DispatchQueue.main.async { self.startNext() }
                 }
@@ -1064,9 +1174,7 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
         DispatchQueue.main.async {
             task.status = .failed(message)
             log.error("Download failed: \(message, privacy: .public)")
-            self.activeTask = nil
-            self.pollTimer?.invalidate(); self.pollTimer = nil
-            self.startNext()
+            self.releaseSlot(task)
         }
     }
 
@@ -1143,11 +1251,11 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
     }
 
     private func workerPoll(task: DownloadTask, progURL: String, ticks: Int) {
-        pollTimer?.invalidate()
+        task.invalidatePollTimers()
         // 1.5s * 300 = 7.5 min max — enough for 2hr+ MP3 encodes on theta workers
         let maxTicks = 300
         var tickCount = ticks
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] t in
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] t in
             guard let self = self else { t.invalidate(); return }
             if task.isCancelled { t.invalidate(); return }
             tickCount += 1
@@ -1157,7 +1265,7 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
                 if task.isCancelled { t.invalidate(); return }
                 guard case let .success(d) = result else { return }
                 if let e = d["error"] as? Int, e != 0 {
-                    t.invalidate(); self.pollTimer = nil
+                    t.invalidate()
                     self.startY2jar(task: task); return
                 }
                 let status = d["status"] as? String ?? ""
@@ -1167,7 +1275,7 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
                 else { displayProg = 0.2 + min(0.3, Double(tickCount)/100.0) }
                 DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(displayProg) }
                 if status == "download", let dl = d["downloadURL"] as? String {
-                    t.invalidate(); self.pollTimer = nil
+                    t.invalidate()
                     DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
                         let decoded = self.decodeWorkerURL(dl)
                         if let du = URL(string: decoded) {
@@ -1181,13 +1289,13 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
                     return
                 }
                 if tickCount > maxTicks {
-                    t.invalidate(); self.pollTimer = nil
+                    t.invalidate()
                     self.startY2jar(task: task)
                 }
             }
         }
-        RunLoop.main.add(pollTimer!, forMode: .common)
-        task.pollTimers.append(pollTimer!)
+        RunLoop.main.add(timer, forMode: .common)
+        task.pollTimers.append(timer)
     }
 
     private func decodeWorkerURL(_ s: String) -> String {
@@ -1406,12 +1514,12 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
     }
     private func pollConvertProgress(task: DownloadTask, key: String?, progURL: String, ticks: Int) {
-        pollTimer?.invalidate()
+        task.invalidatePollTimers()
         // 2s * 300 = 10 minutes for long tracks
         let maxTicks = 300
         if ticks > maxTicks { failOrRetry(task: task, message: "Conversion timed out"); return }
         var tickCount = ticks
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] t in
+        let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] t in
             guard let self = self else { t.invalidate(); return }
             if task.isCancelled { t.invalidate(); return }
             tickCount += 1
@@ -1421,7 +1529,7 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
                 if task.isCancelled { t.invalidate(); return }
                 guard case let .success(d) = result else { return }
                 if let e = d["error"] as? Int, e != 0 {
-                    t.invalidate(); self.pollTimer = nil
+                    t.invalidate()
                     self.failOrRetry(task: task, message: "Convert error \(e)"); return
                 }
                 let status = d["status"] as? String ?? ""
@@ -1433,7 +1541,7 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
                 DispatchQueue.main.async { self.objectWillChange.send(); task.status = .converting(dp) }
                 if status == "download" || prog >= 0.99,
                    let dl = d["downloadURL"] as? String, let du = URL(string: dl) {
-                    t.invalidate(); self.pollTimer = nil
+                    t.invalidate()
                     DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) {
                         if task.isCancelled { return }
                         var name = task.proposedName
@@ -1443,13 +1551,13 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
                     return
                 }
                 if tickCount > maxTicks {
-                    t.invalidate(); self.pollTimer = nil
+                    t.invalidate()
                     self.failOrRetry(task: task, message: "Conversion timed out")
                 }
             }
         }
-        RunLoop.main.add(pollTimer!, forMode: .common)
-        task.pollTimers.append(pollTimer!)
+        RunLoop.main.add(timer, forMode: .common)
+        task.pollTimers.append(timer)
     }
 
     // ---- Generic JSON GET helper -----------------------------------------
@@ -1576,7 +1684,7 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
         activeURLTask = t
         // Bind this URLSession task to its DownloadTask so the delegate
         // callbacks can't misattribute a late response to whatever happens to
-        // be `activeTask` at the time (which used to rename files wrongly).
+        // be the current task at the time (which used to rename files wrongly).
         register(urlTask: t, for: task, finalName: finalName)
         task.inFlightDownloadTasks.add(t)
         t.resume()
@@ -1614,13 +1722,13 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
                 totalBytes: totalBytes,
                 chunkSize: chunkedChunkSize, connections: chunkedConnections,
                 onProgress: { [weak self, weak task] p in
-                    guard let self, let task, self.activeTask?.id == task.id else { return }
+                    guard let self, let task, self.activeTaskIDs.contains(task.id) else { return }
                     if task.isCancelled { return }
                     self.objectWillChange.send()
                     task.status = .downloading(p)
                 },
                 onComplete: { [weak self, weak task] result in
-                    guard let self, let task, self.activeTask?.id == task.id else { return }
+                    guard let self, let task, self.activeTaskIDs.contains(task.id) else { return }
                     if task.isCancelled { return }
                     task.activeChunkedDownloader = nil
                     switch result {
@@ -1704,7 +1812,9 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
         guard totalBytesExpectedToWrite > 0 else { return }
-        guard let task = binding(for: downloadTask)?.task ?? activeTask else { return }
+        // No `?? activeTask` fallback: with several downloads in flight that
+        // would credit one song's bytes to another. Unbound tasks are ignored.
+        guard let task = binding(for: downloadTask)?.task else { return }
         if task.isCancelled { return }
         let p = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
         DispatchQueue.main.async { self.objectWillChange.send(); task.status = .downloading(p) }
@@ -1713,10 +1823,10 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didFinishDownloadingTo location: URL) {
         // Resolve the owning DownloadTask from the URLSession task identifier —
-        // `activeTask` can already point at a different item by now.
+        // Several downloads can be in flight, so only the binding knows which.
         let bound = binding(for: downloadTask)
         defer { unbind(downloadTask) }
-        guard let task = bound?.task ?? activeTask else { return }
+        guard let task = bound?.task else { return }
         if task.isCancelled { return }
         let fm = FileManager.default
 
@@ -1780,11 +1890,20 @@ class DownloadCenter: NSObject, ObservableObject, URLSessionDownloadDelegate {
         finish(task: task)
     }
 
+    /// iOS finished delivering every background event for this session — let
+    /// the system know the app is done so it can snapshot and suspend cleanly.
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        DispatchQueue.main.async {
+            self.backgroundCompletionHandler?()
+            self.backgroundCompletionHandler = nil
+        }
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let bound = binding(for: task)
         defer { unbind(task) }
         guard let err = error else { return }
-        guard let active = bound?.task ?? activeTask else { return }
+        guard let active = bound?.task else { return }
         if active.isCancelled { return }
         if case .done = active.status { return }
         if case .cancelled = active.status { return }
