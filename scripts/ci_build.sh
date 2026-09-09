@@ -128,6 +128,19 @@ if command -v python3 >/dev/null 2>&1 && [ -f scripts/test_search_logic.py ]; th
     fi
 fi
 
+# ID3 byte layout. A wrong byte here never crashes and never fails a build --
+# the file just reads back wrong in OTHER players, where we never look.
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/test_id3_logic.py ]; then
+    echo "    ID3 tag check:"
+    if python3 scripts/test_id3_logic.py > /tmp/id3_check.log 2>&1; then
+        tail -1 /tmp/id3_check.log | sed 's/^/      /'
+    else
+        sed 's/^/      /' /tmp/id3_check.log
+        fail "The ID3 tag writer is malformed — see the failures above."
+        exit 2
+    fi
+fi
+
 # Widget bridge consistency (App Group id, URL scheme, target isolation, the
 # generated spec). These are cross-target mistakes the compiler cannot catch:
 # a mismatched App Group id compiles perfectly and produces a dead widget.

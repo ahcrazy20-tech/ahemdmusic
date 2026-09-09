@@ -39,7 +39,10 @@ UI_RE = re.compile(
     # generically -- it collides with DispatchQueue labels and AI model
     # descriptors, neither of which should ever be translated.
     r'|configurationDisplayName)'
-    r'\(\s*"([^"\\]{2,120})"'
+    # The upper bound is deliberately generous: explanatory Section footers
+    # run long, and they are exactly the text a non-English reader needs most.
+    # A 120-char cap silently exempted 24 of them from this check.
+    r'\(\s*"([^"\\]{2,400})"'
 )
 
 # Explicitly localized strings. Needed wherever the value flows through a
@@ -65,8 +68,38 @@ SKIP_PREFIXES = ("http", "asmusic_", "com.")
 
 
 def strip_comments(src):
-    src = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
-    return re.sub(r'//[^\n]*', '', src)
+    """Remove // and /* */ comments WITHOUT touching quoted text.
+
+    A blind regex also ate the '//' inside a URL that appears in a
+    translatable string ("https://my-extractor.onrender.com"), which then
+    looked like a malformed line. Walk the source and track whether we are
+    inside a double-quoted string instead.
+    """
+    out = []
+    i, n = 0, len(src)
+    in_str = False
+    while i < n:
+        c = src[i]
+        if in_str:
+            out.append(c)
+            if c == '\\' and i + 1 < n:      # keep escape pairs intact
+                out.append(src[i + 1]); i += 2; continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True; out.append(c); i += 1; continue
+        if c == '/' and i + 1 < n and src[i + 1] == '/':
+            while i < n and src[i] != '\n':
+                i += 1
+            continue
+        if c == '/' and i + 1 < n and src[i + 1] == '*':
+            end = src.find('*/', i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        out.append(c); i += 1
+    return ''.join(out)
 
 
 def load_strings(path):

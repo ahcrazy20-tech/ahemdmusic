@@ -414,6 +414,10 @@ final class AudioLab: ObservableObject {
                         self.doneCount += 1
                     }
                     self.scheduleSave()
+                    // Write what we just measured back into the file, so the
+                    // BPM and key survive a reinstall and show up in every
+                    // other player. Off by default: this rewrites the file.
+                    self.writeBackIfEnabled(job.url, f)
                 } else {
                     DispatchQueue.main.async {
                         self.lastError = "Could not read “\(job.title)”"
@@ -423,6 +427,37 @@ final class AudioLab: ObservableObject {
                 Thread.sleep(forTimeInterval: 0.12)
             }
         }
+    }
+
+    /// User setting: mirror the measured BPM/key/gain into the MP3's tag.
+    /// Default off, because it rewrites the user's file. The tag writer
+    /// itself refuses to touch anything that already carries an ID3 header.
+    static let writeBackKey = "asmusic.analysis.writeTags"
+
+    /// Copies the analysis into the file's ID3 tag when the user asked for it.
+    /// Silent no-op for non-MP3s and for already-tagged files.
+    private func writeBackIfEnabled(_ url: URL, _ f: TrackFeatures) {
+        guard UserDefaults.standard.bool(forKey: Self.writeBackKey) else { return }
+        guard url.pathExtension.lowercased() == "mp3" else { return }
+
+        var analysis = ID3TagWriter.Analysis()
+        // Only claim a tempo we actually believe in.
+        if f.tempo >= 40, f.tempo <= 220, f.beatStrength > 0.12 {
+            analysis.bpm = Int(f.tempo.rounded())
+        }
+        analysis.key = f.keyName       // "" unless keyConfidence cleared the gate
+        analysis.camelot = f.camelot
+        // ReplayGain: how far this track sits from the -14 dBFS reference we
+        // normalize to elsewhere in the app. Skip nonsense from silent files.
+        if f.loudness > -60 {
+            analysis.replayGainDB = ((-14.0 - f.loudness) * 100).rounded() / 100
+        }
+        guard !analysis.isEmpty else { return }
+
+        let title = url.deletingPathExtension().lastPathComponent
+        _ = ID3TagWriter.tagIfNeeded(at: url, title: title, artist: "",
+                                     album: "", artworkJPEG: nil,
+                                     analysis: analysis)
     }
 
     /// Debounced so a 60-song sweep writes the cache once, not 60 times.

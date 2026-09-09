@@ -968,6 +968,15 @@ struct EQView: View {
                     Label("Resume last song on launch", systemImage: "arrow.counterclockwise")
                 }
             }
+            Section(header: Text("Song File Tags"),
+                    footer: Text("After a song is analysed, write its BPM, musical key and volume level into the MP3 file itself. Other players and DJ apps can then read them, and the values survive a reinstall. Files that already have tags are never touched.")) {
+                Toggle(isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: AudioLab.writeBackKey) },
+                    set: { UserDefaults.standard.set($0, forKey: AudioLab.writeBackKey) }
+                )) {
+                    Label("Save BPM & key to files", systemImage: "tag")
+                }
+            }
             Section(header: Text("AI Music Assistant (optional)"),
                     footer: Text(ai.isConfigured
                                  ? "AI is on (\(ai.activeLabel) · \(ai.provider == .apinex ? ai.apinexModel : ai.model)). Providers, keys and models now live in the Settings tab."
